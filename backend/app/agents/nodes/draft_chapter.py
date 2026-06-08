@@ -1,0 +1,2 @@
+class DraftChapterNode:
+    pass

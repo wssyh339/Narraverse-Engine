@@ -1,0 +1,10 @@
+[project]
+name = "novel-agent-backend"
+version = "0.1.0"
+description = "Backend MVP for the long-form novel writing agent."
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
