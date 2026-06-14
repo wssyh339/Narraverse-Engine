@@ -12,11 +12,16 @@ interface OutlineDirectoryProps {
   selectedChapterId: string;
   selectedChapterIds: string[];
   selectedChapterIdsAcrossDirectory: string[];
+  selectedVolumeIds: string[];
+  selectedVolumeIdsAcrossDirectory: string[];
   allDirectorySelected: boolean;
   partialDirectorySelected: boolean;
+  allVolumeOutlinesSelected: boolean;
+  partialVolumeOutlinesSelected: boolean;
   isDeletingSelected: boolean;
   isDeletingOne: boolean;
   isDeletingVolume: boolean;
+  isDeletingSelectedVolumes: boolean;
   hasGeneratedOutline: boolean;
   handlers: OutlineDirectoryHandlers;
 }
@@ -30,15 +35,21 @@ export function OutlineDirectory({
   selectedChapterId,
   selectedChapterIds,
   selectedChapterIdsAcrossDirectory,
+  selectedVolumeIds,
+  selectedVolumeIdsAcrossDirectory,
   allDirectorySelected,
   partialDirectorySelected,
+  allVolumeOutlinesSelected,
+  partialVolumeOutlinesSelected,
   isDeletingSelected,
   isDeletingOne,
   isDeletingVolume,
+  isDeletingSelectedVolumes,
   hasGeneratedOutline,
   handlers,
 }: OutlineDirectoryProps) {
   const selectedChapterIdSet = new Set(selectedChapterIds);
+  const selectedVolumeIdSet = new Set(selectedVolumeIds);
   const chaptersByVolumeNo = new Map<number, Chapter[]>();
   chapters.forEach((chapter) => {
     const items = chaptersByVolumeNo.get(chapter.volume_no) ?? [];
@@ -57,6 +68,15 @@ export function OutlineDirectory({
         return (
           <div key={volume.id} className="outline-volume-group">
             <div className={`outline-tree-row is-volume ${batchManagementEnabled ? "is-manage" : ""}`}>
+              {batchManagementEnabled ? (
+                <Checkbox
+                  aria-label="选择卷纲"
+                  checked={selectedVolumeIdSet.has(volume.id)}
+                  disabled={Boolean(volumeChapters.length) || isDeletingSelectedVolumes || isDeletingVolume}
+                  onClick={(event) => event.stopPropagation()}
+                  onChange={(event) => handlers.toggleVolumeOutlineSelection(volume.id, event.target.checked)}
+                />
+              ) : null}
               <button
                 className={`outline-tree-item ${selectedView === "volume" && volume.id === selectedVolumeId ? "is-active" : ""}`}
                 onClick={() => {
@@ -162,24 +182,23 @@ export function OutlineDirectory({
       <div className="outline-batch-toggle">
         <Space size={8}>
           <Typography.Text strong>批量管理</Typography.Text>
-          <Typography.Text type="secondary">{batchManagementEnabled ? `已选择 ${selectedChapterIdsAcrossDirectory.length} 章` : "关闭后隐藏勾选框"}</Typography.Text>
+          <Typography.Text type="secondary">
+            {batchManagementEnabled ? `已选择 ${selectedChapterIdsAcrossDirectory.length} 章 / ${selectedVolumeIdsAcrossDirectory.length} 卷` : "关闭后隐藏勾选框"}
+          </Typography.Text>
         </Space>
         <Switch checked={batchManagementEnabled} onChange={handlers.setBatchManagementEnabled} />
       </div>
       {batchManagementEnabled ? (
         <div className="outline-directory-bulk-actions">
-          <Checkbox
-            checked={allDirectorySelected}
-            indeterminate={partialDirectorySelected}
-            disabled={!chapters.length || isDeletingSelected}
-            onChange={(event) => handlers.toggleDirectorySelection(event.target.checked)}
-          >
-            全选全部章节
-          </Checkbox>
-          <Space size={6}>
-            <Button size="small" danger icon={<Trash2 size={14} />} disabled={!hasGeneratedOutline} onClick={handlers.confirmClearOutline}>
-              删除总纲
-            </Button>
+          <div className="outline-bulk-row">
+            <Checkbox
+              checked={allDirectorySelected}
+              indeterminate={partialDirectorySelected}
+              disabled={!chapters.length || isDeletingSelected}
+              onChange={(event) => handlers.toggleDirectorySelection(event.target.checked)}
+            >
+              全选全部章节
+            </Checkbox>
             <Button
               size="small"
               danger
@@ -189,6 +208,31 @@ export function OutlineDirectory({
               onClick={handlers.confirmBatchTrashChapters}
             >
               批量删除选中
+            </Button>
+          </div>
+          <div className="outline-bulk-row">
+            <Checkbox
+              checked={allVolumeOutlinesSelected}
+              indeterminate={partialVolumeOutlinesSelected}
+              disabled={!volumes.length || isDeletingSelectedVolumes}
+              onChange={(event) => handlers.toggleAllVolumeOutlines(event.target.checked)}
+            >
+              全选可删除卷纲
+            </Checkbox>
+            <Button
+              size="small"
+              danger
+              icon={<Trash2 size={14} />}
+              disabled={!selectedVolumeIdsAcrossDirectory.length}
+              loading={isDeletingSelectedVolumes}
+              onClick={handlers.confirmBatchDeleteVolumes}
+            >
+              批量删除卷纲
+            </Button>
+          </div>
+          <Space size={6}>
+            <Button size="small" danger icon={<Trash2 size={14} />} disabled={!hasGeneratedOutline} onClick={handlers.confirmClearOutline}>
+              删除总纲
             </Button>
           </Space>
         </div>

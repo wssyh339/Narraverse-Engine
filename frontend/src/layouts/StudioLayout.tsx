@@ -3,15 +3,13 @@ import {
   ArrowLeft,
   Bot,
   Boxes,
-  FileText,
+  Eye,
   Focus,
   GitBranch,
   Home,
   ListTree,
   Moon,
-  Network,
   NotebookPen,
-  Settings,
   Star,
   Sun,
   Upload,
@@ -39,26 +37,28 @@ export function StudioLayout() {
   const storedProjectId = useStudioStore((state) => state.currentProjectId);
   const projectId = pathProjectId && pathProjectId !== "new" ? pathProjectId : storedProjectId;
   const isProjectStudio = Boolean(pathProjectId && pathProjectId !== "new");
-  const darkMode = useStudioStore((state) => state.darkMode);
+  const appearanceMode = useStudioStore((state) => state.appearanceMode);
   const focusMode = useStudioStore((state) => state.focusMode);
-  const toggleDarkMode = useStudioStore((state) => state.toggleDarkMode);
+  const cycleAppearanceMode = useStudioStore((state) => state.cycleAppearanceMode);
   const toggleFocusMode = useStudioStore((state) => state.toggleFocusMode);
   const [creationStarOpen, setCreationStarOpen] = useState(false);
   const { token } = theme.useToken();
+  const projectPath = (suffix: string) => (projectId ? `/projects/${projectId}${suffix}` : "/");
+  const isSettingsPath = /\/projects\/[^/]+\/(settings|project|characters|graph|world|foreshadowing)(\/|$)/.test(location.pathname);
+  const isWorkspacePath = projectId ? location.pathname === projectPath("/workspace") : false;
+  const primarySelectedKey = isSettingsPath ? "settings" : location.pathname;
   const projectQuery = useQuery({
     queryKey: ["project-shell", projectId],
     queryFn: () => studioApi.getProject(projectId!),
     enabled: Boolean(projectId && isProjectStudio),
   });
 
-  const projectPath = (suffix: string) => (projectId ? `/projects/${projectId}${suffix}` : "/");
   const primaryItems: MenuProps["items"] = [
     { key: "creation-star", icon: <Star size={16} />, label: "创作 Star" },
-    { key: projectPath("/project"), icon: <FileText size={16} />, label: "作品" },
-    { key: projectPath("/workspace"), icon: <NotebookPen size={16} />, label: "正文" },
-    { key: projectPath("/characters"), icon: <Boxes size={16} />, label: "设定" },
     { key: projectPath("/outline"), icon: <ListTree size={16} />, label: "大纲" },
-    { key: projectPath("/notes"), icon: <NotebookPen size={16} />, label: "笔记" },
+    { key: "settings", icon: <Boxes size={16} />, label: "设定" },
+    { key: projectPath("/workspace"), icon: <NotebookPen size={16} />, label: "正文" },
+    { key: projectPath("/agents"), icon: <Bot size={16} />, label: "Agent" },
   ];
 
   useEffect(() => {
@@ -75,6 +75,10 @@ export function StudioLayout() {
       setCreationStarOpen(true);
       return;
     }
+    if (key === "settings") {
+      navigate(projectPath("/settings/profile"));
+      return;
+    }
     navigate(key);
   };
 
@@ -85,14 +89,28 @@ export function StudioLayout() {
     queryClient.invalidateQueries({ queryKey: ["projects"] });
   };
   const toolItems: MenuProps["items"] = [
-    { key: projectPath("/agents"), icon: <Bot size={16} />, label: "Agent" },
-    { key: projectPath("/versions"), icon: <GitBranch size={16} />, label: "版本" },
-    { key: projectPath("/graph"), icon: <Network size={16} />, label: "图谱" },
-    { key: projectPath("/world"), icon: <Boxes size={16} />, label: "世界" },
-    { key: projectPath("/foreshadowing"), icon: <Settings size={16} />, label: "伏笔" },
     { key: projectPath("/batch"), icon: <Bot size={16} />, label: "批量" },
+    { key: projectPath("/notes"), icon: <NotebookPen size={16} />, label: "笔记" },
     { key: projectPath("/export"), icon: <Upload size={16} />, label: "导出" },
+    { key: projectPath("/versions"), icon: <GitBranch size={16} />, label: "版本" },
   ];
+  const appearanceControl = {
+    light: {
+      icon: <Sun size={16} />,
+      label: "亮色",
+      title: "当前亮色，点击切换到暗色",
+    },
+    dark: {
+      icon: <Moon size={16} />,
+      label: "暗色",
+      title: "当前暗色，点击切换到护眼",
+    },
+    "eye-care": {
+      icon: <Eye size={16} />,
+      label: "护眼",
+      title: "当前护眼，点击切换到亮色",
+    },
+  }[appearanceMode];
 
   if (isProjectStudio) {
     return (
@@ -109,20 +127,27 @@ export function StudioLayout() {
           </Space>
           <Menu
             mode="horizontal"
-            selectedKeys={[location.pathname]}
+            selectedKeys={[primarySelectedKey]}
             items={primaryItems}
             onClick={handleProjectMenuClick}
             className="project-studio-tabs"
           />
-          <Space>
-            <Tag color="green">自动保存</Tag>
+          <Space className="project-studio-actions">
+            <Tag color="green" className="autosave-tag">自动保存</Tag>
             <Button icon={<Focus size={16} />} type={focusMode ? "primary" : "default"} onClick={toggleFocusMode}>
               {focusMode ? "退出专注" : "专注写作"}
             </Button>
-            <Button icon={darkMode ? <Sun size={16} /> : <Moon size={16} />} onClick={toggleDarkMode} title="切换主题" />
+            <Button
+              icon={appearanceControl.icon}
+              type={appearanceMode === "eye-care" ? "primary" : "default"}
+              onClick={cycleAppearanceMode}
+              title={appearanceControl.title}
+            >
+              {appearanceControl.label}
+            </Button>
           </Space>
         </Header>
-        {!focusMode ? (
+        {!focusMode && isWorkspacePath ? (
           <div className="project-tool-strip">
             <Menu mode="horizontal" selectedKeys={[location.pathname]} items={toolItems} onClick={({ key }) => navigate(key)} />
             <Typography.Text type="secondary">本地优先 · 所有 AI 写入先预览再应用</Typography.Text>
@@ -148,7 +173,7 @@ export function StudioLayout() {
   const dashboardItems: MenuProps["items"] = [
     { key: "/", icon: <Home size={17} />, label: "项目首页" },
     { key: projectId ? projectPath("/workspace") : "recent-workspace", icon: <NotebookPen size={17} />, label: "继续最近创作", disabled: !projectId },
-    { key: projectId ? projectPath("/characters") : "recent-settings", icon: <Users size={17} />, label: "最近项目设定", disabled: !projectId },
+    { key: projectId ? projectPath("/settings/characters") : "recent-settings", icon: <Users size={17} />, label: "最近项目设定", disabled: !projectId },
   ];
 
   return (
@@ -156,7 +181,7 @@ export function StudioLayout() {
       <Sider width={236} className="studio-sider">
         <div className="brand">
           <div className="brand-icon">NS</div>
-          <div>
+          <div className="brand-copy">
             <Typography.Text strong>Novel Studio</Typography.Text>
             <Typography.Text type="secondary">专业长篇创作工作室</Typography.Text>
           </div>
@@ -165,8 +190,20 @@ export function StudioLayout() {
       </Sider>
       <Layout>
         <Header className="studio-header" style={{ background: token.colorBgContainer }}>
-          <Typography.Text type="secondary">本地优先 · LangGraph 多 Agent · 动态设定集</Typography.Text>
-          <Button icon={darkMode ? <Sun size={16} /> : <Moon size={16} />} onClick={toggleDarkMode}>{darkMode ? "亮色" : "暗色"}</Button>
+          <Typography.Text type="secondary" className="studio-header-signal">
+            <span>本地优先</span>
+            <span>LangGraph 多 Agent</span>
+            <span>动态设定集</span>
+          </Typography.Text>
+          <Button
+            className="studio-header-action"
+            icon={appearanceControl.icon}
+            type={appearanceMode === "eye-care" ? "primary" : "default"}
+            onClick={cycleAppearanceMode}
+            title={appearanceControl.title}
+          >
+            {appearanceControl.label}
+          </Button>
         </Header>
         <Content className="studio-content"><Outlet /></Content>
       </Layout>

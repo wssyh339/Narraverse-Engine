@@ -20,9 +20,9 @@ class OutlineSwarmStopValidator:
             reasons.append("存在 blocking continuity issue")
         if state.incomplete_required_entities:
             reasons.append("存在未补全 S/A 级实体")
-        if len(state.volume_outlines) < state.volume_target:
+        if state.generation_kind in {"book_outline", "legacy_plan_chapters"} and len(state.volume_outlines) < state.volume_target:
             reasons.append("卷纲数量未达标")
-        if len(state.chapter_beats) < state.chapter_target:
+        if state.generation_kind in {"chapter_outline_batch", "legacy_plan_chapters"} and len(state.chapter_beats) < state.chapter_target:
             reasons.append("章纲/节拍数量未达标")
         if state.iteration_count >= state.max_iterations:
             return OutlineSwarmStopResult(should_stop=True, status="failed", reasons=["达到最大迭代次数", *reasons])

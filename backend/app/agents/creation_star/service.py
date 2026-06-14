@@ -1,9 +1,213 @@
 from __future__ import annotations
 
+import random
 from typing import Any
 
+from fastapi import HTTPException
+from sqlalchemy.orm import Session
+
 from app.agents.creation_star.state import CreationStarState
+from app.agents.llm_io import call_agent_json
+from app.agents.prompts import AGENT_SPECS_BY_NAME
+from app.core.ids import generate_id
+from app.core.json import dumps
+from app.schemas.studio import CreationStarCommitRequest, CreationStarDrawRequest
+from app.services.llm_client import llm_client
+from app.services.serializers import (
+    serialize_character,
+    serialize_job,
+    serialize_project,
+    serialize_story_bible,
+    serialize_story_entity,
+    serialize_version_snapshot,
+    serialize_world_fact,
+)
+
+
+def _bad_request(message: str, details: dict[str, Any] | None = None) -> HTTPException:
+    return HTTPException(status_code=400, detail={"code": "VALIDATION_ERROR", "message": message, "details": details or {}})
 
 
 def build_creation_star_state(project_id: str, current_step: str, previous_steps: dict[str, Any] | None = None) -> CreationStarState:
     return CreationStarState(project_id=project_id, current_step=current_step, previous_steps=previous_steps or {})
+
+
+class CreationStarAgentService:
+    def options(self, options: dict[str, Any]) -> dict[str, Any]:
+        return {"options": options}
+
+    def draw(self, studio: Any, db: Session, project_id: str, request: CreationStarDrawRequest, llm_client_instance: Any | None = None) -> dict[str, Any]:
+        project = studio._project(db, project_id)
+        model = studio._configured_model_for_agent(db, "creation_star_session", "creation_star", request.model)
+        job = studio._create_job(db, project_id, None, "creation_star_draw", model, request.model_dump(), total_steps=1)
+        basic = studio._normalized_creation_basic(project, request.basic_info)
+        draw_id = generate_id("draw")
+        rng = random.SystemRandom()
+        prompt_snapshot = studio._creation_star_prompt_snapshot(request, basic)
+        if request.step == "worldview":
+            payload: dict[str, Any] = {
+                "step": request.step,
+                "cards": studio._creation_worldview_cards(basic, request.count, request.manual_input, draw_id, rng),
+            }
+        elif request.step == "protagonist":
+            payload = {
+                "step": request.step,
+                "cards": studio._creation_protagonist_cards(
+                    basic,
+                    request.selected_worldview,
+                    request.count,
+                    request.manual_input,
+                    draw_id,
+                    rng,
+                ),
+            }
+        elif request.step == "project_bible":
+            project_bible, world_rules = studio._creation_bible_and_rules(
+                basic,
+                request.selected_worldview,
+                request.selected_protagonist,
+                request.manual_input,
+                rng,
+            )
+            payload = {"step": request.step, "project_bible": project_bible, "world_rules": world_rules, "cards": []}
+        elif request.step == "world_rules":
+            _, world_rules = studio._creation_bible_and_rules(
+                basic,
+                request.selected_worldview,
+                request.selected_protagonist,
+                request.manual_input,
+                rng,
+            )
+            payload = {"step": request.step, "world_rules": world_rules, "cards": []}
+        elif request.step == "title":
+            payload = {
+                "step": request.step,
+                "cards": studio._creation_title_cards(
+                    basic,
+                    request.selected_worldview,
+                    request.selected_protagonist,
+                    request.project_bible,
+                    request.world_rules,
+                    request.count,
+                    request.manual_input,
+                    draw_id,
+                    rng,
+                ),
+            }
+        else:
+            raise _bad_request("不支持的创作 Star 步骤", {"step": request.step})
+        payload["draw_id"] = draw_id
+        payload["prompt_snapshot"] = prompt_snapshot
+        payload, llm_meta = call_agent_json(
+            llm_client=llm_client_instance or llm_client,
+            agent_name="creation_star",
+            role=AGENT_SPECS_BY_NAME["creation_star"].role,
+            system_prompt=AGENT_SPECS_BY_NAME["creation_star"].prompt,
+            task=f"执行创作 Star 的 {request.step} 抽卡/生成步骤，输出可供用户选择或确认的结构化候选。",
+            context={
+                "project": serialize_project(project),
+                "request": request.model_dump(),
+                "basic_info": basic,
+                "prompt_snapshot": prompt_snapshot,
+                "fallback_output": payload,
+            },
+            fallback=payload,
+            model=model,
+        )
+        payload["draw_id"] = payload.get("draw_id") or draw_id
+        payload["prompt_snapshot"] = payload.get("prompt_snapshot") or prompt_snapshot
+        payload["_llm"] = llm_meta
+        studio._record_agent_run(
+            db,
+            job,
+            "creation_star",
+            payload,
+            {"project": serialize_project(project), "request": request.model_dump(), "prompt_snapshot": prompt_snapshot},
+        )
+        studio._finish_job(db, job, payload)
+        db.commit()
+        return {"job": serialize_job(job), **payload}
+
+    def commit(self, studio: Any, db: Session, project_id: str, request: CreationStarCommitRequest) -> dict[str, Any]:
+        project = studio._project(db, project_id)
+        story_bible = studio._story_bible(db, project_id)
+        job = studio._create_job(db, project_id, None, "creation_star_commit", request.model, request.model_dump(), total_steps=4)
+        basic = studio._normalized_creation_basic(project, request.basic_info)
+        worldview = request.selected_worldview
+        protagonist = request.selected_protagonist
+        selected_title = request.selected_title
+        project_bible = request.project_bible
+        world_rules = request.world_rules
+
+        project.title = str(selected_title.get("title") or project.title)
+        project.genre = basic["genre"]
+        project.target_reader = basic["target_reader"]
+        project.target_words = int(basic.get("target_words") or project.target_words or 0)
+        project.initial_idea = basic.get("initial_idea", project.initial_idea)
+        project.style_guide = basic.get("style", project.style_guide)
+        project.premise = studio._join_nonempty(
+            [
+                str(project_bible.get("核心命题", "")),
+                str(project_bible.get("核心矛盾", "")),
+                str(worldview.get("description", "")),
+            ],
+            "；",
+        ) or project.premise
+
+        story_bible.version += 1
+        story_bible.world_setting = studio._join_nonempty(
+            [
+                str(worldview.get("title", "")),
+                str(worldview.get("description", "")),
+                "力量体系：" + "、".join(studio._as_str_list(world_rules.get("力量体系"))),
+                "社会结构：" + "、".join(studio._as_str_list(world_rules.get("社会结构"))),
+            ],
+            "\n",
+        )
+        story_bible.main_conflict = str(project_bible.get("核心矛盾", story_bible.main_conflict))
+        story_bible.themes_json = dumps(studio._as_str_list(project_bible.get("主线关键词")))
+        story_bible.style_guide = basic.get("style", story_bible.style_guide)
+        story_bible.forbidden_elements_json = dumps(studio._as_str_list(world_rules.get("禁忌规则")))
+        story_bible.continuity_rules_json = dumps(studio._as_str_list(world_rules.get("不可违反设定")))
+
+        character = studio._upsert_creation_protagonist(db, project_id, protagonist, basic, worldview)
+        entities = studio._upsert_creation_entities(db, project_id, worldview, world_rules)
+        facts = studio._upsert_creation_world_facts(db, project_id, project_bible, world_rules, worldview)
+        db.flush()
+        studio._link_creation_graph(db, project_id, character, entities, facts, worldview)
+
+        output = {
+            "basic_info": basic,
+            "selected_worldview": worldview,
+            "selected_protagonist": protagonist,
+            "selected_title": selected_title,
+            "project_bible": project_bible,
+            "world_rules": world_rules,
+        }
+        studio._record_agent_run(db, job, "creation_star", output, {"project": serialize_project(project)})
+        version = studio._snapshot(
+            db,
+            project_id,
+            None,
+            job.id,
+            "creation_star",
+            "creation_star_setup",
+            dumps(output),
+            request.user_note or "创作 Star 确认入库",
+        )
+        result = {
+            "project": serialize_project(project),
+            "story_bible": serialize_story_bible(story_bible),
+            "character": serialize_character(character),
+            "entities": [serialize_story_entity(item) for item in entities],
+            "world_facts": [serialize_world_fact(item) for item in facts],
+            "version": serialize_version_snapshot(version),
+        }
+        studio._finish_job(db, job, result)
+        db.commit()
+        return {"job": serialize_job(job), **result}
+
+
+creation_star_agent_service = CreationStarAgentService()
+
+__all__ = ["CreationStarAgentService", "creation_star_agent_service", "build_creation_star_state"]

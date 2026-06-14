@@ -46,12 +46,18 @@ def build_outline_swarm(runner: OutlineSwarmAgentRunner | None = None) -> StateG
     )
 
 
-def run_outline_swarm_app(initial_state: OutlineSwarmState, runner: OutlineSwarmAgentRunner | None = None) -> OutlineSwarmState:
+def run_outline_swarm_app(
+    initial_state: OutlineSwarmState,
+    runner: OutlineSwarmAgentRunner | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> OutlineSwarmState:
     app = build_outline_swarm(runner).compile()
     state = initial_state
     while state.status == "running":
         result = app.invoke(state.model_dump(mode="json"))
         state = OutlineSwarmState.model_validate(result)
+        if progress_callback is not None:
+            progress_callback(state.model_dump(mode="json"))
         if state.status != "running":
             break
         if state.iteration_count >= state.max_iterations:
@@ -352,6 +358,8 @@ def _plot_architect(state: OutlineSwarmState, runner: OutlineSwarmAgentRunner) -
             "volume",
             volume_payload,
         )
+    if state.generation_kind == "book_outline":
+        return _advance(state, "PlotArchitectAgent", "ForeshadowingAgent", "生成总纲与卷纲，跳过章纲拆分")
     return _advance(state, "PlotArchitectAgent", "BeatControllerAgent", "生成总纲与卷纲")
 
 

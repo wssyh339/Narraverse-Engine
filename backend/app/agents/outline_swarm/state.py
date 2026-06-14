@@ -11,6 +11,7 @@ from app.schemas.common import APIModel
 
 class OutlineSwarmState(APIModel):
     project_id: str
+    generation_kind: Literal["book_outline", "chapter_outline_batch", "legacy_plan_chapters"] = "legacy_plan_chapters"
     seed: dict[str, Any] = Field(default_factory=dict)
     model: str | None = None
     canon_context: CanonContext | None = None

@@ -1,5 +1,5 @@
-import { Button, Descriptions, Empty, Form, Input, Space, Tooltip, Typography } from "antd";
-import { Layers, ListChecks, RefreshCw, Save } from "lucide-react";
+import { Button, Empty, Space, Tooltip, Typography } from "antd";
+import { ListChecks, RefreshCw } from "lucide-react";
 import type { UseMutationResult } from "@tanstack/react-query";
 import type { Chapter, Project, StoryBible, Volume } from "../../types/api";
 import type { GenerationMode, OutlineView } from "./types";
@@ -15,7 +15,6 @@ interface OutlineEditorPanelProps {
   saveVolume: UseMutationResult<unknown, Error, { title: string; outline: string }, unknown>;
   saveChapter: UseMutationResult<unknown, Error, Partial<Chapter>, unknown>;
   openGenerationPreview: (mode: GenerationMode) => void;
-  generateFromExistingOutline: (mode: Extract<GenerationMode, "volume" | "chapter">) => void;
   children?: React.ReactNode;
 }
 
@@ -39,6 +38,18 @@ const outlineFieldLabels: Record<string, string> = {
   "最终修订版纲要": "最终修订版纲要",
   "伏笔账本": "伏笔账本",
   "长篇生成策略": "长篇生成策略",
+  volume_title: "分卷名称",
+  chapter_title: "章节标题",
+  chapter_no: "章节序号",
+  volume_no: "所属分卷",
+  outline: "大纲正文",
+  core_event: "核心事件",
+  conflict: "核心冲突",
+  turn_point: "转折点",
+  cliffhanger: "结尾钩子",
+  plot_purpose: "剧情功能",
+  pov_character: "视角人物",
+  emotional_beats: "情绪节拍",
 };
 
 function parseMaybeJson(value: unknown): unknown {
@@ -114,6 +125,46 @@ export function formatOutlineDocument(lastOutlinePlan: Record<string, unknown> |
   return naturalLines(project ?? {}).join("\n") || "暂无大纲正文。请先生成大纲，或在左侧选择卷纲/章纲。";
 }
 
+export function formatVolumeOutlineDocument(volume: Volume) {
+  return (
+    naturalLines({
+      volume_title: volume.title,
+      volume_no: `第${volume.volume_no}卷`,
+      outline: volume.outline,
+    }).join("\n") || "暂无卷纲正文。"
+  );
+}
+
+export function formatChapterOutlineDocument(chapter: Chapter) {
+  return (
+    naturalLines({
+      chapter_title: `第${chapter.chapter_no}章 ${chapter.title}`,
+      volume_no: `第${chapter.volume_no}卷`,
+      outline: chapter.outline,
+      plot_purpose: chapter.plot_purpose,
+      pov_character: chapter.pov_character,
+      core_event: chapter.core_event,
+      conflict: chapter.conflict,
+      turn_point: chapter.turn_point,
+      cliffhanger: chapter.cliffhanger,
+      emotional_beats: chapter.emotional_beats,
+    }).join("\n") || "暂无章纲正文。"
+  );
+}
+
+function renderOutlineParagraphs(text: string) {
+  return (
+    <div className="outline-prose">
+      {text
+        .split("\n")
+        .filter((line) => line.trim())
+        .map((line, index) => (
+          <Typography.Paragraph key={`${line}-${index}`}>{line}</Typography.Paragraph>
+        ))}
+    </div>
+  );
+}
+
 export function OutlineEditorPanel({
   selectedView,
   selectedVolume,
@@ -125,84 +176,39 @@ export function OutlineEditorPanel({
   saveVolume,
   saveChapter,
   openGenerationPreview,
-  generateFromExistingOutline,
   children,
 }: OutlineEditorPanelProps) {
-  const canGenerateDetails = Boolean(lastOutlinePlan);
   const renderOutlineView = () => {
     if (selectedView === "outline") {
       return (
         <div className="outline-document">
           <Typography.Title level={3}>总纲</Typography.Title>
-          <div className="outline-prose">
-            {formatOutlineDocument(lastOutlinePlan, storyBible, project)
-              .split("\n")
-              .filter((line) => line.trim())
-              .map((line, index) => (
-                <Typography.Paragraph key={`${line}-${index}`}>{line}</Typography.Paragraph>
-              ))}
-          </div>
+          {renderOutlineParagraphs(formatOutlineDocument(lastOutlinePlan, storyBible, project))}
         </div>
       );
     }
     if (selectedView === "volume" && selectedVolume) {
       return (
-        <Form key={selectedVolume.id} layout="vertical" initialValues={selectedVolume} onFinish={(values) => saveVolume.mutate(values)}>
+        <div className="outline-document">
           <Typography.Title level={3}>卷纲</Typography.Title>
-          <Form.Item name="title" label="分卷名称">
-            <Input />
-          </Form.Item>
-          <Form.Item name="outline" label="卷纲">
-            <Input.TextArea rows={20} />
-          </Form.Item>
-          <Button type="primary" htmlType="submit" icon={<Save size={15} />} loading={saveVolume.isPending}>
-            保存卷纲
-          </Button>
-        </Form>
+          {renderOutlineParagraphs(formatVolumeOutlineDocument(selectedVolume))}
+        </div>
       );
     }
     if (selectedView === "chapter" && selectedChapter) {
       return (
         <div className="outline-document">
           <Typography.Title level={3}>章节</Typography.Title>
-          <Descriptions bordered column={1} size="small">
-            <Descriptions.Item label="章节">{`第${selectedChapter.chapter_no}章 ${selectedChapter.title}`}</Descriptions.Item>
-            <Descriptions.Item label="剧情功能">{selectedChapter.plot_purpose || "未设置"}</Descriptions.Item>
-            <Descriptions.Item label="核心事件">{selectedChapter.core_event || "未设置"}</Descriptions.Item>
-            <Descriptions.Item label="核心冲突">{selectedChapter.conflict || "未设置"}</Descriptions.Item>
-            <Descriptions.Item label="结尾钩子">{selectedChapter.cliffhanger || "未设置"}</Descriptions.Item>
-          </Descriptions>
+          {renderOutlineParagraphs(formatChapterOutlineDocument(selectedChapter))}
         </div>
       );
     }
     if (selectedView === "chapterOutline" && selectedChapter) {
       return (
-        <Form key={selectedChapter.id} layout="vertical" initialValues={selectedChapter} onFinish={(values) => saveChapter.mutate(values)}>
+        <div className="outline-document">
           <Typography.Title level={3}>章纲</Typography.Title>
-          <Form.Item name="title" label="章节标题">
-            <Input />
-          </Form.Item>
-          <Form.Item name="outline" label="章纲">
-            <Input.TextArea rows={8} />
-          </Form.Item>
-          <div className="form-grid-2">
-            <Form.Item name="core_event" label="核心事件">
-              <Input.TextArea rows={3} />
-            </Form.Item>
-            <Form.Item name="conflict" label="核心冲突">
-              <Input.TextArea rows={3} />
-            </Form.Item>
-            <Form.Item name="turn_point" label="转折点">
-              <Input.TextArea rows={3} />
-            </Form.Item>
-            <Form.Item name="cliffhanger" label="结尾钩子">
-              <Input.TextArea rows={3} />
-            </Form.Item>
-          </div>
-          <Button type="primary" htmlType="submit" icon={<Save size={15} />} loading={saveChapter.isPending}>
-            保存章纲
-          </Button>
-        </Form>
+          {renderOutlineParagraphs(formatChapterOutlineDocument(selectedChapter))}
+        </div>
       );
     }
     return <Empty description="请选择左侧目录项" />;
@@ -217,11 +223,8 @@ export function OutlineEditorPanel({
         </div>
         <Space>
           <Button icon={<RefreshCw size={15} />} loading={isPlanning} onClick={() => openGenerationPreview("outline")}>生成大纲</Button>
-          <Tooltip title={canGenerateDetails ? "根据已生成总纲继续生成卷纲" : "请先生成总纲"}>
-            <Button icon={<Layers size={15} />} disabled={!canGenerateDetails} loading={isPlanning} onClick={() => generateFromExistingOutline("volume")}>生成卷纲</Button>
-          </Tooltip>
-          <Tooltip title={canGenerateDetails ? "根据已生成总纲继续生成章纲" : "请先生成总纲"}>
-            <Button type="primary" icon={<ListChecks size={15} />} disabled={!canGenerateDetails} loading={isPlanning} onClick={() => generateFromExistingOutline("chapter")}>生成章纲</Button>
+          <Tooltip title="根据已确认总纲、卷纲和勾选范围批量生成章纲">
+            <Button type="primary" icon={<ListChecks size={15} />} loading={isPlanning} onClick={() => openGenerationPreview("chapter")}>批量生成章纲</Button>
           </Tooltip>
         </Space>
       </div>

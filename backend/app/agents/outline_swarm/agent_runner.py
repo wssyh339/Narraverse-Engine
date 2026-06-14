@@ -65,6 +65,7 @@ class OutlineSwarmAgentRunner:
     def _context(self, state: OutlineSwarmState) -> dict[str, Any]:
         return {
             "project_id": state.project_id,
+            "generation_kind": state.generation_kind,
             "seed": state.seed,
             "model": state.model,
             "canon_context": state.canon_context.model_dump(mode="json") if state.canon_context else None,

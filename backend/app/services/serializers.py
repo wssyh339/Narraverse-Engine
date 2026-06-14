@@ -54,6 +54,19 @@ def serialize_story_bible(story_bible: models.StoryBible, include_style_guide: b
     return payload
 
 
+def serialize_creation_session(session: models.CreationSession) -> dict[str, Any]:
+    return {
+        "id": session.id,
+        "project_id": session.project_id,
+        "status": session.status,
+        "current_step": session.current_step,
+        "basic_info": loads(session.basic_info_json, {}),
+        "state": loads(session.state_json, {}),
+        "created_at": isoformat(session.created_at),
+        "updated_at": isoformat(session.updated_at),
+    }
+
+
 def serialize_job(job: models.GenerationJob) -> dict[str, Any]:
     return {
         "id": job.id,

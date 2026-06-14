@@ -19,9 +19,16 @@ import type {
   CreationStarBasicInfo,
   CreationStarCard,
   CreationStarOptions,
+  CreationSession,
   CanonRunPayload,
   CanonRunResult,
+  AgentConfig,
+  AgentModelConfig,
+  LLMModelOption,
+  LLMProviderOption,
 } from "../types/api";
+
+export type { AgentConfig } from "../types/api";
 
 export interface CreateProjectPayload {
   title: string;
@@ -85,6 +92,7 @@ export interface GenerateSettingPayload {
   target: SettingTarget;
   instruction?: string;
   count?: number;
+  preview_only?: boolean;
   model?: string;
 }
 
@@ -110,6 +118,35 @@ export interface CreationStarCommitPayload {
   project_bible: Record<string, unknown>;
   world_rules: Record<string, unknown>;
   user_note?: string;
+  model?: string;
+}
+
+export interface CreationSessionCardPayload {
+  selected_worldview?: Record<string, unknown>;
+  selected_protagonist?: Record<string, unknown>;
+  selected_title?: Record<string, unknown>;
+  manual_input?: string;
+  count?: number;
+  replace_existing?: boolean;
+  model?: string;
+}
+
+export interface CreationSessionSeedPayload {
+  selected_worldview?: Record<string, unknown>;
+  selected_protagonist?: Record<string, unknown>;
+  selected_title?: Record<string, unknown>;
+  market_position?: Record<string, unknown>;
+  user_note?: string;
+}
+
+export interface CreationSessionRunPayload {
+  instruction?: string;
+  model?: string;
+}
+
+export interface CreationSessionCommitSessionPayload {
+  user_note?: string;
+  approved_canon_sections?: string[];
   model?: string;
 }
 
@@ -237,8 +274,24 @@ export const studioApi = {
   updateStoryBible: (projectId: string, payload: Partial<StoryBible>) =>
     unwrap<{ story_bible: StoryBible }>(api.put(`/projects/${projectId}/story-bible`, payload)),
   planChapters: (projectId: string, payload: Record<string, unknown>) =>
-    unwrap<{ job: GenerationJob; chapters: Chapter[]; outline_plan: Record<string, unknown> }>(
+    unwrap<{ job: GenerationJob; chapters: Chapter[]; outline_plan: Record<string, unknown> | null }>(
       api.post(`/projects/${projectId}/chapters/plan`, payload),
+    ),
+  bookOutlineGenerate: (projectId: string, payload: Record<string, unknown>) =>
+    unwrap<{ job: GenerationJob; outline_plan: Record<string, unknown> | null }>(
+      api.post(`/projects/${projectId}/outline/book/generate`, payload),
+    ),
+  bookOutlineCommit: (projectId: string, payload: { job_id?: string; outline_plan?: Record<string, unknown> }) =>
+    unwrap<{ project: Project; story_bible: StoryBible; volumes: Volume[]; outline_plan: Record<string, unknown> }>(
+      api.post(`/projects/${projectId}/outline/book/commit`, payload),
+    ),
+  chapterOutlineBatchGenerate: (projectId: string, payload: Record<string, unknown>) =>
+    unwrap<{ job: GenerationJob; chapter_outlines: Record<string, unknown>[]; outline_plan: Record<string, unknown> | null }>(
+      api.post(`/projects/${projectId}/outline/chapters/batch-generate`, payload),
+    ),
+  chapterOutlineCommit: (projectId: string, payload: { job_id?: string; chapter_outlines?: Record<string, unknown>[]; overwrite_existing?: boolean }) =>
+    unwrap<{ chapters: Chapter[]; chapter_outlines: Record<string, unknown>[] }>(
+      api.post(`/projects/${projectId}/outline/chapters/commit`, payload),
     ),
   listChapters: (projectId: string) => unwrap<{ chapters: Chapter[] }>(api.get(`/projects/${projectId}/chapters`)),
   getChapter: (projectId: string, chapterId: string) => unwrap<{ chapter: Chapter }>(api.get(`/projects/${projectId}/chapters/${chapterId}`)),
@@ -306,6 +359,57 @@ export const studioApi = {
       world_facts: WorldFact[];
       version: VersionSnapshot;
     }>(api.post(`/projects/${projectId}/creation-star/commit`, payload)),
+  createCreationSession: (projectId: string, payload: { basic_info: CreationStarBasicInfo; model?: string }) =>
+    unwrap<{ session: CreationSession }>(api.post(`/projects/${projectId}/creation/sessions`, payload)),
+  getCreationSession: (projectId: string, sessionId: string) =>
+    unwrap<{ session: CreationSession }>(api.get(`/projects/${projectId}/creation/sessions/${sessionId}`)),
+  generateCreationWorldview: (projectId: string, sessionId: string, payload: CreationSessionCardPayload) =>
+    unwrap<{ session: CreationSession; job: GenerationJob; cards: CreationStarCard[]; prompt_snapshot?: Record<string, unknown> }>(
+      api.post(`/projects/${projectId}/creation/sessions/${sessionId}/worldviews`, payload),
+    ),
+  generateCreationProtagonist: (projectId: string, sessionId: string, payload: CreationSessionCardPayload) =>
+    unwrap<{ session: CreationSession; job: GenerationJob; cards: CreationStarCard[]; prompt_snapshot?: Record<string, unknown> }>(
+      api.post(`/projects/${projectId}/creation/sessions/${sessionId}/protagonists`, payload),
+    ),
+  generateCreationMarketPosition: (projectId: string, sessionId: string, payload: CreationSessionCardPayload) =>
+    unwrap<{
+      session: CreationSession;
+      job: GenerationJob;
+      title_candidates: CreationStarCard[];
+      market_position_candidates: Array<Record<string, unknown>>;
+      prompt_snapshot?: Record<string, unknown>;
+    }>(api.post(`/projects/${projectId}/creation/sessions/${sessionId}/market-position`, payload)),
+  confirmCreationSeed: (projectId: string, sessionId: string, payload: CreationSessionSeedPayload) =>
+    unwrap<{ session: CreationSession; project_seed: Record<string, unknown> }>(
+      api.post(`/projects/${projectId}/creation/sessions/${sessionId}/seed`, payload),
+    ),
+  generateCreationCoreConflict: (projectId: string, sessionId: string, payload: CreationSessionRunPayload = {}) =>
+    unwrap<{ session: CreationSession; job: GenerationJob; core_conflict_system: Record<string, unknown> }>(
+      api.post(`/projects/${projectId}/creation/sessions/${sessionId}/core-conflict`, payload),
+    ),
+  generateCreationConstitution: (projectId: string, sessionId: string, payload: CreationSessionRunPayload = {}) =>
+    unwrap<{ session: CreationSession; job: GenerationJob; novel_constitution: Record<string, unknown> }>(
+      api.post(`/projects/${projectId}/creation/sessions/${sessionId}/constitution`, payload),
+    ),
+  reviewCreationConstitution: (projectId: string, sessionId: string, payload: CreationSessionRunPayload = {}) =>
+    unwrap<{ session: CreationSession; job: GenerationJob; constitution_review: Record<string, unknown> }>(
+      api.post(`/projects/${projectId}/creation/sessions/${sessionId}/constitution-review`, payload),
+    ),
+  previewCreationCanon: (projectId: string, sessionId: string, payload: CreationSessionRunPayload = {}) =>
+    unwrap<{ session: CreationSession; job: GenerationJob; canon_candidates: Record<string, unknown> }>(
+      api.post(`/projects/${projectId}/creation/sessions/${sessionId}/canon-preview`, payload),
+    ),
+  commitCreationSession: (projectId: string, sessionId: string, payload: CreationSessionCommitSessionPayload = {}) =>
+    unwrap<{
+      session: CreationSession;
+      job: GenerationJob;
+      project: Project;
+      story_bible: StoryBible;
+      character: Character;
+      entities: StoryEntity[];
+      world_facts: WorldFact[];
+      version: VersionSnapshot;
+    }>(api.post(`/projects/${projectId}/creation/sessions/${sessionId}/commit`, payload)),
   runCanonStudio: (projectId: string, payload: CanonRunPayload) =>
     unwrap<CanonRunResult>(api.post(`/projects/${projectId}/canon-studio/run`, payload)),
   getCanonStore: (projectId: string) =>
@@ -313,7 +417,22 @@ export const studioApi = {
   getCanonFinalOutline: (projectId: string) =>
     unwrap<{ path: string; markdown: string }>(api.get(`/projects/${projectId}/canon-studio/final-outline`)),
   listWorkflows: () => unwrap<{ workflows: WorkflowDefinition[] }>(api.get("/workflows")),
+  listLlmModels: () =>
+    unwrap<{
+      default_provider: string;
+      default_model: string;
+      providers: LLMProviderOption[];
+      models: LLMModelOption[];
+    }>(api.get("/llm/models")),
+  listAgentModelConfigs: () => unwrap<{ configs: AgentModelConfig[] }>(api.get("/agent-model-configs")),
+  updateAgentModelConfig: (payload: { workflow_id: string; agent_name: string; model: string }) =>
+    unwrap<{ config: AgentModelConfig }>(api.put("/agent-model-configs", payload)),
+  deleteAgentModelConfig: (workflowId: string, agentName: string) =>
+    unwrap<{ deleted: boolean; workflow_id: string; agent_name: string }>(
+      api.delete(`/agent-model-configs/${workflowId}/${agentName}`),
+    ),
   updateAgentPrompt: (agentName: string, prompt: string) => unwrap<{ agent: AgentConfig }>(api.put(`/agents/${agentName}/prompt`, { prompt })),
+  restoreAgentPrompt: (agentName: string) => unwrap<{ agent: AgentConfig }>(api.post(`/agents/${agentName}/prompt/restore`)),
   getJob: (jobId: string) => unwrap<{ job: GenerationJob }>(api.get(`/jobs/${jobId}`)),
   getAgentRuns: (jobId: string) => unwrap<{ agent_runs: AgentRun[] }>(api.get(`/jobs/${jobId}/agent-runs`)),
   listCharacters: (projectId: string) => unwrap<{ characters: Character[] }>(api.get(`/projects/${projectId}/characters`)),
@@ -338,7 +457,7 @@ export const studioApi = {
   deleteWorldFact: (projectId: string, factId: string) =>
     unwrap<{ deleted: boolean; world_fact_id: string }>(api.delete(`/projects/${projectId}/world-facts/${factId}`)),
   generateSettings: (projectId: string, payload: GenerateSettingPayload) =>
-    unwrap<{ job: GenerationJob; characters: Character[]; entities: StoryEntity[]; world_facts: WorldFact[] }>(
+    unwrap<{ job: GenerationJob; characters: Character[]; entities: StoryEntity[]; world_facts: WorldFact[]; preview_only: boolean }>(
       api.post(`/projects/${projectId}/settings/generate`, payload),
     ),
   listForeshadowing: (projectId: string) =>
@@ -382,13 +501,6 @@ export const studioApi = {
   queryKnowledge: (project_id: string, question: string) =>
     unwrap<{ answer: string; matches: unknown[] }>(api.post("/tools/query-knowledge", { project_id, question })),
 };
-
-export interface AgentConfig {
-  name: string;
-  role: string;
-  order: number;
-  prompt: string;
-}
 
 export interface ProjectState {
   project: Project;

@@ -18,7 +18,8 @@ def test_outline_agent_prompts_keep_full_fixed_details() -> None:
     assert "weaknesses_to_fix" in one_sentence_prompt
     assert "loss_of_control_risk" in world_prompt
     assert "forbidden_changes" in world_prompt
-    assert "Phase 1：目标 + 主线引入" in volume_prompt
+    assert "不能套用固定五段模板" in volume_prompt
+    assert "rhythm_model" in volume_prompt
     assert "major_events" in volume_prompt
     assert "chapter_function_table" in beat_prompt
     assert "special_audits" in logic_prompt

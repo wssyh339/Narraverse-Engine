@@ -3,10 +3,11 @@ import { TooltipComponent } from "echarts/components";
 import { init, use } from "echarts/core";
 import { CanvasRenderer } from "echarts/renderers";
 import { useQuery } from "@tanstack/react-query";
-import { Alert, Card, Empty, Space, Typography } from "antd";
+import { Alert, Card, Col, Empty, Row, Space, Statistic, Tag, Typography } from "antd";
 import { useEffect, useRef } from "react";
 import { useParams } from "react-router-dom";
 import { studioApi } from "../api/studio";
+import { SettingsSectionNav } from "../components/SettingsSectionNav";
 
 use([GraphChart, TooltipComponent, CanvasRenderer]);
 
@@ -23,6 +24,12 @@ export function GraphPage() {
   const { projectId = "" } = useParams();
   const chartRef = useRef<HTMLDivElement | null>(null);
   const query = useQuery({ queryKey: ["graph", projectId], queryFn: () => studioApi.getGraph(projectId), enabled: !!projectId });
+  const nodes = query.data?.graph.nodes ?? [];
+  const edges = query.data?.graph.edges ?? [];
+  const groupedNodeCounts = nodes.reduce<Record<string, number>>((acc, node) => {
+    acc[node.node_type] = (acc[node.node_type] ?? 0) + 1;
+    return acc;
+  }, {});
 
   useEffect(() => {
     if (!chartRef.current || !query.data) {
@@ -66,16 +73,43 @@ export function GraphPage() {
 
   return (
     <Space direction="vertical" size={18} className="page-stack">
+      <SettingsSectionNav active="graph" />
       <div className="page-heading">
         <div>
-          <Typography.Title level={2}>人物与世界观图谱</Typography.Title>
+          <Typography.Title level={3}>人物与世界观图谱</Typography.Title>
           <Typography.Text type="secondary">节点大小代表重要度，颜色代表节点类型，边粗细代表关系强度。</Typography.Text>
         </div>
       </div>
       {query.error ? <Alert type="error" message="无法读取图谱" showIcon /> : null}
-      <Card loading={query.isLoading}>
-        {query.data && query.data.graph.nodes.length > 0 ? <div ref={chartRef} className="graph-canvas" /> : <Empty description="暂无图谱节点，创建项目或生成章节后会更新。" />}
-      </Card>
+      <Row gutter={[16, 16]}>
+        <Col xs={24} md={8}>
+          <Card loading={query.isLoading} className="settings-stat-card">
+            <Statistic title="节点" value={nodes.length} />
+            <Typography.Text type="secondary">角色、实体、世界事实与章节节点</Typography.Text>
+          </Card>
+        </Col>
+        <Col xs={24} md={8}>
+          <Card loading={query.isLoading} className="settings-stat-card">
+            <Statistic title="关系" value={edges.length} />
+            <Typography.Text type="secondary">因果、隶属、定义、驱动等连接</Typography.Text>
+          </Card>
+        </Col>
+        <Col xs={24} md={8}>
+          <Card loading={query.isLoading} className="settings-stat-card">
+            <Space wrap>
+              {Object.entries(groupedNodeCounts).length === 0 ? <Typography.Text type="secondary">暂无类型</Typography.Text> : null}
+              {Object.entries(groupedNodeCounts).map(([type, count]) => (
+                <Tag key={type} color={nodeColors[type] ?? "default"}>{type} {count}</Tag>
+              ))}
+            </Space>
+          </Card>
+        </Col>
+        <Col span={24}>
+          <Card loading={query.isLoading} className="settings-content-card">
+            {nodes.length > 0 ? <div ref={chartRef} className="graph-canvas" /> : <Empty description="暂无图谱节点，创建项目或生成章节后会更新。" />}
+          </Card>
+        </Col>
+      </Row>
     </Space>
   );
 }

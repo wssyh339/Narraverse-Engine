@@ -165,6 +165,7 @@ class GenerateSettingRequest(APIModel):
     target: Literal["characters", "entities", "world_facts", "all"] = "all"
     instruction: str = Field(default="", max_length=4000)
     count: int = Field(default=3, ge=1, le=12)
+    preview_only: bool = False
     model: str | None = None
 
 
@@ -191,6 +192,40 @@ class CreationStarCommitRequest(APIModel):
     project_bible: dict[str, Any] = Field(default_factory=dict)
     world_rules: dict[str, Any] = Field(default_factory=dict)
     user_note: str = Field(default="", max_length=2000)
+    model: str | None = None
+
+
+class CreationSessionCreateRequest(APIModel):
+    basic_info: dict[str, Any] = Field(default_factory=dict)
+    model: str | None = None
+
+
+class CreationSessionCardRequest(APIModel):
+    selected_worldview: dict[str, Any] = Field(default_factory=dict)
+    selected_protagonist: dict[str, Any] = Field(default_factory=dict)
+    selected_title: dict[str, Any] = Field(default_factory=dict)
+    manual_input: str = Field(default="", max_length=6000)
+    count: int = Field(default=1, ge=1, le=3)
+    replace_existing: bool = False
+    model: str | None = None
+
+
+class CreationSessionSeedRequest(APIModel):
+    selected_worldview: dict[str, Any] = Field(default_factory=dict)
+    selected_protagonist: dict[str, Any] = Field(default_factory=dict)
+    selected_title: dict[str, Any] = Field(default_factory=dict)
+    market_position: dict[str, Any] = Field(default_factory=dict)
+    user_note: str = Field(default="", max_length=2000)
+
+
+class CreationSessionRunRequest(APIModel):
+    instruction: str = Field(default="", max_length=4000)
+    model: str | None = None
+
+
+class CreationSessionCommitRequest(APIModel):
+    user_note: str = Field(default="", max_length=2000)
+    approved_canon_sections: list[str] | None = None
     model: str | None = None
 
 
@@ -254,6 +289,12 @@ class AgentPromptUpdateRequest(APIModel):
     prompt: str = Field(min_length=1)
     template_name: str = "custom"
     temporary: bool = False
+
+
+class AgentModelConfigRequest(APIModel):
+    workflow_id: str = Field(min_length=1, max_length=120)
+    agent_name: str = Field(min_length=1, max_length=120)
+    model: str = Field(min_length=1, max_length=200)
 
 
 class PromptTemplateRequest(APIModel):

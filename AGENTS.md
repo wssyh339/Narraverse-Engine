@@ -1,4 +1,4 @@
-# 长篇小说撰写 Agent 项目规范
+# 叙界推演引擎 / Narraverse Engine 项目规范
 
 > 本文档是本项目后续所有开发会话的最高优先级项目约束。任何新增功能、依赖、目录、接口、数据表或部署方式，必须先更新本文档并获得确认。
 
@@ -51,9 +51,16 @@
 - `LLM_PROVIDER=openai`
 - `LLM_PROVIDER=deepseek`
 - `LLM_PROVIDER=qwen`
+- `LLM_PROVIDER=openrouter`
+- `LLM_PROVIDER=siliconflow`
+- `LLM_PROVIDER=moonshot`
+- `LLM_PROVIDER=zhipu`
+- `LLM_PROVIDER=ollama`
 - 通用 OpenAI 兼容 `LLM_BASE_URL` + `LLM_API_KEY`
 
-API Key 只能来自环境变量。缺少 API Key 时，工作流允许本地降级生成可验证草案，但必须在配置和模型调用结果中标明未调用远程模型。
+Agent 配置中心允许为每个可视化工作流中的每个 Agent 保存显式模型覆盖。解析优先级为：请求体 `model` → `agent_model_configs` 中的 `workflow_id + agent_name` 覆盖 → Provider 专属默认模型 → `LLM_MODEL`。该能力只做人工显式配置，不做多模型自动路由优化。
+
+API Key 只能来自环境变量。缺少 API Key 时，工作流允许本地降级生成可验证草案，但必须在配置和模型调用结果中标明未调用远程模型。真实 API 验收必须设置 `LLM_REQUIRE_REMOTE=true`，此时缺少 API Key 或远程调用失败不得本地降级。
 
 ### 0.4 11 个 Agent
 
@@ -95,9 +102,10 @@ API Key 只能来自环境变量。缺少 API Key 时，工作流允许本地降
 11. `foreshadowing_items`
 12. `style_profiles`
 13. `prompt_templates`
-14. `version_snapshots`
-15. `export_jobs`
-16. `user_feedback`
+14. `agent_model_configs`
+15. `version_snapshots`
+16. `export_jobs`
+17. `user_feedback`
 
 MVP 阶段已有表继续保留；1.0 通过运行时 SQLite 轻量迁移补齐旧库缺失列。
 
@@ -112,10 +120,11 @@ MVP 阶段已有表继续保留；1.0 通过运行时 SQLite 轻量迁移补齐�
 - Story Bible：`GET/PUT /api/projects/{id}/story-bible`，`POST /api/projects/{id}/story-bible/generate`
 - 章节：`POST /api/projects/{id}/chapters/plan`，`GET /api/projects/{id}/chapters`，`GET/PUT /api/projects/{id}/chapters/{chapter_id}`，`POST draft/rewrite/partial-rewrite`，`POST /api/projects/{id}/chapters/{chapter_id}/chat/stream`
 - Agent：`GET /api/agents`，`GET /api/agents/{agent_name}`，`PUT /api/agents/{agent_name}/prompt`，`/api/agents/templates`
+- LLM 模型：`GET /api/llm/models`，`GET/PUT /api/agent-model-configs`，`DELETE /api/agent-model-configs/{workflow_id}/{agent_name}`
 - 任务：`POST /api/write/generate`，`POST /api/write/batch-generate`，`POST pause/resume/cancel`，`GET /api/jobs/{job_id}`，`GET /api/jobs/{job_id}/agent-runs`
 - 版本：`GET /api/versions`，`POST /api/versions/compare`，`POST rollback/branch`
 - 图谱/设定集：`GET/POST /api/projects/{id}/characters`，`GET/PUT/DELETE /api/projects/{id}/characters/{character_id}`，`GET/POST /api/projects/{id}/entities`，`PUT/DELETE /api/projects/{id}/entities/{entity_id}`，`GET/POST /api/projects/{id}/world-facts`，`PUT/DELETE /api/projects/{id}/world-facts/{fact_id}`，`GET /api/projects/{id}/graph`，`GET /api/projects/{id}/canon/context`
-- Agent 辅助生成设定：`POST /api/projects/{id}/settings/generate`，支持 `target=characters/entities/world_facts/all`
+- Agent 辅助生成设定：`POST /api/projects/{id}/settings/generate`，支持 `target=characters/entities/world_facts/all`；前端默认传 `preview_only=true` 仅生成候选预览，不写入角色/实体/世界观事实和图谱，用户确认后再调用对应创建接口正式入库。
 - 创作 Star：`GET /api/creation-star/options`，`POST /api/projects/{id}/creation-star/draw`，`POST /api/projects/{id}/creation-star/commit`
 - 工作流结构：`GET /api/workflows`，返回初始化、章节规划、单章正文、批量生成四套可视化节点和边。
 - 伏笔：`GET/POST /api/projects/{id}/foreshadowing`，`PUT/DELETE /api/projects/{id}/foreshadowing/{item_id}`，`POST /api/projects/{id}/foreshadowing/{item_id}/payoff`
@@ -173,11 +182,98 @@ MVP 阶段已有表继续保留；1.0 通过运行时 SQLite 轻量迁移补齐�
 - 章节 Chat：`POST /api/projects/{id}/chapters/{chapter_id}/chat/stream`，返回 `text/event-stream` 事件 `meta`、`delta`、`result`、`done`
 - 本地备份：`GET /api/projects/{id}/backup`
 
-文档版本：2026-06-06
+### 0.10 提示词库驱动 Agent 重构（2026-06-10）
+
+用户已确认将粘贴的长篇小说生产提示词拆分为 `backend/app/prompts/00_*.md` 到 `31_*.md`，并作为 1.0 Agent 重构的正式提示词库。
+
+重构原则：
+
+- 提示词是可复用模板，Agent 是角色职责，Workflow 决定调用顺序；不得把 32 段提示词机械扩展为 32 个独立正式 Agent。
+- 保留 0.4 中的 11 个正式 Agent 作为对外稳定角色；新增“核心矛盾、小说宪法、章节卡、叙事账本、结构体检”等能力优先实现为 workflow node 或 prompt task。
+- 后端必须提供统一 Prompt Catalog，记录 `prompt_id`、文件名、所属工作流、默认 Agent 和标题。
+- `/api/workflows` 必须同时保留既有工作流结构，并新增“立项与小说宪法、全书与分卷规划、单章生产闭环、连载维护与体检、专项增强”五条提示词驱动工作流。
+- 提示词驱动工作流中的 00-31 节点必须标记为 `node_subtype="prompt_agent"`，并为每个节点暴露独立输入 schema、输出 schema、必需输入和产物字段；这些节点不是 32 个新增正式 Agent。
+- 所有创作 Agent 调用前仍必须读取 `canon_context`；单章生成至少使用小说宪法、当前卷/章纲、叙事账本、上一章摘要和相关正典上下文。
+- 正文生成链路必须遵循“章节卡 → 场景细纲 → 正文 → 自检 → 改写 → 章后叙事账本更新”的闭环；质量门出现 `blocking/error` 时不得直接定稿。
+- 叙事账本、伏笔、人物关系和世界规则更新默认进入候选变更，用户确认后才能写入正式设定集。
+
+文档版本：2026-06-10
+
+### 0.11 创作 Star 解耦流程修订（2026-06-11）
+
+创作 Star 是唯一前台立项入口，但不得继续由单个大步骤混合承担抽卡、小说宪法和正式入库责任。1.0 正式流程拆为：
+
+```text
+基本信息
+  -> 世界观逐卡加载
+  -> 主角人设逐卡加载
+  -> 标题与卖点方向逐卡加载
+  -> 立项种子确认
+  -> 核心矛盾系统
+  -> 小说宪法
+  -> 小说宪法压力测试
+  -> 正典候选预览
+  -> 用户确认入库
+```
+
+职责边界：
+
+- `creation_star` 只负责世界观、主角、标题和市场卖点的候选抽卡；所有输出在用户确认前均为候选。
+- `chief_architect` 负责把已确认的立项种子收敛为 `core_conflict_system` 与 `novel_constitution`。
+- `reviewer` 负责 `constitution_review`，状态必须为 `passed`、`passed_with_notes`、`needs_revision` 或 `blocked`。
+- `canon_curator` 负责把立项种子、核心矛盾、小说宪法和压力测试映射为 `canon_candidates`，并在用户最终确认后写入正式设定集。
+
+新增本地数据表：
+
+1. `creation_sessions`：保存创作 Star 分步会话、基础信息、当前步骤、候选卡片、已选项、核心矛盾、小说宪法、压力测试、正典候选与最终提交状态。
+
+新增核心 API：
+
+- `POST /api/projects/{id}/creation/sessions`
+- `GET /api/projects/{id}/creation/sessions/{session_id}`
+- `POST /api/projects/{id}/creation/sessions/{session_id}/worldviews`
+- `POST /api/projects/{id}/creation/sessions/{session_id}/protagonists`
+- `POST /api/projects/{id}/creation/sessions/{session_id}/market-position`
+- `POST /api/projects/{id}/creation/sessions/{session_id}/seed`
+- `POST /api/projects/{id}/creation/sessions/{session_id}/core-conflict`
+- `POST /api/projects/{id}/creation/sessions/{session_id}/constitution`
+- `POST /api/projects/{id}/creation/sessions/{session_id}/constitution-review`
+- `POST /api/projects/{id}/creation/sessions/{session_id}/canon-preview`
+- `POST /api/projects/{id}/creation/sessions/{session_id}/commit`
+
+会话式接口补充约束：
+
+- 逐卡加载接口默认 `count=1`，前端每次点击按顺序追加本轮新增卡片；当用户点击刷新时，前端只在本批第一张请求传 `replace_existing=true`，后端必须同步清空当前步骤候选与全部下游候选、已选项、立项种子、核心矛盾、小说宪法、压力测试和正典候选，避免前后端状态漂移。
+- `canon-preview` 和 `commit` 必须执行小说宪法质量门：`constitution_review.status` 只能在 `passed` 或 `passed_with_notes` 时继续；`needs_revision` 或 `blocked` 不得预览正典或写入正式设定集。
+- `commit` 请求必须支持 `approved_canon_sections`，新版前端提交时必须显式携带 `project`、`story_bible`、`characters`、`entities`、`world_facts`、`graph` 六个审批项；后端对缺失审批项返回校验错误。旧客户端未传该字段时暂按全量审批兼容。
+
+旧版 `POST /api/projects/{id}/creation-star/draw` 与 `POST /api/projects/{id}/creation-star/commit` 暂时保留兼容，但新版前端默认走 `creation/sessions` 分步接口。
+
+### 0.12 大纲拓扑推演开关修订（2026-06-11）
+
+大纲工作室必须支持“拓扑推演”作为可选开关，不得把拓扑图做成纯前端装饰。
+
+接口约束：
+
+- `POST /api/projects/{id}/outline/book/generate` 和 `POST /api/projects/{id}/outline/chapters/batch-generate` 请求体新增 `use_topology_inference: boolean`。
+- 无论开关开启或关闭，生成结果都必须返回 `outline_topology`，结构至少包含 `mode`、`nodes`、`edges`、`events`、`artifacts` 和 `metrics`。
+- `use_topology_inference=true` 时，后端可以运行 LangGraph Swarm / trace 驱动拓扑推演；`outline_topology.mode` 必须为 `topology`。
+- `use_topology_inference=false` 时，后端仍必须从线性 Agent 执行链构造等价的 `outline_topology`；`outline_topology.mode` 必须为 `linear`。
+- 开关只能改变推演组织方式、trace 形态和可解释性视图，不得明显减少正式输出内容量；总纲/卷纲/章纲的字段完整度、章节数量、卷数量和确认写入流程必须基本一致。
+
+前端约束：
+
+- 大纲生成弹窗必须提供单一开关控制是否使用拓扑推演。
+- 推演图必须优先读取 `outline_topology.nodes` 与 `outline_topology.edges`；缺少时才回退到旧 `inferenceSteps`。
+- 拓扑图节点和边必须表示 Agent 交接、依赖、产物、审查、阻塞或修订关系，不得引入无语义动画、装饰性粒子或伪 3D。
+
+文档版本：2026-06-11
 
 ## 1. 项目概述
 
-项目名称：长篇小说撰写 Agent
+项目名称：叙界推演引擎 / Narraverse Engine
+
+当前版本：0.2.0
 
 一句话描述：一个面向长篇小说创作者的本地优先 AI 写作工作台，用结构化故事状态、章节规划、记忆检索和人工审稿来辅助持续创作。
 
@@ -370,7 +466,7 @@ MVP 阶段已有表继续保留；1.0 通过运行时 SQLite 轻量迁移补齐�
 
 所有接口统一以 `/api/v1` 开头。所有响应必须使用第 5 节的统一响应格式。
 
-请求体中的 `model` 字段必须是当前 `LLM_PROVIDER` 支持的模型名。`LLM_PROVIDER=dashscope` 时默认使用 `qwen-plus`；`LLM_PROVIDER=deepseek` 时默认使用 `deepseek-v4-flash`，需要更高质量时可显式传 `deepseek-v4-pro`。不得继续新增 DeepSeek 专用 API 路径。
+请求体中的 `model` 字段必须是当前 `LLM_PROVIDER` 或模型目录支持的模型名。`LLM_PROVIDER=qwen` 或 `dashscope` 时默认使用 `qwen-plus`；`LLM_PROVIDER=deepseek` 时默认使用 `deepseek-v4-flash`，需要更高质量时可显式传 `deepseek-v4-pro`；OpenRouter、SiliconFlow、Moonshot、智谱和 Ollama 均走 OpenAI 兼容调用层。不得继续新增 Provider 专用业务 API 路径。
 
 ### 4.1 创建项目
 
@@ -902,7 +998,7 @@ MVP 阶段关系数据库只使用 SQLite。所有主键均为文本 ID，格式
 |---|---|---|
 | id | TEXT | PRIMARY KEY，前缀 `call_` |
 | job_id | TEXT | NOT NULL，FK `generation_jobs.id`，ON DELETE CASCADE |
-| provider | TEXT | NOT NULL，默认 `dashscope`，枚举：`dashscope`、`deepseek` |
+| provider | TEXT | NOT NULL，默认 `qwen`，枚举：`openai`、`qwen`、`dashscope`、`deepseek`、`openrouter`、`siliconflow`、`moonshot`、`zhipu`、`ollama`、`openai_compatible` |
 | model | TEXT | NOT NULL |
 | request_hash | TEXT | NOT NULL |
 | response_hash | TEXT | 可为空 |
@@ -1144,16 +1240,32 @@ docker compose up --build
 | SQL_ECHO | 否 | `false` | 是否输出 SQL 日志 |
 | QDRANT_URL | 是 | `http://localhost:6333` | Qdrant 服务地址 |
 | QDRANT_COLLECTION | 是 | `novel_memory_v1` | Qdrant 记忆集合名 |
-| LLM_PROVIDER | 是 | `dashscope` | LLM 提供方标识，枚举：`dashscope`、`deepseek` |
+| LLM_PROVIDER | 是 | `qwen` | LLM 提供方标识，枚举：`openai`、`qwen`、`dashscope`、`deepseek`、`openrouter`、`siliconflow`、`moonshot`、`zhipu`、`ollama`、`openai_compatible` |
 | LLM_BASE_URL | 是 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | 当前 Provider 的 OpenAI 兼容 API 地址 |
 | LLM_API_KEY | 是 | 空 | 当前 Provider 的 API Key；优先级低于 Provider 专属 Key |
 | LLM_MODEL | 是 | `qwen-plus` | 当前 Provider 的默认文本生成模型 |
+| LLM_REQUIRE_REMOTE | 否 | `false` | 真实 API 验收开关；为 `true` 时缺少 API Key 或远程调用失败必须直接报错，不允许本地降级 |
 | DASHSCOPE_API_KEY | 否 | 空 | 通义千问 API Key；`LLM_PROVIDER=dashscope` 时优先使用 |
 | DASHSCOPE_BASE_URL | 否 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | 通义千问 OpenAI 兼容 API 地址 |
 | DASHSCOPE_MODEL | 否 | `qwen-plus` | 通义千问默认模型 |
 | DEEPSEEK_API_KEY | 否 | 空 | DeepSeek API Key；`LLM_PROVIDER=deepseek` 时优先使用 |
 | DEEPSEEK_BASE_URL | 否 | `https://api.deepseek.com` | DeepSeek OpenAI 兼容 API 地址 |
 | DEEPSEEK_MODEL | 否 | `deepseek-v4-flash` | DeepSeek 默认模型；高质量任务可改为 `deepseek-v4-pro` |
+| OPENROUTER_API_KEY | 否 | 空 | OpenRouter API Key；`LLM_PROVIDER=openrouter` 时使用 |
+| OPENROUTER_BASE_URL | 否 | `https://openrouter.ai/api/v1` | OpenRouter OpenAI 兼容 API 地址 |
+| OPENROUTER_MODEL | 否 | `openrouter/auto` | OpenRouter 默认模型 |
+| SILICONFLOW_API_KEY | 否 | 空 | SiliconFlow API Key；`LLM_PROVIDER=siliconflow` 时使用 |
+| SILICONFLOW_BASE_URL | 否 | `https://api.siliconflow.cn/v1` | SiliconFlow OpenAI 兼容 API 地址 |
+| SILICONFLOW_MODEL | 否 | `Qwen/Qwen3-32B` | SiliconFlow 默认模型 |
+| MOONSHOT_API_KEY | 否 | 空 | Moonshot/Kimi API Key；`LLM_PROVIDER=moonshot` 时使用 |
+| MOONSHOT_BASE_URL | 否 | `https://api.moonshot.cn/v1` | Moonshot OpenAI 兼容 API 地址 |
+| MOONSHOT_MODEL | 否 | `kimi-k2-0711-preview` | Moonshot 默认模型 |
+| ZHIPU_API_KEY | 否 | 空 | 智谱 GLM API Key；`LLM_PROVIDER=zhipu` 时使用 |
+| ZHIPU_BASE_URL | 否 | `https://open.bigmodel.cn/api/paas/v4` | 智谱 OpenAI 兼容 API 地址 |
+| ZHIPU_MODEL | 否 | `glm-4-plus` | 智谱默认模型 |
+| OLLAMA_API_KEY | 否 | `ollama` | Ollama OpenAI 兼容接口占位 Key |
+| OLLAMA_BASE_URL | 否 | `http://localhost:11434/v1` | Ollama 本地 OpenAI 兼容 API 地址 |
+| OLLAMA_MODEL | 否 | `qwen2.5:7b` | Ollama 默认模型 |
 | LLM_TEMPERATURE | 否 | `0.75` | 默认采样温度 |
 | LLM_MAX_TOKENS | 否 | `8192` | 单次生成最大输出 token |
 | EMBEDDING_MODEL | 是 | `text-embedding-v4` | 默认向量化模型 |
@@ -1383,8 +1495,14 @@ Prompt 模板必须拆分为以下文件：
 
 | `LLM_PROVIDER` | API Key 优先级 | Base URL 优先级 | Model 优先级 |
 |---|---|---|---|
-| `dashscope` | `DASHSCOPE_API_KEY` -> `LLM_API_KEY` | `DASHSCOPE_BASE_URL` -> `LLM_BASE_URL` -> `https://dashscope.aliyuncs.com/compatible-mode/v1` | 请求体 `model` -> `DASHSCOPE_MODEL` -> `LLM_MODEL` -> `qwen-plus` |
+| `qwen` / `dashscope` | `QWEN_API_KEY` -> `DASHSCOPE_API_KEY` -> `LLM_API_KEY` | `QWEN_BASE_URL` -> `DASHSCOPE_BASE_URL` -> `LLM_BASE_URL` -> `https://dashscope.aliyuncs.com/compatible-mode/v1` | 请求体 `model` -> `QWEN_MODEL` -> `DASHSCOPE_MODEL` -> `LLM_MODEL` -> `qwen-plus` |
 | `deepseek` | `DEEPSEEK_API_KEY` -> `LLM_API_KEY` | `DEEPSEEK_BASE_URL` -> `LLM_BASE_URL` -> `https://api.deepseek.com` | 请求体 `model` -> `DEEPSEEK_MODEL` -> `LLM_MODEL` -> `deepseek-v4-flash` |
+| `openai` | `OPENAI_API_KEY` -> `LLM_API_KEY` | `OPENAI_BASE_URL` -> `LLM_BASE_URL` -> `https://api.openai.com/v1` | 请求体 `model` -> `OPENAI_MODEL` -> `LLM_MODEL` -> `gpt-4.1-mini` |
+| `openrouter` | `OPENROUTER_API_KEY` -> `LLM_API_KEY` | `OPENROUTER_BASE_URL` -> `LLM_BASE_URL` -> `https://openrouter.ai/api/v1` | 请求体 `model` -> `OPENROUTER_MODEL` -> `LLM_MODEL` -> `openrouter/auto` |
+| `siliconflow` | `SILICONFLOW_API_KEY` -> `LLM_API_KEY` | `SILICONFLOW_BASE_URL` -> `LLM_BASE_URL` -> `https://api.siliconflow.cn/v1` | 请求体 `model` -> `SILICONFLOW_MODEL` -> `LLM_MODEL` -> `Qwen/Qwen3-32B` |
+| `moonshot` | `MOONSHOT_API_KEY` -> `LLM_API_KEY` | `MOONSHOT_BASE_URL` -> `LLM_BASE_URL` -> `https://api.moonshot.cn/v1` | 请求体 `model` -> `MOONSHOT_MODEL` -> `LLM_MODEL` -> `kimi-k2-0711-preview` |
+| `zhipu` | `ZHIPU_API_KEY` -> `LLM_API_KEY` | `ZHIPU_BASE_URL` -> `LLM_BASE_URL` -> `https://open.bigmodel.cn/api/paas/v4` | 请求体 `model` -> `ZHIPU_MODEL` -> `LLM_MODEL` -> `glm-4-plus` |
+| `ollama` | `OLLAMA_API_KEY` -> `ollama` | `OLLAMA_BASE_URL` -> `LLM_BASE_URL` -> `http://localhost:11434/v1` | 请求体 `model` -> `OLLAMA_MODEL` -> `LLM_MODEL` -> `qwen2.5:7b` |
 
 DeepSeek 约束：
 

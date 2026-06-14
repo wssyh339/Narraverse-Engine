@@ -1,96 +1,188 @@
-# 长篇小说撰写 Agent Studio 1.0
+# 叙界推演引擎 / Narraverse Engine
 
-本项目是本地优先的 AI 小说创作工作室，包含 FastAPI 后端、React Web 前端、Python CLI 和 LangGraph 多 Agent 写作工作流。
+本地优先的多模型长篇小说大纲与世界观推演工作室，围绕 LangGraph / langgraph-swarm 多 Agent 编排、正典库、关系图谱、世界规则推演、大纲推演和人工确认流程构建。
 
-## 核心能力
+当前版本：0.2.0
 
-- 11 个工作室 Agent：总策划、章节规划、情节叙事、人物对话、环境描写、审核修改、风格统一、事实核查、整合输出、设定整理、创作 Star。
-- 13-Agent 长篇大纲推演系统：总编统筹、一句话故事扩展、类型卖点定位、世界圣经、主角成长、人物树、势力冲突、金手指升级、全书结构、卷级大纲、章节节拍、伏笔管理、逻辑审计。
-- 正典补全推演系统：从“已有世界观 + 一句话故事”开始，执行 Why 追问、实体抽取、S/A 级实体补全、正典合并、连续性审查，并生成 `final_outline.md` 与 `canon_store.json`。
-- LangGraph 工作流：初始化项目、章节规划、单章正文、批量生成。
-- 动态设定集：角色卡、剧情实体、实体物件、世界观事实、图节点、图边、连续性问题持续更新。
-- 设定前置编辑：可在写正文前手动维护角色卡、世界观事实、地点/组织/物件/线索，并让 Agent 辅助生成候选设定。
-- 伏笔管理：支持预埋、状态追踪、Agent 建议、回收标记和图谱关联。
-- 工作流图：Agent 配置中心展示初始化、章节规划、单章正文和批量生成流程，点击节点可编辑提示词或说明。
-- 版本系统：Agent 自动快照、diff 对比、回滚、分支。
-- 章节 Chat 协作：基于 `assistant-ui` 外壳和 FastAPI SSE 接口，支持选区上下文、流式局部修改建议和确认后应用到选区。
-- Web 工作台：Dashboard、项目创建/删除、写作工作台、Agent 配置、版本、角色、图谱、世界观、伏笔、批量生成、导出。
-- CLI 入口：保留命令行创建、恢复、生成、查询、导出能力。
-- 导出：Markdown、TXT、HTML、PDF、EPUB、Word 本地文件。
+> 叙界 = 叙事 + 世界。Narraverse Engine 的目标不是“帮你续写几段文字”，而是帮助作者持续推演一部长篇小说的世界、正典、结构、角色和章节。
 
-## 技术栈
+## 为什么做这个项目
 
-- 后端：Python 3.10+、FastAPI、LangGraph、LangChain OpenAI、SQLAlchemy、SQLite、pydantic v2。
-- 前端：React 18、TypeScript、Vite、Ant Design、assistant-ui、Zustand、React Router、Axios、ECharts、Markdown Editor。
-- 部署：Docker Compose。
+大多数 AI 写作工具擅长生成文本，但长篇小说需要的不只是文本生成：
 
-## 结构约定
+- 角色目标、秘密、关系和成长弧必须长期一致；
+- 世界规则要能跨卷、跨章节追踪；
+- 伏笔需要预埋、追踪、提醒和回收；
+- 大纲生成必须读取已有正典，而不是每次孤立发散；
+- AI 修改应该先生成提案，由作者确认后再应用，而不是静默覆盖正文。
 
-后端 API 路由按领域拆分在 `backend/app/api/v1/endpoints/` 下，`backend/app/api/v1/router.py` 只负责挂载：
+叙界推演引擎关注的是：**长篇小说的世界观推演、正典推演和结构化创作工程**。
 
-- `backend/app/api/v1/endpoints/project_studio.py`：项目、状态、故事圣经和章节读写。
-- `backend/app/api/v1/endpoints/agents.py`：Agent、创作 Star、提示词模板和工作流图。
-- `backend/app/api/v1/endpoints/knowledge.py`：角色、实体、世界观事实和图谱。
-- `backend/app/api/v1/endpoints/foreshadowing.py`：伏笔预埋、编辑、删除和回收。
-- `backend/app/api/v1/endpoints/writing.py`：写作任务、批量任务、暂停恢复取消和 Agent 轨迹。
-- `backend/app/api/v1/endpoints/versions.py`：版本列表、diff、回滚和分支。
-- `backend/app/api/v1/endpoints/canon.py`：正典补全、canon context、final_outline 与 canon_store。
-- `backend/app/api/v1/endpoints/tools.py`：摘要、事实核查、一致性检查、风格学习和知识查询。
-- `backend/app/api/v1/endpoints/exporting.py`：导出和导出模板。
+## 技术优势
 
-`backend/app/api/v1/endpoints/studio.py` 保留为 legacy compatibility facade，避免一次性迁移破坏已有调用；新增接口不要继续堆到这个文件。
+- **三条独立 Agent 线**
+  - `creation_star`：抽卡式立项线，负责类型、标签、世界观、主角、卖点、书名和正典种子。
+  - `outline_swarm`：基于 LangGraph Swarm（`langgraph-swarm`）的长篇大纲与世界构建推演线，支持 `active_agent` 动态交接和有限循环。
+  - `chapter_writing`：稳定的章节写作线，包含 canon context、审校、质量门、修订、风格统一和设定更新。
 
-前端大纲工作台采用薄页面编排：`frontend/src/pages/OutlineStudioPage.tsx` 只管理页面状态和数据流，具体 UI 拆在 `frontend/src/pages/outline/`：
+- **正典优先生成**
+  - 所有创作工作流都会读取 `canon_context`：项目基础信息、故事圣经、核心角色、剧情实体、世界观事实、图谱关系、未解决连续性问题和前文摘要。
+  - AI 生成的设定更新默认是候选，必须经作者确认后才写入正式正典。
 
-- `OutlineDirectory.tsx`：大纲目录、卷章层级、删除和批量删除。
-- `OutlineEditorPanel.tsx`：总纲、卷纲、章节、章纲编辑区。
-- `OutlineGenerationModal.tsx`：长篇大纲/卷纲/章纲生成参数弹窗。
-- `OutlineInferenceGraph.tsx`：13-Agent 实时推演过程。
-- `CanonStudioPanel.tsx`：正典补全、下载 `final_outline.md` 和 `canon_store.json`。
+- **人工确认闭环**
+  - 创作 Star 卡片、设定生成、大纲预览、章节修改提案和正典更新都遵循“预览 → 编辑 → 确认 → 提交”。
+  - 用户手写设定不会被无来源、无置信度、无原因地覆盖。
 
-## Agent 三线架构
+- **提示词目录架构**
+  - 长篇写作提示词集中在 `backend/app/prompts/`。
+  - Agent 通过 Prompt Catalog 绑定任务提示词，避免把所有逻辑塞进单个巨大提示词。
 
-- `backend/app/agents/creation_star/`：抽卡式立项，只生成候选设定，用户确认后写入正式项目。
-- `backend/app/agents/outline_swarm/`：大纲生成与世界构建，使用 `langgraph-swarm==0.1.0` 做 `active_agent` 动态路由和有限循环；每个节点通过 `OutlineSwarmAgentRunner` 加载 `backend/app/prompts/*.md` 并调用统一 `llm_client`，无 API Key 时使用同 schema 的本地降级结果；节点只使用用户立项种子与正典上下文，不硬编码示例故事。
-- `backend/app/agents/chapter_writing/`：章节正文生成，使用稳定 LangGraph StateGraph 和质量门修订循环。
+- **模型供应商无关**
+  - 支持 OpenAI、DeepSeek、通义千问/Qwen、OpenRouter、SiliconFlow、Moonshot/Kimi、智谱 GLM、Ollama 和任意 OpenAI 兼容接口。
+  - Agent 配置中心可以为每个可视化工作流里的每个 Agent 单独选择模型；未配置时回退到环境变量默认模型。
+  - API Key 只从环境变量读取。没有 Key 时，本地结构化 fallback 仍可跑通主要流程，方便测试和演示。
 
-现有 `backend/app/agents/workflow.py`、`outline_workflow.py`、`canon_workflow.py` 先保留为 legacy compatibility 入口；新增 Agent 逻辑优先进入三条线目录。
+- **本地优先数据模型**
+  - SQLite 存储项目、章节、角色、世界观事实、图节点、图边、版本、任务、Agent 运行记录和导出记录。
+  - 本地运行不需要云账号、登录系统或托管数据库。
 
-## Python 虚拟环境
+## 功能地图
 
-推荐在项目根目录使用独立 `.venv`，避免把依赖安装到 `conda base` 或系统 Python 中。
+| 模块 | 作用 |
+|---|---|
+| 创作 Star | 引导完成频道、类型、标签、世界观卡、主角卡、书名卡、核心矛盾、小说宪法和正典预览。 |
+| 大纲 Swarm | 生成总纲、动态卷纲、批量章纲、世界构建推演、Agent 推演轨迹和可确认预览。 |
+| 正典库 | 维护角色、剧情实体、世界观事实、图节点、图边、伏笔和连续性问题。 |
+| 正文工作台 | 三栏式写作界面，包含章节目录、Markdown 编辑器、AI 助手、修改提案、版本和字数统计。 |
+| Agent 配置 | 可视化工作流图和可编辑 Agent 提示词。 |
+| 版本系统 | Agent 快照、diff 对比、回滚和分支式探索。 |
+| 导出 | 支持 Markdown、TXT、HTML、PDF、EPUB、Word 等本地导出路径。 |
+| CLI | 支持脚本化创建、恢复、生成章节、跑大纲、跑正典、查询、版本和导出。 |
 
-创建并安装后端依赖：
+## 架构概览
+
+```mermaid
+flowchart LR
+  UI["React Web Studio"] --> API["FastAPI API"]
+  CLI["Python CLI"] --> Services["应用服务层"]
+  API --> Services
+  Services --> Creation["创作 Star 线"]
+  Services --> Outline["大纲 Swarm 线"]
+  Services --> Chapter["章节写作线"]
+  Creation --> Canon["正典库：角色、实体、事实、图谱"]
+  Outline --> Canon
+  Chapter --> Canon
+  Services --> DB["SQLite"]
+  Services --> LLM["统一 LLM Client"]
+  LLM --> Providers["OpenAI / DeepSeek / Qwen / 兼容 API"]
+```
+
+更多说明：
+
+- [架构说明](docs/architecture.md)
+- [提示词目录](docs/prompt-catalog.md)
+- [路线图](docs/roadmap.md)
+- [开源清单](docs/open-source-checklist.md)
+- [示例种子](examples/README.md)
+
+## 仓库结构
+
+```text
+backend/
+  app/
+    agents/
+      creation_star/      # 抽卡式立项线
+      outline_swarm/      # LangGraph Swarm 大纲推演线
+      chapter_writing/    # 章节正文生成线
+      shared/             # canon context、prompt catalog、trace 等共享能力
+    api/v1/endpoints/     # 按领域拆分的 FastAPI 路由
+      project_studio.py   # 项目、章节、大纲和工作室入口
+      knowledge.py        # 角色、实体、世界事实和图谱
+      writing.py          # 写作任务、批量生成和任务控制
+    db/                   # SQLAlchemy 模型和数据库会话
+    prompts/              # 长篇小说提示词目录
+    services/             # 应用编排和持久化服务
+    schemas/              # pydantic v2 请求、响应和状态模型
+frontend/
+  src/
+    api/                  # axios API 客户端
+    components/           # 共享工作室组件
+    layouts/              # 项目工作室外壳
+    pages/                # Dashboard、正文、大纲、设定、Agent 等页面
+      OutlineStudioPage.tsx
+      outline/            # frontend/src/pages/outline/ 大纲目录、编辑器、推演图和生成弹窗
+    store/                # Zustand 项目状态
+docs/                     # 架构、路线图、开源说明
+examples/                 # 可运行的示例输入
+```
+
+关键拆分路径：
+
+- `backend/app/api/v1/endpoints/project_studio.py`
+- `backend/app/api/v1/endpoints/knowledge.py`
+- `backend/app/api/v1/endpoints/writing.py`
+- `frontend/src/pages/OutlineStudioPage.tsx`
+- `frontend/src/pages/outline/`
+
+## 快速开始
+
+### 方式 A：Docker Compose
 
 ```bash
-cd /Users/mac/Documents/长篇小说撰写agent
+cp .env.example .env
+docker compose up --build
+```
+
+启动后访问：
+
+- Web 应用：<http://localhost:5173>
+- API 文档：<http://localhost:8000/docs>
+
+### 方式 B：本地开发
+
+后端：
+
+```bash
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r backend/requirements.txt
+
+DATABASE_URL=sqlite:///./backend/data/novel_agent.db \
+JOB_ARTIFACT_DIR=backend/artifacts/runs \
+FRONTEND_ORIGIN=http://localhost:5173 \
+python -m uvicorn --app-dir backend app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-如果不想激活虚拟环境，也可以始终显式使用 `.venv/bin/python`：
+前端：
 
 ```bash
-.venv/bin/python -m pip install -r backend/requirements.txt
+cd frontend
+corepack enable
+corepack prepare pnpm@11.5.1 --activate
+pnpm install
+
+VITE_API_BASE_URL=http://localhost:8000/api pnpm dev
 ```
 
-当前已验证环境：
+如果你在 Codex 桌面工作区中运行，也可以使用项目内置的 pnpm：
 
-- Python：`3.13.13`
-- 解释器：`.venv/bin/python`
-- 依赖文件：`backend/requirements.txt`
+```bash
+cd frontend
+export PATH="/Users/mac/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:$PATH"
+node ../.codex-tools/pnpm-11.5.1/bin/pnpm.cjs install
+VITE_API_BASE_URL=http://localhost:8000/api node ../.codex-tools/pnpm-11.5.1/bin/pnpm.cjs dev
+```
 
-## 环境变量
+## LLM 配置
 
-复制模板：
+复制环境变量模板：
 
 ```bash
 cp .env.example .env
 ```
 
-常用配置：
+常用供应商：
 
 ```bash
 LLM_PROVIDER=qwen
@@ -98,97 +190,46 @@ QWEN_API_KEY=
 QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 QWEN_MODEL=qwen-plus
 
+LLM_PROVIDER=deepseek
 DEEPSEEK_API_KEY=
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_MODEL=deepseek-v4-flash
 
+LLM_PROVIDER=openai
 OPENAI_API_KEY=
 OPENAI_BASE_URL=https://api.openai.com/v1
 OPENAI_MODEL=gpt-4.1-mini
+
+LLM_PROVIDER=openrouter
+OPENROUTER_API_KEY=
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_MODEL=openrouter/auto
+
+LLM_PROVIDER=siliconflow
+SILICONFLOW_API_KEY=
+SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1
+SILICONFLOW_MODEL=Qwen/Qwen3-32B
+
+LLM_PROVIDER=moonshot
+MOONSHOT_API_KEY=
+MOONSHOT_BASE_URL=https://api.moonshot.cn/v1
+MOONSHOT_MODEL=kimi-k2-0711-preview
+
+LLM_PROVIDER=zhipu
+ZHIPU_API_KEY=
+ZHIPU_BASE_URL=https://open.bigmodel.cn/api/paas/v4
+ZHIPU_MODEL=glm-4-plus
+
+LLM_PROVIDER=ollama
+OLLAMA_BASE_URL=http://localhost:11434/v1
+OLLAMA_MODEL=qwen2.5:7b
 ```
 
-没有 API Key 时，系统仍可用本地规则化输出跑通工作流；远程模型调用结果会标记为未使用远程模型。
+设置 `LLM_REQUIRE_REMOTE=true` 后，如果缺少 API Key 或远程调用失败，系统会直接报错，不再使用本地结构化 fallback。
 
-## 本地启动
-
-建议开两个终端：一个跑后端，一个跑前端。
-
-### 1. 首次安装依赖
-
-后端：
-
-```bash
-cd /Users/mac/Documents/长篇小说撰写agent
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -r backend/requirements.txt
-```
-
-前端：
-
-```bash
-cd /Users/mac/Documents/长篇小说撰写agent/frontend
-export PATH="/Users/mac/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:$PATH"
-node ../.codex-tools/pnpm-11.5.1/bin/pnpm.cjs install
-```
-
-### 2. 启动后端
-
-在终端 1 运行：
-
-```bash
-cd /Users/mac/Documents/长篇小说撰写agent
-source .venv/bin/activate
-DATABASE_URL=sqlite:///./backend/data/novel_agent.db \
-JOB_ARTIFACT_DIR=backend/artifacts/runs \
-FRONTEND_ORIGIN=http://localhost:5173 \
-python -m uvicorn --app-dir backend app.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-### 3. 启动前端
-
-在终端 2 运行：
-
-```bash
-cd /Users/mac/Documents/长篇小说撰写agent/frontend
-export PATH="/Users/mac/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:$PATH"
-VITE_API_BASE_URL=http://localhost:8000/api \
-node ../.codex-tools/pnpm-11.5.1/bin/pnpm.cjs dev
-```
-
-访问：
-
-- 前端：`http://localhost:5173`
-- API 文档：`http://localhost:8000/docs`
-- API 示例：`http://localhost:8000/api/projects`
-
-如果 Vite 提示 `Port 5173 is in use` 并自动切到 `5174`，最简单的处理是关闭占用 5173 的旧前端服务后重启前端。也可以把后端启动命令中的 `FRONTEND_ORIGIN` 改成实际端口，例如 `http://localhost:5174`。
-
-如果看到 `ModuleNotFoundError: No module named 'app'`，请确认后端启动命令是在项目根目录运行，并保留了 `--app-dir backend`。
-
-### 常用命令
-
-```bash
-cd /Users/mac/Documents/长篇小说撰写agent
-source .venv/bin/activate
-python -m pytest backend/tests -q
-
-cd /Users/mac/Documents/长篇小说撰写agent/frontend
-export PATH="/Users/mac/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:$PATH"
-node ../.codex-tools/pnpm-11.5.1/bin/pnpm.cjs test
-node ../.codex-tools/pnpm-11.5.1/bin/pnpm.cjs build
-```
-
-## Docker 启动
-
-```bash
-cp .env.example .env
-docker compose up --build
-```
+模型目录接口：`GET /api/llm/models`。Agent 模型覆盖接口：`GET/PUT /api/agent-model-configs`，以及 `DELETE /api/agent-model-configs/{workflow_id}/{agent_name}`。
 
 ## CLI
-
-先启用虚拟环境，再从项目根目录运行：
 
 ```bash
 source .venv/bin/activate
@@ -202,105 +243,87 @@ python main.py query "谁是主角？"
 python main.py export --format markdown
 ```
 
-13-Agent 长篇大纲推演系统使用本地 `workspace/story_state.json`，不依赖数据库项目：
+大纲 Swarm 示例：
 
 ```bash
 source .venv/bin/activate
 python main.py init --name "长篇推演项目" --genre "都市脑洞" --tone "搞笑腹黑"
 python main.py set-input --worldview worldview.txt --story "林缺用反常识操作让怪谈规则破防。"
 python main.py run-full
-python main.py run-stage S7
-python main.py run-volume 1
-python main.py audit
 python main.py export --outline --format markdown
 ```
 
-大纲推演默认目标为 100 万字、10 卷、每卷 50 章、每章约 2000 字。`run-full` 会生成故事核心、类型卖点定位、世界圣经、主角成长线、人物树、势力冲突表、金手指升级体系、全书 10 卷总纲、逐卷 50 章大纲、章节节拍表、伏笔账本、逻辑审计报告和最终修订版纲要。
-
-Markdown 导出目录默认为 `workspace/exports/`，固定生成：
-
-```text
-01_故事核心.md
-02_类型卖点定位.md
-03_世界圣经.md
-04_主角成长线.md
-05_人物树.md
-06_势力冲突表.md
-07_金手指升级体系.md
-08_全书10卷总纲.md
-09_逐卷50章大纲.md
-10_章节节拍表.md
-11_伏笔账本.md
-12_逻辑审计报告.md
-13_最终修订版纲要.md
-```
-
-正典补全推演系统用于从已有世界观和一句话故事生成正式正典库、DramaNode 节点表、连续性审查报告和最终总纲。示例输入：
-
-```json
-{
-  "project_id": "sample_novel_001",
-  "worldview": "帝国依靠龙骨能源维持工业文明。",
-  "one_sentence_story": "一个低等矿工发现自己体内封印着最后一条真龙。",
-  "genre": "奇幻 / 工业幻想",
-  "target_length": "长篇，多卷结构",
-  "tone": "沉重、史诗、成长"
-}
-```
-
-运行：
+正典补全示例：
 
 ```bash
 source .venv/bin/activate
 python main.py canon-run --input data/sample_input.json --output outputs/final_outline.md
-# 等价兼容入口：
-python cli.py --input data/sample_input.json --output outputs/final_outline.md
 ```
 
-输出：
-
-```text
-outputs/final_outline.md
-outputs/canon_store.json
-outputs/<project_id>/trace_store.json
-outputs/<project_id>/version_store.json
-```
-
-Web 端也可以在项目内进入“大纲”页面，使用“正典补全”区域输入世界观和一句话故事，运行后查看 Agent handoff、正典库实体表、实体补全状态表、DramaNode 故事节点图、ContinuityAgent 审查结果，并下载 `final_outline.md` 与 `canon_store.json`。
-
-项目内“大纲”页面调用 `POST /api/projects/{id}/chapters/plan` 时，后端会保留旧 13-Agent 大纲结构输出，同时附加 `outline_swarm` 字段；前端“实时推演过程”优先读取 `outline_swarm.agent_trace`，展示 `StoryDirectorAgent`、`WhyInterrogatorAgent`、`WorldSettingAgent`、`CharacterArcAgent`、`ConflictAgent`、`PlotArchitectAgent`、`BeatControllerAgent`、`ForeshadowingAgent`、`EntityExtractorAgent`、`ContinuityAgent` 的真实调用轨迹和本地降级/远程模型元数据。该接口还会把 10 个 Swarm 节点以 `outline_swarm/<AgentName>` 写入 `agent_runs`，因此任务详情页可以和旧 13-Agent 链路一起查看完整 23 步执行记录。
-
-也可在 `backend/` 目录运行：
+`examples/` 下提供了几个示例输入：
 
 ```bash
-python main.py resume
+python main.py canon-run --input examples/urban-fantasy/sample_input.json --output outputs/urban-fantasy-final-outline.md
+python main.py canon-run --input examples/xuanhuan/sample_input.json --output outputs/xuanhuan-final-outline.md
+python main.py canon-run --input examples/romance/sample_input.json --output outputs/romance-final-outline.md
 ```
 
-## 验证
+## 测试
 
-测试和构建命令见“本地启动”里的“常用命令”。
+后端：
 
-已验证的核心流程：
+```bash
+source .venv/bin/activate
+python -m pytest backend/tests -q
+```
 
-1. 创建项目。
-2. 生成章节规划。
-3. 生成单章正文。
-4. 查询 Agent 运行轨迹。
-5. 提前创建/编辑角色卡、剧情实体、实体物件和世界观事实。
-6. 使用 Agent 辅助生成候选设定。
-7. 创建、编辑、回收、删除伏笔，并调用 Agent 伏笔建议。
-8. 查看 Agent 工作流图并编辑提示词。
-9. 删除项目并确认列表刷新。
-10. 查看图谱节点。
-11. 查看版本快照、对比差异并回滚版本。
-12. 重复创建批量任务，并验证暂停、恢复、取消状态控制。
-13. 导出 Markdown 和 TXT。
-14. 停止后端并确认前端显示友好的不可用提示。
+前端：
 
-## 仍然不做
+```bash
+cd frontend
+pnpm test
+pnpm build
+```
 
-- 不做登录注册、权限、多用户协作。
-- 不做支付订阅。
-- 不做在线发布平台或自动投稿。
+前端构建可能提示部分 chunk 较大，这是因为项目包含 ECharts、Markdown 工具链和 Ant Design。更多说明见 [前端构建体积分析](docs/前端构建体积分析.md)。
+
+## API 概览
+
+应用同时提供 `/api` 和 `/api/v1` 前缀。主要领域：
+
+- 项目和状态：`/api/projects`
+- 创作 Star：`/api/projects/{id}/creation/sessions`
+- 故事圣经和 canon context：`/api/projects/{id}/story-bible`、`/api/projects/{id}/canon/context`
+- 角色、实体、世界事实、图谱：`/api/projects/{id}/characters`、`/entities`、`/world-facts`、`/graph`
+- 大纲生成：`/api/projects/{id}/outline/book/generate`、`/outline/chapters/batch-generate`
+- Agent 与模型：`/api/agents`、`/api/workflows`、`/api/llm/models`、`/api/agent-model-configs`
+- 写作任务：`/api/write/generate`、`/api/write/batch-generate`
+- 版本：`/api/versions`
+- 导出：`/api/export`
+
+后端运行后，可在 `/docs` 查看 OpenAPI 文档。
+
+## 这个项目不做什么
+
+- 不是托管 SaaS 平台。
+- 不做用户登录、团队空间或云协作。
+- 不做自动投稿或平台账号托管。
 - 不默认引入 Neo4j 或复杂向量数据库。
-- 不让前端直接接触 LLM API Key。
+- 不替代作者判断。AI 生成内容在确认前都只是提案。
+
+## 贡献
+
+欢迎贡献这些方向：
+
+- 提示词目录改进；
+- 更多中文网文类型模板；
+- 正典和连续性检查；
+- 导出模板；
+- 长时间写作场景的 UI/UX 优化；
+- OpenAI 兼容模型供应商适配。
+
+请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+## 许可协议
+
+本项目使用 MIT License。详见 [LICENSE](LICENSE)。

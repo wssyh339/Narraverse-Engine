@@ -193,6 +193,16 @@ export function WorkspacePage() {
     },
     onError: (error) => message.error(error instanceof Error ? error.message : "自动保存失败"),
   });
+  const draftMutation = useMutation({
+    mutationFn: () => studioApi.draftChapter(projectId, selectedChapter!.id, "请根据当前章纲生成首版正文，保持设定连续、冲突清晰，并保留结尾钩子。"),
+    onSuccess: ({ chapter }) => {
+      message.success("章节正文已生成");
+      setEditorValue(chapter.final_text || chapter.draft_text || "");
+      setDirty(false);
+      invalidateWorkbench();
+    },
+    onError: (error) => message.error(error instanceof Error ? error.message : "生成正文失败"),
+  });
 
   useEffect(() => {
     if (!dirty || !selectedChapter || saveMutation.isPending) return;
@@ -458,6 +468,7 @@ export function WorkspacePage() {
         </div>
         <div className="editor-toolbar">
           <Space wrap size={4}>
+            <Button icon={<WandSparkles size={14} />} type="primary" disabled={!selectedChapter || dirty} loading={draftMutation.isPending} onClick={() => draftMutation.mutate()}>生成正文</Button>
             <Button icon={<WandSparkles size={14} />} disabled={!selectedChapter} onClick={() => { setEditorValue(smartFormat(editorValue)); setDirty(true); message.success("智能排版已应用"); }}>智能排版</Button>
             <Button icon={<Replace size={14} />} disabled={!selectedChapter} onClick={() => setReplaceOpen(true)}>查找替换</Button>
             <Button icon={<FileText size={14} />} disabled={!selectedChapter} onClick={() => setFrequencyOpen(true)}>高频词</Button>

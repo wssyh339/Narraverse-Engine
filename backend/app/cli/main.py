@@ -36,7 +36,7 @@ def _outline_workflow_from_state(state: StoryState) -> NovelWorkflow:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="长篇小说撰写 Agent Studio CLI")
+    parser = argparse.ArgumentParser(description="叙界推演引擎 / Narraverse Engine CLI")
     sub = parser.add_subparsers(dest="command", required=True)
     init = sub.add_parser("init")
     init.add_argument("--name", default="长篇推演项目")

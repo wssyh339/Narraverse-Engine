@@ -1,0 +1,63 @@
+name: 问题反馈
+description: 报告 Novel Agent Studio 中可复现的问题。
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: 问题概述
+      description: 发生了什么？
+      placeholder: 创作 Star 在生成世界观卡片时失败。
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 请包含命令或 UI 路径。
+      placeholder: |
+        1. 启动后端。
+        2. 打开创作 Star。
+        3. 点击加载世界观。
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期结果
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+      description: 可以附上日志、截图或 API 响应片段。
+    validations:
+      required: true
+  - type: dropdown
+    id: llm
+    attributes:
+      label: LLM 模式
+      options:
+        - 本地结构化 fallback
+        - OpenAI
+        - DeepSeek
+        - Qwen
+        - 其他 OpenAI 兼容供应商
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Commit 或版本
+      placeholder: commit SHA 或分支名
+  - type: textarea
+    id: environment
+    attributes:
+      label: 运行环境
+      placeholder: |
+        OS:
+        Python:
+        Node:
+        Browser:

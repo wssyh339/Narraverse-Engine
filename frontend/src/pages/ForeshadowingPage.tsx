@@ -10,6 +10,7 @@ import {
   InputNumber,
   List,
   Modal,
+  Progress,
   Row,
   Select,
   Space,
@@ -21,6 +22,7 @@ import { CheckCircle, Edit3, Plus, Sparkles, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import { studioApi, type ForeshadowingPayload, type ForeshadowingSuggestion, type ImportanceLevel } from "../api/studio";
+import { SettingsSectionNav } from "../components/SettingsSectionNav";
 import type { ForeshadowingItem } from "../types/api";
 
 type HookStatus = ForeshadowingItem["payoff_status"];
@@ -195,9 +197,10 @@ export function ForeshadowingPage() {
 
   return (
     <Space direction="vertical" size={18} className="page-stack">
+      <SettingsSectionNav active="foreshadowing" />
       <div className="page-heading">
         <div>
-          <Typography.Title level={2}>伏笔管理</Typography.Title>
+          <Typography.Title level={3}>伏笔管理</Typography.Title>
           <Typography.Text type="secondary">预埋、追踪和回收伏笔；Agent 只提供建议，用户确认后才写入设定。</Typography.Text>
         </div>
         <Space wrap>
@@ -209,45 +212,55 @@ export function ForeshadowingPage() {
       </div>
 
       {hooksQuery.error ? <Alert type="error" message="无法读取伏笔列表" description={(hooksQuery.error as Error).message} showIcon /> : null}
-      <Card loading={hooksQuery.isLoading}>
-        {filtered.length === 0 ? (
-          <Empty description="暂无符合筛选条件的伏笔" />
-        ) : (
-          <List
-            dataSource={filtered}
-            renderItem={(item) => (
-              <List.Item
-                actions={[
-                  <Button key="payoff" type="text" icon={<CheckCircle size={15} />} disabled={item.payoff_status === "paid_off"} onClick={() => setPayoffTarget(item)}>回收</Button>,
-                  <Button key="edit" type="text" icon={<Edit3 size={15} />} onClick={() => openEditor(item)}>编辑</Button>,
-                  <Button
-                    key="delete"
-                    type="text"
-                    danger
-                    icon={<Trash2 size={15} />}
-                    onClick={() => Modal.confirm({
-                      title: "删除伏笔？",
-                      content: item.content,
-                      okText: "删除",
-                      okButtonProps: { danger: true },
-                      cancelText: "取消",
-                      onOk: () => remove.mutateAsync(item.id),
-                    })}
-                  >
-                    删除
-                  </Button>,
-                ]}
-              >
-                <List.Item.Meta
-                  title={<Space><span>{item.content}</span><Tag>{item.payoff_status}</Tag><Tag>{item.importance_level}</Tag></Space>}
-                  description={item.planned_payoff || "暂无计划回收说明"}
+      <Row gutter={[16, 16]}>
+        {hooksQuery.isLoading ? <Col span={24}><Card loading /></Col> : null}
+        {!hooksQuery.isLoading && filtered.length === 0 ? <Col span={24}><Card><Empty description="暂无符合筛选条件的伏笔" /></Card></Col> : null}
+        {filtered.map((item) => (
+          <Col key={item.id} xs={24} lg={12}>
+            <Card
+              className="settings-canon-card"
+              title={<Space><span>伏笔</span><Tag>{item.payoff_status}</Tag></Space>}
+              extra={<Tag color={item.importance_level === "core" ? "red" : "blue"}>{item.importance_level}</Tag>}
+              actions={[
+                <Button key="payoff" type="text" icon={<CheckCircle size={15} />} disabled={item.payoff_status === "paid_off"} onClick={() => setPayoffTarget(item)}>回收</Button>,
+                <Button key="edit" type="text" icon={<Edit3 size={15} />} onClick={() => openEditor(item)}>编辑</Button>,
+                <Button
+                  key="delete"
+                  type="text"
+                  danger
+                  icon={<Trash2 size={15} />}
+                  onClick={() => Modal.confirm({
+                    title: "删除伏笔？",
+                    content: item.content,
+                    okText: "删除",
+                    okButtonProps: { danger: true },
+                    cancelText: "取消",
+                    onOk: () => remove.mutateAsync(item.id),
+                  })}
+                >
+                  删除
+                </Button>,
+              ]}
+            >
+              <Space direction="vertical" className="full-width">
+                <Typography.Paragraph>{item.content}</Typography.Paragraph>
+                <Progress percent={item.importance_score} size="small" />
+                <List
+                  size="small"
+                  dataSource={[
+                    ["计划回收", item.planned_payoff || "暂无"],
+                    ["预埋章节", item.planted_chapter_id || item.chapter_id || "未绑定"],
+                    ["计划回收章节", item.planned_payoff_chapter_id || "未指定"],
+                    ["实际回收章节", item.actual_payoff_chapter_id || "未回收"],
+                    ["来源", item.source],
+                  ]}
+                  renderItem={([label, value]) => <List.Item><strong>{label}</strong><span>{value}</span></List.Item>}
                 />
-                <Typography.Text type="secondary">重要度 {item.importance_score}</Typography.Text>
-              </List.Item>
-            )}
-          />
-        )}
-      </Card>
+              </Space>
+            </Card>
+          </Col>
+        ))}
+      </Row>
 
       <Modal
         title={editing ? "编辑伏笔" : "新增伏笔"}

@@ -26,7 +26,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="长篇小说撰写 Agent Studio API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="叙界推演引擎 / Narraverse Engine API", version="0.2.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

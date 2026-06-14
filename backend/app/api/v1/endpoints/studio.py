@@ -2,21 +2,34 @@ from __future__ import annotations
 
 # legacy compatibility facade: new routes import domain endpoint modules instead.
 
+import asyncio
 from typing import Any
 
-from fastapi import Depends, WebSocket
+from fastapi import BackgroundTasks, Depends, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.core.responses import success_response
-from app.db.session import get_db
+from app.db import models
+from app.db.session import SessionLocal, get_db
 from app.schemas.chapter import PlanChaptersRequest
 from app.schemas.canon import CanonRunRequest
+from app.schemas.outline import (
+    BookOutlineCommitRequest,
+    BookOutlineGenerateRequest,
+    ChapterOutlineBatchGenerateRequest,
+    ChapterOutlineCommitRequest,
+)
 from app.schemas.studio import (
     AgentPromptUpdateRequest,
     BatchGenerateRequest,
     BranchVersionRequest,
     ChapterChatRequest,
+    CreationSessionCardRequest,
+    CreationSessionCommitRequest,
+    CreationSessionCreateRequest,
+    CreationSessionRunRequest,
+    CreationSessionSeedRequest,
     CreationStarCommitRequest,
     CreationStarDrawRequest,
     CreateCharacterRequest,
@@ -49,6 +62,7 @@ from app.schemas.studio import (
     WriteGenerateRequest,
 )
 from app.services.project_service import project_service
+from app.services.serializers import serialize_job
 from app.services.canon_service import get_canon_store as load_canon_store
 from app.services.canon_service import get_final_outline, run_canon_workflow
 from app.services.studio_service import studio_service
@@ -90,8 +104,24 @@ def generate_story_bible(project_id: str, request: GenerateStoryBibleRequest, db
     return success_response(studio_service.generate_story_bible(db, project_id, request))
 
 
-def plan_chapters(project_id: str, request: PlanChaptersRequest, db: Session = Depends(get_db)):
-    return success_response(studio_service.plan_chapters(db, project_id, request))
+def plan_chapters(project_id: str, request: PlanChaptersRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    return success_response(studio_service.plan_chapters(db, project_id, request, background_tasks=background_tasks))
+
+
+def generate_book_outline(project_id: str, request: BookOutlineGenerateRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    return success_response(studio_service.generate_book_outline(db, project_id, request, background_tasks=background_tasks))
+
+
+def commit_book_outline(project_id: str, request: BookOutlineCommitRequest, db: Session = Depends(get_db)):
+    return success_response(studio_service.commit_book_outline(db, project_id, request))
+
+
+def generate_chapter_outlines_batch(project_id: str, request: ChapterOutlineBatchGenerateRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    return success_response(studio_service.generate_chapter_outlines_batch(db, project_id, request, background_tasks=background_tasks))
+
+
+def commit_chapter_outlines(project_id: str, request: ChapterOutlineCommitRequest, db: Session = Depends(get_db)):
+    return success_response(studio_service.commit_chapter_outlines(db, project_id, request))
 
 
 def list_chapters(project_id: str, db: Session = Depends(get_db)):
@@ -142,6 +172,50 @@ def creation_star_commit(project_id: str, request: CreationStarCommitRequest, db
     return success_response(studio_service.creation_star_commit(db, project_id, request))
 
 
+def create_creation_session(project_id: str, request: CreationSessionCreateRequest, db: Session = Depends(get_db)):
+    return success_response(studio_service.create_creation_session(db, project_id, request))
+
+
+def get_creation_session(project_id: str, session_id: str, db: Session = Depends(get_db)):
+    return success_response(studio_service.get_creation_session(db, project_id, session_id))
+
+
+def creation_session_worldviews(project_id: str, session_id: str, request: CreationSessionCardRequest, db: Session = Depends(get_db)):
+    return success_response(studio_service.creation_session_worldviews(db, project_id, session_id, request))
+
+
+def creation_session_protagonists(project_id: str, session_id: str, request: CreationSessionCardRequest, db: Session = Depends(get_db)):
+    return success_response(studio_service.creation_session_protagonists(db, project_id, session_id, request))
+
+
+def creation_session_market_position(project_id: str, session_id: str, request: CreationSessionCardRequest, db: Session = Depends(get_db)):
+    return success_response(studio_service.creation_session_market_position(db, project_id, session_id, request))
+
+
+def creation_session_seed(project_id: str, session_id: str, request: CreationSessionSeedRequest, db: Session = Depends(get_db)):
+    return success_response(studio_service.creation_session_seed(db, project_id, session_id, request))
+
+
+def creation_session_core_conflict(project_id: str, session_id: str, request: CreationSessionRunRequest, db: Session = Depends(get_db)):
+    return success_response(studio_service.creation_session_core_conflict(db, project_id, session_id, request))
+
+
+def creation_session_constitution(project_id: str, session_id: str, request: CreationSessionRunRequest, db: Session = Depends(get_db)):
+    return success_response(studio_service.creation_session_constitution(db, project_id, session_id, request))
+
+
+def creation_session_constitution_review(project_id: str, session_id: str, request: CreationSessionRunRequest, db: Session = Depends(get_db)):
+    return success_response(studio_service.creation_session_constitution_review(db, project_id, session_id, request))
+
+
+def creation_session_canon_preview(project_id: str, session_id: str, request: CreationSessionRunRequest, db: Session = Depends(get_db)):
+    return success_response(studio_service.creation_session_canon_preview(db, project_id, session_id, request))
+
+
+def creation_session_commit(project_id: str, session_id: str, request: CreationSessionCommitRequest, db: Session = Depends(get_db)):
+    return success_response(studio_service.creation_session_commit(db, project_id, session_id, request))
+
+
 def run_canon_studio(project_id: str, request: CanonRunRequest, db: Session = Depends(get_db)):
     project_service.get_project(db, project_id)
     payload = request.model_copy(update={"project_id": project_id})
@@ -158,8 +232,8 @@ def get_canon_studio_final_outline(project_id: str, db: Session = Depends(get_db
     return success_response(get_final_outline(project_id))
 
 
-def list_workflows():
-    return success_response(studio_service.list_workflows())
+def list_workflows(db: Session = Depends(get_db)):
+    return success_response(studio_service.list_workflows(db))
 
 
 def get_agent(agent_name: str, db: Session = Depends(get_db)):
@@ -168,6 +242,10 @@ def get_agent(agent_name: str, db: Session = Depends(get_db)):
 
 def update_agent_prompt(agent_name: str, request: AgentPromptUpdateRequest, db: Session = Depends(get_db)):
     return success_response(studio_service.update_agent_prompt(db, agent_name, request))
+
+
+def restore_agent_prompt(agent_name: str, db: Session = Depends(get_db)):
+    return success_response(studio_service.restore_agent_prompt(db, agent_name))
 
 
 def create_prompt_template(request: PromptTemplateRequest, db: Session = Depends(get_db)):
@@ -378,5 +456,21 @@ async def progress_websocket(websocket: WebSocket):
 
 async def job_websocket(websocket: WebSocket, job_id: str):
     await websocket.accept()
-    await websocket.send_json({"type": "job", "job_id": job_id, "message": "任务 WebSocket 已连接"})
+    try:
+        while True:
+            db = SessionLocal()
+            try:
+                job = db.get(models.GenerationJob, job_id)
+                if job is None:
+                    await websocket.send_json({"type": "job", "job_id": job_id, "message": "任务 WebSocket 已连接", "job": None})
+                    break
+                payload = serialize_job(job)
+            finally:
+                db.close()
+            await websocket.send_json({"type": "job", "job_id": job_id, "job": payload})
+            if payload["status"] in {"succeeded", "failed", "cancelled", "canceled"}:
+                break
+            await asyncio.sleep(1)
+    except WebSocketDisconnect:
+        return
     await websocket.close()

@@ -14,6 +14,9 @@ import app.agents.workflow as workflow_module
 import app.services.studio_service as studio_service_module
 from app.db.session import Base, engine
 from app.main import app
+from app.schemas.chapter import PlanChaptersRequest
+from app.schemas.outline import BookOutlineGenerateRequest
+from app.services.studio_service import studio_service
 
 
 def reset_database() -> None:
@@ -27,6 +30,20 @@ def assert_success_envelope(payload: dict) -> None:
     assert isinstance(payload["data"], dict)
     assert payload["request_id"].startswith("req_")
     assert payload["timestamp"].endswith("Z")
+
+
+def assert_outline_topology(topology: dict, mode: str, minimum_nodes: int = 3) -> None:
+    assert topology["mode"] == mode
+    assert isinstance(topology["nodes"], list)
+    assert isinstance(topology["edges"], list)
+    assert isinstance(topology["events"], list)
+    assert isinstance(topology["artifacts"], list)
+    assert isinstance(topology["metrics"], dict)
+    assert len(topology["nodes"]) >= minimum_nodes
+    assert topology["metrics"]["node_count"] == len(topology["nodes"])
+    assert topology["metrics"]["edge_count"] == len(topology["edges"])
+    assert topology["nodes"][0]["type"] in {"agent", "artifact", "gate", "decision"}
+    assert {"id", "label", "type", "status", "summary"}.issubset(topology["nodes"][0])
 
 
 def test_create_project_returns_project_and_story_bible() -> None:
@@ -174,6 +191,9 @@ def test_plan_chapters_creates_job_and_chapter_placeholders() -> None:
     volumes = client.get(f"/api/projects/{project_id}/volumes").json()["data"]["volumes"]
     assert len(volumes) >= 10
     assert "本卷主角提升目标" in volumes[0]["outline"]
+    assert not volumes[0]["outline"].lstrip().startswith("{")
+    assert "```json" not in volumes[0]["outline"]
+    assert "Phase 1" in volumes[0]["outline"]
 
     job_response = client.get(f"/api/v1/jobs/{job['id']}")
     assert job_response.status_code == 200
@@ -192,6 +212,320 @@ def test_plan_chapters_creates_job_and_chapter_placeholders() -> None:
     assert run_names[12] == "logic_audit"
     assert run_names[13] == "outline_swarm/StoryDirectorAgent"
     assert run_names[-1] == "outline_swarm/ContinuityAgent"
+
+
+def test_plan_chapters_overwrite_restores_soft_deleted_chapters() -> None:
+    reset_database()
+    client = TestClient(app)
+    created = client.post(
+        "/api/projects",
+        json={
+            "title": "重生成章纲",
+            "genre": "都市",
+            "target_reader": "喜欢热血反转的读者",
+            "premise": "被退学的主角重开旧武馆。",
+            "style_guide": "热血爽快。",
+            "language": "zh-CN",
+            "planned_chapter_count": 10,
+            "chapter_word_target": 1800,
+        },
+    ).json()
+    project_id = created["data"]["project"]["id"]
+    first_plan = client.post(
+        f"/api/projects/{project_id}/chapters/plan",
+        json={
+            "volume_title": "第一卷",
+            "start_chapter_no": 1,
+            "chapter_count": 2,
+            "outline_requirement": "建立旧武馆和第一场冲突。",
+            "overwrite_existing": False,
+            "idempotency_key": f"plan:{project_id}:restore:first",
+        },
+    ).json()
+    chapter_id = first_plan["data"]["chapters"][0]["id"]
+    second_chapter_id = first_plan["data"]["chapters"][1]["id"]
+
+    reorder_response = client.post(
+        f"/api/projects/{project_id}/chapters/reorder",
+        json={"chapter_ids": [second_chapter_id, chapter_id]},
+    )
+    assert reorder_response.status_code == 200
+
+    trash_response = client.post(f"/api/projects/{project_id}/chapters/{chapter_id}/trash")
+    assert trash_response.status_code == 200
+    assert trash_response.json()["data"]["chapter"]["deleted_at"] is not None
+
+    second_plan = client.post(
+        f"/api/projects/{project_id}/chapters/plan",
+        json={
+            "volume_title": "第一卷：重开",
+            "start_chapter_no": 1,
+            "chapter_count": 2,
+            "outline_requirement": "重新生成可见章纲。",
+            "overwrite_existing": True,
+            "idempotency_key": f"plan:{project_id}:restore:second",
+        },
+    )
+    assert second_plan.status_code == 200
+    planned_chapter = second_plan.json()["data"]["chapters"][0]
+    assert planned_chapter["id"] == chapter_id
+    assert planned_chapter["deleted_at"] is None
+    assert planned_chapter["sort_order"] == 1
+
+    state = client.get(f"/api/projects/{project_id}/state").json()["data"]["state"]
+    assert [chapter["chapter_no"] for chapter in state["chapters"]] == [1, 2]
+
+
+def test_plan_chapters_async_mode_queues_then_worker_completes() -> None:
+    reset_database()
+    client = TestClient(app)
+    created = client.post(
+        "/api/projects",
+        json={
+            "title": "后台推演",
+            "genre": "都市异能",
+            "target_reader": "喜欢长线爽点的读者",
+            "premise": "主角继承一家被所有势力忽视的旧武馆。",
+            "style_guide": "节奏紧，钩子强。",
+            "language": "zh-CN",
+            "planned_chapter_count": 20,
+            "chapter_word_target": 1800,
+        },
+    ).json()
+    project_id = created["data"]["project"]["id"]
+    request = PlanChaptersRequest(
+        volume_title="第一卷：旧武馆重开",
+        start_chapter_no=1,
+        chapter_count=2,
+        outline_requirement="后台推演测试，只生成章纲。",
+        overwrite_existing=True,
+        idempotency_key=f"plan:{project_id}:async",
+        async_mode=True,
+    )
+
+    from app.db.session import SessionLocal
+
+    db = SessionLocal()
+    try:
+        queued = studio_service.plan_chapters(db, project_id, request)
+        assert queued["job"]["status"] == "queued"
+        assert queued["job"]["progress"]["current_step"] == "queued"
+        assert queued["chapters"] == []
+        job_id = queued["job"]["id"]
+    finally:
+        db.close()
+
+    studio_service.run_plan_chapters_job(job_id)
+
+    job_response = client.get(f"/api/jobs/{job_id}")
+    assert job_response.status_code == 200
+    job = job_response.json()["data"]["job"]
+    assert job["status"] == "succeeded"
+    assert job["progress"]["completed_steps"] == job["progress"]["total_steps"]
+    assert len(job["result"]["chapters"]) == 2
+
+    state = client.get(f"/api/projects/{project_id}/state").json()["data"]["state"]
+    assert [chapter["chapter_no"] for chapter in state["chapters"]] == [1, 2]
+
+
+def test_book_outline_preview_does_not_create_chapters_until_commit() -> None:
+    reset_database()
+    client = TestClient(app)
+    created = client.post(
+        "/api/projects",
+        json={
+            "title": "大纲解耦测试",
+            "genre": "都市脑洞",
+            "target_reader": "喜欢反差爽点和长线伏笔的读者",
+            "premise": "主角用荒诞方式击穿严肃规则。",
+            "style_guide": "强反差，强钩子。",
+            "language": "zh-CN",
+            "planned_chapter_count": 20,
+            "chapter_word_target": 2000,
+        },
+    ).json()
+    project_id = created["data"]["project"]["id"]
+    initial_volume_count = len(client.get(f"/api/projects/{project_id}/volumes").json()["data"]["volumes"])
+
+    generated = client.post(
+        f"/api/projects/{project_id}/outline/book/generate",
+        json={
+            "outline_requirement": "生成总纲和动态卷纲，不生成章纲。",
+            "target_words": 400000,
+            "volume_count": 4,
+            "chapters_per_volume": 50,
+            "chapter_word_target": 2000,
+            "use_topology_inference": False,
+            "idempotency_key": f"book-outline:{project_id}:preview",
+        },
+    )
+
+    assert generated.status_code == 200
+    payload = generated.json()
+    assert_success_envelope(payload)
+    job = payload["data"]["job"]
+    assert job["job_type"] == "book_outline"
+    assert job["status"] == "succeeded"
+    outline_plan = payload["data"]["outline_plan"]
+    assert outline_plan["generation_kind"] == "book_outline"
+    assert "book_outline" in outline_plan
+    assert len(outline_plan["volume_outlines"]) == 4
+    assert all("rhythm_model" in item for item in outline_plan["volume_outlines"])
+    assert "chapter_beats" not in outline_plan
+    assert "outline_swarm" not in outline_plan
+    assert "change_summary" in outline_plan
+    assert "will_update" in outline_plan["change_summary"]
+    assert "preserved_manual_settings" in outline_plan["change_summary"]
+    assert_outline_topology(outline_plan["outline_topology"], "linear", minimum_nodes=12)
+    topology_agent_names = {node.get("agent_name") for node in outline_plan["outline_topology"]["nodes"]}
+    assert "beat_control" not in topology_agent_names
+
+    state_before_commit = client.get(f"/api/projects/{project_id}/state").json()["data"]["state"]
+    assert state_before_commit["chapters"] == []
+    assert len(client.get(f"/api/projects/{project_id}/volumes").json()["data"]["volumes"]) == initial_volume_count
+
+    committed = client.post(
+        f"/api/projects/{project_id}/outline/book/commit",
+        json={"job_id": job["id"]},
+    )
+    assert committed.status_code == 200
+    committed_payload = committed.json()
+    assert_success_envelope(committed_payload)
+    assert len(committed_payload["data"]["volumes"]) == 4
+    state_after_commit = client.get(f"/api/projects/{project_id}/state").json()["data"]["state"]
+    assert state_after_commit["chapters"] == []
+    assert len(client.get(f"/api/projects/{project_id}/volumes").json()["data"]["volumes"]) == 4
+
+
+def test_book_outline_async_returns_initial_topology_skeleton() -> None:
+    reset_database()
+    client = TestClient(app)
+    created = client.post(
+        "/api/projects",
+        json={
+            "title": "异步拓扑骨架测试",
+            "genre": "都市脑洞",
+            "target_reader": "喜欢多 Agent 推演的读者",
+            "premise": "主角发现城市规则会回应他的选择。",
+            "style_guide": "清晰、强钩子。",
+            "language": "zh-CN",
+            "planned_chapter_count": 60,
+            "chapter_word_target": 2000,
+        },
+    ).json()
+    project_id = created["data"]["project"]["id"]
+
+    from app.db.session import SessionLocal
+
+    db = SessionLocal()
+    try:
+        queued = studio_service.generate_book_outline(
+            db,
+            project_id,
+            BookOutlineGenerateRequest(
+                outline_requirement="异步任务创建后先返回真实计划拓扑骨架。",
+                target_words=120000,
+                volume_count=3,
+                chapters_per_volume=20,
+                chapter_word_target=2000,
+                use_topology_inference=True,
+                async_mode=True,
+                idempotency_key=f"book-outline:{project_id}:async-skeleton",
+            ),
+        )
+        assert queued["job"]["status"] == "queued"
+        outline_plan = queued["outline_plan"]
+        assert outline_plan["generation_kind"] == "book_outline"
+        assert_outline_topology(outline_plan["outline_topology"], "topology", minimum_nodes=12)
+        topology_agent_names = {node.get("agent_name") for node in outline_plan["outline_topology"]["nodes"]}
+        assert "beat_control" not in topology_agent_names
+        assert "outline_swarm/BeatControllerAgent" not in topology_agent_names
+
+        persisted = client.get(f"/api/jobs/{queued['job']['id']}").json()["data"]["job"]
+        assert persisted["result"]["outline_plan"]["outline_topology"]["mode"] == "topology"
+    finally:
+        db.close()
+
+
+def test_chapter_outline_batch_preview_requires_commit_to_write_chapters() -> None:
+    reset_database()
+    client = TestClient(app)
+    created = client.post(
+        "/api/projects",
+        json={
+            "title": "批量章纲测试",
+            "genre": "悬疑",
+            "target_reader": "喜欢线索递进的读者",
+            "premise": "主角追查一封来自未来的信。",
+            "style_guide": "冷静克制。",
+            "language": "zh-CN",
+            "planned_chapter_count": 30,
+            "chapter_word_target": 2200,
+        },
+    ).json()
+    project_id = created["data"]["project"]["id"]
+    book = client.post(
+        f"/api/projects/{project_id}/outline/book/generate",
+        json={
+            "outline_requirement": "先生成总纲和卷纲。",
+            "target_words": 300000,
+            "volume_count": 3,
+            "chapters_per_volume": 10,
+            "chapter_word_target": 2200,
+            "use_topology_inference": True,
+            "idempotency_key": f"book-outline:{project_id}:chapter-source",
+        },
+    ).json()
+    book_outline = book["data"]["outline_plan"]
+    assert "outline_swarm" in book_outline
+    assert_outline_topology(book_outline["outline_topology"], "topology", minimum_nodes=12)
+    topology_agent_names = {node.get("agent_name") for node in book_outline["outline_topology"]["nodes"]}
+    assert "outline_swarm/BeatControllerAgent" not in topology_agent_names
+    llm_nodes = [
+        node
+        for node in book_outline["outline_topology"]["nodes"]
+        if node.get("type") == "agent" and (node.get("payload") or {}).get("llm")
+    ]
+    assert llm_nodes
+    assert {"used_remote_model", "provider", "model", "source", "parsed"}.issubset(llm_nodes[0]["payload"]["llm"])
+    runs_payload = client.get(f"/api/jobs/{book['data']['job']['id']}/agent-runs").json()
+    assert_success_envelope(runs_payload)
+    run_names = [item["agent_name"] for item in runs_payload["data"]["agent_runs"]]
+    assert "beat_control" not in run_names
+    assert "outline_swarm/BeatControllerAgent" not in run_names
+    client.post(f"/api/projects/{project_id}/outline/book/commit", json={"job_id": book["data"]["job"]["id"]})
+
+    generated = client.post(
+        f"/api/projects/{project_id}/outline/chapters/batch-generate",
+        json={
+            "chapter_ranges": [{"volume_no": 1, "start_chapter_no": 1, "end_chapter_no": 3}],
+            "generation_requirement": "只生成前三章章纲。",
+            "overwrite_existing": True,
+            "use_topology_inference": True,
+            "idempotency_key": f"chapter-outline:{project_id}:1-3",
+        },
+    )
+
+    assert generated.status_code == 200
+    payload = generated.json()
+    assert_success_envelope(payload)
+    job = payload["data"]["job"]
+    assert job["job_type"] == "chapter_outline_batch"
+    assert job["status"] == "succeeded"
+    assert len(payload["data"]["chapter_outlines"]) == 3
+    assert_outline_topology(payload["data"]["outline_plan"]["outline_topology"], "topology", minimum_nodes=3)
+    assert client.get(f"/api/projects/{project_id}/state").json()["data"]["state"]["chapters"] == []
+
+    committed = client.post(
+        f"/api/projects/{project_id}/outline/chapters/commit",
+        json={"job_id": job["id"]},
+    )
+    assert committed.status_code == 200
+    committed_payload = committed.json()
+    assert_success_envelope(committed_payload)
+    assert [item["chapter_no"] for item in committed_payload["data"]["chapters"]] == [1, 2, 3]
+    state = client.get(f"/api/projects/{project_id}/state").json()["data"]["state"]
+    assert [item["chapter_no"] for item in state["chapters"]] == [1, 2, 3]
 
 
 def test_1_0_draft_graph_versions_and_export_flow() -> None:
@@ -236,9 +570,13 @@ def test_1_0_draft_graph_versions_and_export_flow() -> None:
 
     runs = client.get(f"/api/jobs/{draft_payload['data']['job']['id']}/agent-runs").json()
     agent_names = [item["agent_name"] for item in runs["data"]["agent_runs"]]
-    assert len(agent_names) == 10
+    assert len(agent_names) == 14
     assert "canon_context" in agent_names
+    assert "chapter_card" in agent_names
+    assert "scene_outline" in agent_names
+    assert "draft_rewrite" in agent_names
     assert "quality_gate" in agent_names
+    assert "narrative_ledger" in agent_names
 
     graph = client.get(f"/api/projects/{project_id}/graph").json()
     assert graph["data"]["graph"]["nodes"]
@@ -300,9 +638,12 @@ def test_draft_workflow_builds_context_quality_gate_and_candidate_canon_updates(
 
     result = agent_workflow.run_chapter_draft(state)
 
+    assert result.chapter_card["chapter_title"] == "见血的铜印"
+    assert result.scene_outline["scenes"]
     assert result.integrated_draft
     assert result.quality_gate["status"] == "passed"
     assert result.final_chapter_text
+    assert result.narrative_ledger["chapter_summary"]
     assert result.candidate_canon_updates["world_fact_updates"]
     assert "林昭" in result.plot_draft
     assert "契约禁律" in result.plot_draft
@@ -382,7 +723,13 @@ def test_core_agent_workflows_call_llm_client_for_agent_nodes(monkeypatch) -> No
     )
 
     initialized = agent_workflow.run_initialization(state)
+    assert initialized.novel_constitution["main_conflict"] == "LLM 主线冲突"
+    assert initialized.constitution_review["status"] == "passed_with_notes"
     planned = agent_workflow.run_chapter_plan(initialized.model_copy(update={"target_chapters": 1, "current_chapter": 1}))
+    assert planned.macro_outline["phase_count"] >= 1
+    assert planned.ending_backcast["required_path"]
+    assert planned.volume_outline["volume_no"] == 1
+    assert planned.rolling_chapter_outline[0]["title"] == "LLM 第一章"
     drafted = agent_workflow.run_chapter_draft(
         planned.model_copy(update={"current_chapter_outline": planned.completed_chapters[0], "canon_context": state.canon_context})
     )
@@ -403,6 +750,10 @@ def test_core_agent_workflows_call_llm_client_for_agent_nodes(monkeypatch) -> No
         assert agent_name in called_agents
     assert all(model == "unit-model" for _, model in fake_llm.calls)
     assert drafted.plot_draft == "LLM情节：林昭推进契约。"
+    assert drafted.chapter_card["chapter_title"] == "LLM 第一章"
+    assert drafted.scene_outline["scenes"]
+    assert drafted.narrative_ledger["chapter_summary"] == "LLM 摘要"
+    assert drafted.context_summary
     assert drafted.final_chapter_text == "LLM终稿"
     assert drafted.agent_llm_results["plot_narrator"]["used_remote_model"] is True
     assert drafted.agent_llm_results["plot_narrator"]["provider"] == "fake-provider"
@@ -566,6 +917,48 @@ def test_agent_assisted_settings_generation_calls_llm_client(monkeypatch) -> Non
     assert data["world_facts"][0]["title"] == "远程禁忌"
     runs = client.get(f"/api/jobs/{data['job']['id']}/agent-runs").json()["data"]["agent_runs"]
     assert all(run["output_payload"]["_llm"]["used_remote_model"] for run in runs)
+
+
+def test_agent_assisted_settings_preview_does_not_persist_candidates() -> None:
+    reset_database()
+    client = TestClient(app)
+    created = client.post(
+        "/api/projects",
+        json={
+            "title": "设定预览",
+            "genre": "玄幻",
+            "target_reader": "喜欢设定严谨的读者",
+            "premise": "主角进入一座会审判谎言的城。",
+            "style_guide": "",
+            "language": "zh-CN",
+            "planned_chapter_count": 20,
+            "chapter_word_target": 2000,
+        },
+    ).json()
+    project_id = created["data"]["project"]["id"]
+    before_characters = client.get(f"/api/projects/{project_id}/characters").json()["data"]["characters"]
+    before_entities = client.get(f"/api/projects/{project_id}/entities").json()["data"]["entities"]
+    before_facts = client.get(f"/api/projects/{project_id}/world-facts").json()["data"]["world_facts"]
+    before_graph_nodes = client.get(f"/api/projects/{project_id}/graph").json()["data"]["graph"]["nodes"]
+
+    preview = client.post(
+        f"/api/projects/{project_id}/settings/generate",
+        json={"target": "all", "instruction": "只预览候选设定，暂不入库。", "count": 2, "preview_only": True},
+    )
+
+    assert preview.status_code == 200
+    payload = preview.json()
+    assert_success_envelope(payload)
+    data = payload["data"]
+    assert data["preview_only"] is True
+    assert len(data["characters"]) == 2
+    assert len(data["entities"]) == 2
+    assert len(data["world_facts"]) == 2
+
+    assert client.get(f"/api/projects/{project_id}/characters").json()["data"]["characters"] == before_characters
+    assert client.get(f"/api/projects/{project_id}/entities").json()["data"]["entities"] == before_entities
+    assert client.get(f"/api/projects/{project_id}/world-facts").json()["data"]["world_facts"] == before_facts
+    assert client.get(f"/api/projects/{project_id}/graph").json()["data"]["graph"]["nodes"] == before_graph_nodes
 
 
 def test_workflows_project_delete_and_foreshadowing_lifecycle() -> None:

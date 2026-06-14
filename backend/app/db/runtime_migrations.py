@@ -62,6 +62,22 @@ SQLITE_COLUMN_DEFAULTS: dict[str, dict[str, str]] = {
     },
 }
 
+SQLITE_TABLE_DEFAULTS: dict[str, str] = {
+    "agent_model_configs": """
+        CREATE TABLE agent_model_configs (
+            id TEXT PRIMARY KEY,
+            workflow_id TEXT NOT NULL,
+            agent_name TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            CONSTRAINT uq_agent_model_workflow_agent UNIQUE (workflow_id, agent_name)
+        )
+    """,
+}
+
 
 def apply_sqlite_runtime_migrations(engine: Engine) -> None:
     """Small dev-time migration layer for the local SQLite MVP database.
@@ -77,6 +93,9 @@ def apply_sqlite_runtime_migrations(engine: Engine) -> None:
     inspector = inspect(engine)
     existing_tables = set(inspector.get_table_names())
     with engine.begin() as connection:
+        for table_name, ddl in SQLITE_TABLE_DEFAULTS.items():
+            if table_name not in existing_tables:
+                connection.execute(text(ddl))
         for table_name, columns in SQLITE_COLUMN_DEFAULTS.items():
             if table_name not in existing_tables:
                 continue

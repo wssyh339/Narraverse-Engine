@@ -13,16 +13,18 @@ import {
   Progress,
   Select,
   Space,
+  Statistic,
   Tabs,
   Tag,
   Typography,
   message,
 } from "antd";
-import { Edit3, Plus, RefreshCw, Sparkles, Trash2 } from "lucide-react";
+import { Check, Edit3, Plus, RefreshCw, Sparkles, Trash2, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
-import { studioApi, type EntityPayload, type GenerateSettingPayload, type ImportanceLevel, type WorldFactPayload } from "../api/studio";
-import type { StoryEntity, WorldFact } from "../types/api";
+import { studioApi, type CharacterPayload, type EntityPayload, type GenerateSettingPayload, type ImportanceLevel, type RoleType, type WorldFactPayload } from "../api/studio";
+import { SettingsSectionNav } from "../components/SettingsSectionNav";
+import type { Character, GenerationJob, StoryEntity, WorldFact } from "../types/api";
 
 type GenerateTarget = GenerateSettingPayload["target"];
 
@@ -48,6 +50,13 @@ interface EntityFormValues {
   description?: string;
   current_status?: string;
   source?: string;
+}
+
+interface GeneratedSettingsPreview {
+  job: GenerationJob;
+  characters: Character[];
+  entities: StoryEntity[];
+  world_facts: WorldFact[];
 }
 
 function splitIds(value?: string) {
@@ -109,6 +118,53 @@ function entityPayload(values: EntityFormValues): EntityPayload {
   };
 }
 
+function characterCandidatePayload(character: Character): CharacterPayload {
+  return {
+    name: character.name,
+    aliases: character.aliases ?? [],
+    role_type: (character.role_type || "supporting") as RoleType,
+    importance_level: (character.importance_level || "medium") as ImportanceLevel,
+    importance_score: character.importance_score ?? 50,
+    summary: character.summary ?? "",
+    appearance: character.appearance ?? "",
+    personality: character.personality ?? "",
+    goals: character.goals ?? [],
+    motivations: character.motivations ?? [],
+    secrets: character.secrets ?? [],
+    abilities: character.abilities ?? [],
+    weaknesses: character.weaknesses ?? [],
+    character_arc: character.character_arc ?? "",
+    current_status: "candidate",
+    related_entity_ids: character.related_entity_ids ?? [],
+    related_character_ids: character.related_character_ids ?? [],
+    updated_reason: "approved_agent_setting_candidate",
+  };
+}
+
+function entityCandidatePayload(entity: StoryEntity): EntityPayload {
+  return {
+    entity_type: entity.entity_type as EntityPayload["entity_type"],
+    name: entity.name,
+    importance_level: (entity.importance_level || "medium") as ImportanceLevel,
+    importance_score: entity.importance_score ?? 50,
+    description: entity.description ?? "",
+    current_status: "candidate",
+    source: "agent",
+  };
+}
+
+function worldFactCandidatePayload(fact: WorldFact): WorldFactPayload {
+  return {
+    category: fact.category as WorldFactPayload["category"],
+    title: fact.title,
+    content: fact.content ?? "",
+    importance_level: (fact.importance_level || "medium") as ImportanceLevel,
+    importance_score: fact.importance_score ?? 50,
+    confidence: fact.confidence ?? 0.65,
+    related_entity_ids: fact.related_entity_ids ?? [],
+  };
+}
+
 export function WorldPage() {
   const { projectId = "" } = useParams();
   const queryClient = useQueryClient();
@@ -119,6 +175,7 @@ export function WorldPage() {
   const [factOpen, setFactOpen] = useState(false);
   const [entityOpen, setEntityOpen] = useState(false);
   const [generateTarget, setGenerateTarget] = useState<GenerateTarget | null>(null);
+  const [pendingGeneratedSettings, setPendingGeneratedSettings] = useState<GeneratedSettingsPreview | null>(null);
   const [factForm] = Form.useForm<FactFormValues>();
   const [entityForm] = Form.useForm<EntityFormValues>();
   const [generateForm] = Form.useForm<{ instruction: string; count: number }>();
@@ -126,6 +183,7 @@ export function WorldPage() {
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["world", projectId] });
     queryClient.invalidateQueries({ queryKey: ["entities", projectId] });
+    queryClient.invalidateQueries({ queryKey: ["characters", projectId] });
     queryClient.invalidateQueries({ queryKey: ["graph", projectId] });
   };
 
@@ -188,15 +246,39 @@ export function WorldPage() {
 
   const generate = useMutation({
     mutationFn: (values: { instruction: string; count: number }) =>
-      studioApi.generateSettings(projectId, { target: generateTarget ?? "all", instruction: values.instruction, count: values.count }),
+      studioApi.generateSettings(projectId, { target: generateTarget ?? "all", instruction: values.instruction, count: values.count, preview_only: true }),
     onSuccess: (result) => {
       const total = result.characters.length + result.entities.length + result.world_facts.length;
-      message.success(`Agent 已生成 ${total} 条候选设定`);
+      setPendingGeneratedSettings({
+        job: result.job,
+        characters: result.characters,
+        entities: result.entities,
+        world_facts: result.world_facts,
+      });
+      message.success(`Agent 已生成 ${total} 条候选设定，请确认写入`);
       setGenerateTarget(null);
       generateForm.resetFields();
-      invalidate();
     },
     onError: (error) => message.error(error instanceof Error ? error.message : "Agent 生成失败"),
+  });
+
+  const commitGeneratedSettings = useMutation({
+    mutationFn: async () => {
+      if (!pendingGeneratedSettings) {
+        throw new Error("没有可写入的候选设定");
+      }
+      await Promise.all([
+        ...pendingGeneratedSettings.characters.map((character) => studioApi.createCharacter(projectId, characterCandidatePayload(character))),
+        ...pendingGeneratedSettings.entities.map((entity) => studioApi.createEntity(projectId, entityCandidatePayload(entity))),
+        ...pendingGeneratedSettings.world_facts.map((fact) => studioApi.createWorldFact(projectId, worldFactCandidatePayload(fact))),
+      ]);
+    },
+    onSuccess: () => {
+      message.success("候选设定已写入正式设定集");
+      setPendingGeneratedSettings(null);
+      invalidate();
+    },
+    onError: (error) => message.error(error instanceof Error ? error.message : "候选设定写入失败"),
   });
 
   const groupedFacts = useMemo(() => {
@@ -241,9 +323,10 @@ export function WorldPage() {
 
   return (
     <Space direction="vertical" size={18} className="page-stack">
+      <SettingsSectionNav active="world" />
       <div className="page-heading">
         <div>
-          <Typography.Title level={2}>世界观与实体</Typography.Title>
+          <Typography.Title level={3}>世界观与实体</Typography.Title>
           <Typography.Text type="secondary">提前编辑世界规则、地点、组织、物件和线索；创作 Agent 会把它们作为 canon_context 使用。</Typography.Text>
         </div>
         <Space wrap>
@@ -254,6 +337,82 @@ export function WorldPage() {
 
       {factsQuery.error ? <Alert type="error" message="无法读取世界观事实" description={(factsQuery.error as Error).message} showIcon /> : null}
       {entitiesQuery.error ? <Alert type="error" message="无法读取剧情实体" description={(entitiesQuery.error as Error).message} showIcon /> : null}
+
+      {pendingGeneratedSettings ? (
+        <Card
+          title="候选设定审批"
+          extra={
+            <Space>
+              <Button icon={<X size={15} />} onClick={() => setPendingGeneratedSettings(null)} disabled={commitGeneratedSettings.isPending}>
+                丢弃候选
+              </Button>
+              <Button type="primary" icon={<Check size={15} />} loading={commitGeneratedSettings.isPending} onClick={() => commitGeneratedSettings.mutate()}>
+                确认写入
+              </Button>
+            </Space>
+          }
+        >
+          <Space direction="vertical" size={14} className="full-width">
+            <Alert
+              type="info"
+              showIcon
+              message="这些内容尚未写入正式设定集"
+              description="确认写入后才会创建角色卡、剧情实体和世界观事实，并同步图谱。丢弃候选不会影响当前项目数据。"
+            />
+            <div className="candidate-summary-grid">
+              <Statistic title="角色候选" value={pendingGeneratedSettings.characters.length} />
+              <Statistic title="实体/物件候选" value={pendingGeneratedSettings.entities.length} />
+              <Statistic title="世界观事实候选" value={pendingGeneratedSettings.world_facts.length} />
+            </div>
+            <Collapse
+              items={[
+                {
+                  key: "characters",
+                  label: `角色候选 ${pendingGeneratedSettings.characters.length}`,
+                  children: (
+                    <List
+                      dataSource={pendingGeneratedSettings.characters}
+                      renderItem={(character) => (
+                        <List.Item>
+                          <List.Item.Meta title={<Space><span>{character.name}</span><Tag>{character.importance_level}</Tag></Space>} description={character.summary || character.character_arc || "暂无描述"} />
+                        </List.Item>
+                      )}
+                    />
+                  ),
+                },
+                {
+                  key: "entities",
+                  label: `实体/物件候选 ${pendingGeneratedSettings.entities.length}`,
+                  children: (
+                    <List
+                      dataSource={pendingGeneratedSettings.entities}
+                      renderItem={(entity) => (
+                        <List.Item>
+                          <List.Item.Meta title={<Space><span>{entity.name}</span><Tag>{entity.entity_type}</Tag><Tag>{entity.importance_level}</Tag></Space>} description={entity.description || "暂无描述"} />
+                        </List.Item>
+                      )}
+                    />
+                  ),
+                },
+                {
+                  key: "world_facts",
+                  label: `世界观事实候选 ${pendingGeneratedSettings.world_facts.length}`,
+                  children: (
+                    <List
+                      dataSource={pendingGeneratedSettings.world_facts}
+                      renderItem={(fact) => (
+                        <List.Item>
+                          <List.Item.Meta title={<Space><span>{fact.title}</span><Tag>{fact.category}</Tag><Tag>{fact.importance_level}</Tag></Space>} description={fact.content || "暂无内容"} />
+                        </List.Item>
+                      )}
+                    />
+                  ),
+                },
+              ]}
+            />
+          </Space>
+        </Card>
+      ) : null}
 
       <Tabs
         items={[

@@ -1,0 +1,40 @@
+name: 功能建议
+description: 为长篇小说工作流提出改进建议。
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的问题
+      description: 这个功能要解决哪类写作、大纲、正典或工作流问题？
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案
+      description: 请描述功能和预期用户流程。
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: 影响区域
+      options:
+        - 创作 Star
+        - 大纲 Swarm
+        - 章节写作
+        - 正典 / 图谱 / 连续性
+        - Prompt Catalog
+        - 前端工作室
+        - 导出
+        - CLI
+        - 文档
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: 约束或参考
+      description: 可以写非目标、兼容性顾虑，或其他工具中的类似体验。

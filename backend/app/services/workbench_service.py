@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import json
 from typing import Any
 
 from fastapi import HTTPException
@@ -11,6 +12,7 @@ from app.core.ids import generate_id
 from app.core.json import dumps
 from app.db import models
 from app.db.models import utcnow
+from app.services.llm_client import llm_client
 from app.schemas.workbench import (
     CreateEditorProposalRequest,
     CreateManualChapterRequest,
@@ -236,9 +238,10 @@ class WorkbenchService:
         return {"proposals": [serialize_editor_proposal(row) for row in rows]}
 
     def create_proposal(self, db: Session, project_id: str, chapter_id: str, request: CreateEditorProposalRequest) -> dict:
+        project = self._project(db, project_id)
         chapter = self._chapter(db, project_id, chapter_id)
         original = request.selected_text or chapter.final_text or chapter.draft_text or chapter.outline
-        proposed = self._local_proposal(request.tool_name, original, request.instruction, chapter.title)
+        proposed = self._remote_proposal(db, project, chapter, request.tool_name, original, request.instruction)
         diff = list(difflib.unified_diff(original.splitlines(), proposed.splitlines(), fromfile="当前正文", tofile="AI 提案", lineterm=""))
         row = models.EditorProposal(
             id=generate_id("prp"),
@@ -320,6 +323,85 @@ class WorkbenchService:
         if tool_name == "polish":
             return f"{text}\n\n空气像被一根看不见的线绷紧，连沉默都带着即将断裂的重量。".strip()
         return f"{text}\n\n优化目标：{requirement}".strip()
+
+    def _remote_proposal(
+        self,
+        db: Session,
+        project: models.Project,
+        chapter: models.Chapter,
+        tool_name: str,
+        original: str,
+        instruction: str,
+    ) -> str:
+        story_bible = db.query(models.StoryBible).filter(models.StoryBible.project_id == project.id).first()
+        characters = (
+            db.query(models.Character)
+            .filter(models.Character.project_id == project.id)
+            .order_by(models.Character.importance_score.desc(), models.Character.updated_at.desc())
+            .limit(6)
+            .all()
+        )
+        world_facts = (
+            db.query(models.WorldFact)
+            .filter(models.WorldFact.project_id == project.id)
+            .order_by(models.WorldFact.importance_score.desc(), models.WorldFact.updated_at.desc())
+            .limit(10)
+            .all()
+        )
+        system_prompt = (
+            "你是长篇小说正文编辑提案 Agent。你只生成等待用户审批的提案，不能声称已经写入正文。"
+            "必须严格尊重当前章节、故事圣经、角色事实和世界观事实。"
+            "返回 JSON，不要 Markdown 代码块，格式："
+            '{"proposed_content":"提案正文","rationale":"修改理由"}'
+        )
+        user_prompt = "\n".join(
+            [
+                f"项目：{project.title} / {project.genre}",
+                f"章节：第{chapter.chapter_no}章《{chapter.title}》",
+                f"工具：{tool_name}",
+                f"用户要求：{instruction.strip() or '保持设定连续并服务当前章节目标。'}",
+                f"章节目标：{chapter.outline or '未填写'}",
+                f"核心事件：{chapter.core_event or '未填写'}",
+                f"冲突：{chapter.conflict or '未填写'}",
+                f"转折：{chapter.turn_point or '未填写'}",
+                f"结尾钩子：{chapter.cliffhanger or '未填写'}",
+                f"风格要求：{project.style_guide or (story_bible.style_guide if story_bible else '') or '保持当前文本风格'}",
+                f"世界观：{(story_bible.world_setting if story_bible else '') or project.premise}",
+                "核心角色：" + json.dumps([serialize_character(row) for row in characters], ensure_ascii=False)[:2400],
+                "世界事实：" + json.dumps([serialize_world_fact(row) for row in world_facts], ensure_ascii=False)[:2400],
+                "当前文本：" + (original or "暂无正文，请基于章纲生成可应用提案。")[:12000],
+                "输出要求：proposed_content 只能包含用户可审批应用的文本；review 工具可输出审稿报告；setting_update 工具只输出候选变更建议，不得直接写入设定集。",
+            ]
+        )
+        result = llm_client.generate(system_prompt, user_prompt)
+        proposed = self._parse_remote_proposal(result.content)
+        if proposed:
+            return proposed
+        if result.used_remote_model:
+            return result.content.strip()
+        return self._local_proposal(tool_name, original, instruction, chapter.title)
+
+    def _parse_remote_proposal(self, content: str) -> str:
+        stripped = content.strip()
+        if stripped.startswith("```"):
+            stripped = stripped.strip("`")
+            if stripped.startswith("json"):
+                stripped = stripped[4:].strip()
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            start = stripped.find("{")
+            end = stripped.rfind("}")
+            if start < 0 or end <= start:
+                return ""
+            try:
+                parsed = json.loads(stripped[start : end + 1])
+            except json.JSONDecodeError:
+                return ""
+        if not isinstance(parsed, dict):
+            return ""
+        proposed = parsed.get("proposed_content") or parsed.get("replacement") or parsed.get("content")
+        return str(proposed).strip() if proposed else ""
 
     def _snapshot(self, db: Session, chapter: models.Chapter, agent_name: str, user_note: str) -> models.VersionSnapshot:
         version = models.VersionSnapshot(

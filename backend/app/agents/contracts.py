@@ -18,10 +18,19 @@ class NovelStudioState(BaseModel):
     style_guide: str = ""
     initial_idea: str = ""
     world_setting: str = ""
+    core_conflict_system: dict[str, Any] = Field(default_factory=dict)
+    novel_constitution: dict[str, Any] = Field(default_factory=dict)
+    constitution_review: dict[str, Any] = Field(default_factory=dict)
+    macro_outline: dict[str, Any] = Field(default_factory=dict)
+    ending_backcast: dict[str, Any] = Field(default_factory=dict)
+    volume_outline: dict[str, Any] = Field(default_factory=dict)
+    rolling_chapter_outline: list[dict[str, Any]] = Field(default_factory=list)
     story_bible: dict[str, Any] = Field(default_factory=dict)
     characters: list[dict[str, Any]] = Field(default_factory=list)
     outline: list[dict[str, Any]] = Field(default_factory=list)
     current_chapter_outline: dict[str, Any] = Field(default_factory=dict)
+    chapter_card: dict[str, Any] = Field(default_factory=dict)
+    scene_outline: dict[str, Any] = Field(default_factory=dict)
     plot_draft: str = ""
     dialogue_draft: str = ""
     environment_draft: str = ""
@@ -36,6 +45,7 @@ class NovelStudioState(BaseModel):
     completed_chapters: list[dict[str, Any]] = Field(default_factory=list)
     user_feedback_history: list[dict[str, Any]] = Field(default_factory=list)
     agent_prompt_configs: dict[str, str] = Field(default_factory=dict)
+    agent_model_configs: dict[str, str] = Field(default_factory=dict)
     foreshadowing_list: list[dict[str, Any]] = Field(default_factory=list)
     raw_worldview: str = ""
     market_position: dict[str, Any] = Field(default_factory=dict)
@@ -57,6 +67,10 @@ class NovelStudioState(BaseModel):
     continuity_issues: list[dict[str, Any]] = Field(default_factory=list)
     version_history: list[dict[str, Any]] = Field(default_factory=list)
     chapter_summary: str = ""
+    narrative_ledger: dict[str, Any] = Field(default_factory=dict)
+    timeline: list[dict[str, Any]] = Field(default_factory=list)
+    health_check_report: dict[str, Any] = Field(default_factory=dict)
+    context_summary: str = ""
     canon_context: dict[str, Any] = Field(default_factory=dict)
     candidate_canon_updates: dict[str, Any] = Field(default_factory=dict)
     canon_updates: dict[str, Any] = Field(default_factory=dict)

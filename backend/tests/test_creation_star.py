@@ -3,7 +3,9 @@ from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
+from app.db import models
 from app.db.session import Base, engine
+from app.db.session import SessionLocal
 from app.main import app
 import app.services.studio_service as studio_service_module
 
@@ -19,6 +21,27 @@ def assert_success(response) -> dict:
     assert payload["success"] is True
     assert payload["error"] is None
     return payload["data"]
+
+
+def assert_validation_error(response) -> dict:
+    assert response.status_code == 400
+    payload = response.json()
+    assert payload["success"] is False
+    assert payload["error"]["code"] == "VALIDATION_ERROR"
+    return payload["error"]
+
+
+def patch_creation_session_state(session_id: str, patch: dict) -> None:
+    db = SessionLocal()
+    try:
+        session = db.get(models.CreationSession, session_id)
+        assert session is not None
+        state = json.loads(session.state_json or "{}")
+        state.update(patch)
+        session.state_json = json.dumps(state, ensure_ascii=False)
+        db.commit()
+    finally:
+        db.close()
 
 
 def create_project(client: TestClient) -> str:
@@ -83,9 +106,17 @@ def test_creation_star_options_draw_and_commit_flow() -> None:
     assert worldview_payload["step"] == "worldview"
     assert worldview_payload["draw_id"]
     assert "现代都市里" in worldview_payload["prompt_snapshot"]["context_summary"]
+    assert "世界观候选卡" in worldview_payload["prompt_snapshot"]["step_prompt"]
+    assert worldview_payload["prompt_snapshot"]["generation_settings"]["temperature"] == 0.9
+    assert "core_rule" in worldview_payload["prompt_snapshot"]["output_schema"]["cards"][0]
     assert len(worldview_payload["cards"]) == 9
     assert worldview_payload["cards"][0]["title"]
     assert worldview_payload["cards"][0]["tags"]
+    assert worldview_payload["cards"][0]["core_rule"]
+    assert worldview_payload["cards"][0]["social_pressure"]
+    assert worldview_payload["cards"][0]["protagonist_entry"]
+    assert worldview_payload["cards"][0]["long_form_potential"]
+    assert worldview_payload["cards"][0]["reader_hooks"]
 
     refreshed_worldview_payload = assert_success(
         client.post(
@@ -185,6 +216,151 @@ def test_creation_star_options_draw_and_commit_flow() -> None:
     assert state["project"]["initial_idea"] == basic_info["initial_idea"]
     assert any(character["name"] == protagonist["name"] for character in state["characters"])
     assert any(fact["title"] == "核心命题" for fact in state["world_facts"])
+
+
+def test_creation_session_decoupled_steps_and_single_card_loading() -> None:
+    reset_database()
+    client = TestClient(app)
+    project_id = create_project(client)
+    basic_info = {
+        "channel": "男频",
+        "genre": "都市",
+        "subgenres": ["高武"],
+        "tags": ["学院流", "升级流"],
+        "target_reader": "喜欢高武升级和旧案悬疑的读者",
+        "target_words": 1200000,
+        "style": "热血悬疑",
+        "initial_idea": "宗门变成教育集团，主角从武考旧案里翻身。",
+    }
+
+    session_payload = assert_success(
+        client.post(
+            f"/api/projects/{project_id}/creation/sessions",
+            json={"basic_info": basic_info},
+        )
+    )
+    session = session_payload["session"]
+    session_id = session["id"]
+    assert session["current_step"] == "brief"
+    assert session["basic_info"]["genre"] == "都市"
+
+    first_worldview = assert_success(
+        client.post(
+            f"/api/projects/{project_id}/creation/sessions/{session_id}/worldviews",
+            json={"count": 1},
+        )
+    )
+    assert len(first_worldview["cards"]) == 1
+    assert len(first_worldview["session"]["state"]["worldview_candidates"]) == 1
+    assert first_worldview["job"]["job_type"] == "creation_worldview_card"
+
+    second_worldview = assert_success(
+        client.post(
+            f"/api/projects/{project_id}/creation/sessions/{session_id}/worldviews",
+            json={"count": 1, "manual_input": "更强调榜单压迫"},
+        )
+    )
+    assert len(second_worldview["cards"]) == 1
+    assert len(second_worldview["session"]["state"]["worldview_candidates"]) == 2
+    assert first_worldview["cards"][0]["title"] in second_worldview["prompt_snapshot"]["previous_cards_summary"]
+    assert second_worldview["cards"][0]["core_rule"]
+    replacement_worldview = assert_success(
+        client.post(
+            f"/api/projects/{project_id}/creation/sessions/{session_id}/worldviews",
+            json={"count": 1, "manual_input": "完全换一批世界观", "replace_existing": True},
+        )
+    )
+    assert len(replacement_worldview["cards"]) == 1
+    assert len(replacement_worldview["session"]["state"]["worldview_candidates"]) == 1
+    assert replacement_worldview["session"]["state"]["selected_worldview"]["id"] == replacement_worldview["cards"][0]["id"]
+    assert replacement_worldview["session"]["state"]["protagonist_candidates"] == []
+    assert replacement_worldview["session"]["state"]["title_candidates"] == []
+    assert replacement_worldview["session"]["state"]["project_seed"] == {}
+    assert replacement_worldview["prompt_snapshot"]["previous_cards_summary"] == "无上一批候选。"
+    selected_worldview = replacement_worldview["cards"][0]
+
+    protagonist_payload = assert_success(
+        client.post(
+            f"/api/projects/{project_id}/creation/sessions/{session_id}/protagonists",
+            json={"count": 1, "selected_worldview": selected_worldview},
+        )
+    )
+    assert len(protagonist_payload["cards"]) == 1
+    assert protagonist_payload["session"]["state"]["selected_worldview"]["id"] == selected_worldview["id"]
+    selected_protagonist = protagonist_payload["cards"][0]
+
+    market_payload = assert_success(
+        client.post(
+            f"/api/projects/{project_id}/creation/sessions/{session_id}/market-position",
+            json={"count": 1, "selected_protagonist": selected_protagonist},
+        )
+    )
+    assert len(market_payload["title_candidates"]) == 1
+    assert len(market_payload["market_position_candidates"]) == 1
+    selected_title = market_payload["title_candidates"][0]
+
+    seed_payload = assert_success(
+        client.post(
+            f"/api/projects/{project_id}/creation/sessions/{session_id}/seed",
+            json={
+                "selected_worldview": selected_worldview,
+                "selected_protagonist": selected_protagonist,
+                "selected_title": selected_title,
+                "user_note": "确认立项种子",
+            },
+        )
+    )
+    assert seed_payload["project_seed"]["selected_title"]["title"] == selected_title["title"]
+    assert seed_payload["session"]["current_step"] == "seed"
+
+    conflict_payload = assert_success(client.post(f"/api/projects/{project_id}/creation/sessions/{session_id}/core-conflict", json={}))
+    assert conflict_payload["core_conflict_system"]["core_conflict"]
+    assert conflict_payload["job"]["current_agent"] == "chief_architect"
+
+    constitution_payload = assert_success(client.post(f"/api/projects/{project_id}/creation/sessions/{session_id}/constitution", json={}))
+    assert constitution_payload["novel_constitution"]["core_narrative_engine"]
+
+    review_payload = assert_success(client.post(f"/api/projects/{project_id}/creation/sessions/{session_id}/constitution-review", json={}))
+    assert review_payload["constitution_review"]["status"] in {"passed", "passed_with_notes", "needs_revision", "blocked"}
+
+    patch_creation_session_state(
+        session_id,
+        {"constitution_review": {"status": "blocked", "blocking_issues": ["核心矛盾无法支撑长篇"], "revision_suggestions": []}},
+    )
+    blocked_preview = client.post(f"/api/projects/{project_id}/creation/sessions/{session_id}/canon-preview", json={})
+    error = assert_validation_error(blocked_preview)
+    assert "小说宪法压力测试" in error["message"]
+
+    patch_creation_session_state(session_id, {"constitution_review": {"status": "passed_with_notes", "blocking_issues": [], "revision_suggestions": []}})
+    preview_payload = assert_success(client.post(f"/api/projects/{project_id}/creation/sessions/{session_id}/canon-preview", json={}))
+    assert preview_payload["canon_candidates"]["story_bible_candidate"]["main_conflict"]
+    assert preview_payload["canon_candidates"]["character_candidates"]
+    assert preview_payload["canon_candidates"]["entity_candidates"]
+    assert preview_payload["canon_candidates"]["graph_candidate_edges"]
+
+    state_before_commit = assert_success(client.get(f"/api/projects/{project_id}/state"))["state"]
+    assert not any(fact["title"] == "核心命题" for fact in state_before_commit["world_facts"])
+
+    incomplete_approval = client.post(
+        f"/api/projects/{project_id}/creation/sessions/{session_id}/commit",
+        json={"user_note": "审批不完整", "approved_canon_sections": ["project", "story_bible"]},
+    )
+    approval_error = assert_validation_error(incomplete_approval)
+    assert "正典审批项不完整" in approval_error["message"]
+
+    committed = assert_success(
+        client.post(
+            f"/api/projects/{project_id}/creation/sessions/{session_id}/commit",
+            json={
+                "user_note": "确认解耦创作 Star 入库",
+                "approved_canon_sections": ["project", "story_bible", "characters", "entities", "world_facts", "graph"],
+            },
+        )
+    )
+    assert committed["project"]["title"] == selected_title["title"]
+    assert committed["story_bible"]["main_conflict"]
+    assert committed["version"]["agent_name"] == "canon_curator"
+    assert committed["session"]["status"] == "committed"
 
 
 def test_creation_star_draw_calls_llm_client(monkeypatch) -> None:

@@ -47,6 +47,7 @@ class ProjectService:
             continuity_rules_json=dumps([]),
         )
         db.add(project)
+        db.flush()
         db.add(story_bible)
         db.add(models.Volume(id=generate_id("vol"), project_id=project.id, volume_no=1, title="第一卷", sort_order=1))
         self._seed_project_canon(db, project)
@@ -168,6 +169,7 @@ class ProjectService:
             status="draft",
         )
         db.add(clone)
+        db.flush()
         db.add(
             models.StoryBible(
                 id=generate_id("bib"),
@@ -330,6 +332,7 @@ class ProjectService:
             importance_score=fact.importance_score,
         )
         db.add_all([char_node, entity_node, fact_node])
+        db.flush()
         db.add_all(
             [
                 models.GraphEdge(

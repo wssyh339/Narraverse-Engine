@@ -14,10 +14,11 @@ export interface LongOutlineForm {
   volume_title: string;
   outline_requirement: string;
   custom_input: string;
+  use_topology_inference: boolean;
 }
 
 export type OutlineView = "outline" | "volume" | "chapter" | "chapterOutline";
-export type GenerationMode = "outline" | "volume" | "chapter";
+export type GenerationMode = "outline" | "chapter";
 export type InferenceStatus = "pending" | "running" | "succeeded" | "failed";
 
 export interface InferenceStep {
@@ -25,6 +26,36 @@ export interface InferenceStep {
   role: string;
   output_key: string;
   status: InferenceStatus;
+}
+
+export interface OutlineTopologyNode {
+  id: string;
+  label: string;
+  type: "agent" | "artifact" | "gate" | "decision" | string;
+  status: InferenceStatus | "blocked" | "needs_user_review" | string;
+  summary: string;
+  agent_name?: string;
+  payload?: Record<string, unknown>;
+}
+
+export interface OutlineTopologyEdge {
+  id: string;
+  source: string;
+  target: string;
+  type: "handoff" | "depends_on" | "emits" | "reviews" | "blocks" | "revises" | "approves" | string;
+  label: string;
+  reason?: string;
+  weight?: number;
+}
+
+export interface OutlineTopology {
+  mode: "topology" | "linear" | string;
+  generation_kind: string;
+  nodes: OutlineTopologyNode[];
+  edges: OutlineTopologyEdge[];
+  events: Record<string, unknown>[];
+  artifacts: Record<string, unknown>[];
+  metrics: Record<string, unknown>;
 }
 
 export interface OutlineDirectoryHandlers {
@@ -37,8 +68,11 @@ export interface OutlineDirectoryHandlers {
   openGenerationPreview: (mode: GenerationMode) => void;
   confirmClearOutline: () => void;
   confirmDeleteVolume: (volume: Volume) => void;
+  confirmBatchDeleteVolumes: () => void;
   toggleDirectorySelection: (checked: boolean) => void;
   toggleVolumeSelection: (volumeNo: number, checked: boolean) => void;
+  toggleVolumeOutlineSelection: (volumeId: string, checked: boolean) => void;
+  toggleAllVolumeOutlines: (checked: boolean) => void;
   toggleChapterSelection: (chapterId: string, checked: boolean) => void;
   confirmTrashChapter: (chapter: Chapter) => void;
   confirmBatchTrashChapters: () => void;

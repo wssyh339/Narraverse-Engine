@@ -5993,7 +5993,7 @@ class StudioService:
                 path.write_text(f"<html><head><title>{title}</title></head><body><pre>{content}</pre></body></html>", encoding="utf-8")
             elif fmt == "pdf":
                 # Minimal readable text payload with .pdf extension for MVP export preview.
-                path.write_text("%PDF-1.4\n% Novel Agent Studio text export\n" + content, encoding="utf-8")
+                path.write_text("%PDF-1.4\n% Narraverse Engine text export\n" + content, encoding="utf-8")
             else:
                 path.write_text(content, encoding="utf-8")
             return

@@ -23,6 +23,7 @@ import { Edit3, Plus, Sparkles, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import { studioApi, type CharacterPayload, type ImportanceLevel, type RoleType } from "../api/studio";
+import { SettingsSectionNav } from "../components/SettingsSectionNav";
 import type { Character } from "../types/api";
 
 interface CharacterFormValues {
@@ -172,9 +173,10 @@ export function CharactersPage() {
 
   return (
     <Space direction="vertical" size={18} className="page-stack">
+      <SettingsSectionNav active="characters" />
       <div className="page-heading">
         <div>
-          <Typography.Title level={2}>角色卡</Typography.Title>
+          <Typography.Title level={3}>角色卡</Typography.Title>
           <Typography.Text type="secondary">先建立角色重要度、目标、关系和成长弧；创作 Agent 会在生成前读取这些设定。</Typography.Text>
         </div>
         <Space wrap>

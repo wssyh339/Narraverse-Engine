@@ -1,7 +1,7 @@
 [project]
-name = "novel-agent-backend"
-version = "0.1.0"
-description = "Backend MVP for the long-form novel writing agent."
+name = "narraverse-engine-backend"
+version = "0.2.0"
+description = "Backend service for Narraverse Engine, a local-first long-form novel inference studio."
 requires-python = ">=3.10"
 dependencies = []
 
