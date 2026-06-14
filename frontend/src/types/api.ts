@@ -259,16 +259,76 @@ export interface AgentRun {
   finished_at: string | null;
 }
 
+export interface LLMProviderOption {
+  id: string;
+  label: string;
+  base_url_env: string;
+  api_key_env: string;
+  default_model: string;
+  notes: string;
+}
+
+export interface LLMModelOption {
+  id: string;
+  provider: string;
+  label: string;
+  family: string;
+  recommended_for: string[];
+}
+
+export interface AgentModelConfig {
+  id: string;
+  workflow_id: string;
+  agent_name: string;
+  provider: string;
+  model: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentConfig {
+  name: string;
+  role: string;
+  order: number;
+  prompt: string;
+  default_prompt: string;
+  is_custom: boolean;
+  active_template_id?: string | null;
+  prompt_ids?: string[];
+  prompt_titles?: Record<string, string>;
+  model_configs?: Record<string, AgentModelConfig>;
+}
+
+export interface WorkflowNodeSchema {
+  title?: string;
+  type?: string;
+  required?: string[];
+  properties?: Record<string, Record<string, unknown>>;
+  [key: string]: unknown;
+}
+
 export interface WorkflowNode {
   id: string;
   label: string;
-  type: "agent" | "control";
+  type: "agent" | "control" | "prompt";
+  node_subtype?: string;
   agent_name: string | null;
   description: string;
   inputs: string[];
   outputs: string[];
+  required_inputs?: string[];
+  optional_inputs?: string[];
+  produces?: string[];
+  input_schema?: WorkflowNodeSchema;
+  output_schema?: WorkflowNodeSchema;
   editable: boolean;
   layer: number;
+  prompt_id?: string;
+  prompt_filename?: string;
+  provider?: string | null;
+  model?: string | null;
+  model_config_id?: string | null;
 }
 
 export interface WorkflowEdge {
@@ -279,7 +339,11 @@ export interface WorkflowEdge {
 
 export interface WorkflowDefinition {
   id: string;
+  key?: string;
   label: string;
+  runtime_status: "active_runtime" | "applied_via_prompt_binding";
+  runtime_note: string;
+  entrypoints: string[];
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
 }
@@ -319,9 +383,18 @@ export interface CreationStarCard {
   title?: string;
   description?: string;
   tags?: string[];
+  genre_mix?: string[];
+  core_rule?: string;
+  social_pressure?: string;
+  power_or_resource_system?: string;
+  main_conflict_seed?: string;
+  protagonist_entry?: string;
+  long_form_potential?: string;
+  reader_hooks?: string[];
   selling_point?: string;
   conflict_hook?: string;
   risk?: string;
+  revision_hint?: string;
   name?: string;
   identity?: string;
   summary?: string;
@@ -344,6 +417,17 @@ export interface CreationStarBasicInfo {
   target_words?: number;
   style?: string;
   initial_idea?: string;
+}
+
+export interface CreationSession {
+  id: string;
+  project_id: string;
+  status: "draft" | "committed" | string;
+  current_step: string;
+  basic_info: CreationStarBasicInfo;
+  state: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface CanonRunPayload {
