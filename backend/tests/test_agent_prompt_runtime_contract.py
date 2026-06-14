@@ -177,6 +177,35 @@ def test_llm_provider_resolver_infers_provider_from_catalog_models() -> None:
     assert prefixed.model == "custom/model-name"
 
 
+def test_workflows_api_exposes_prompt_lifecycle_views_and_keeps_legacy_prompt_lanes() -> None:
+    reset_database()
+    client = TestClient(app)
+
+    workflows = assert_success(client.get("/api/workflows"))["workflows"]
+    by_key = {workflow["key"]: workflow for workflow in workflows}
+
+    assert "chapter_closed_loop_lifecycle" in by_key
+    assert "special_booster_lifecycle" in by_key
+    assert "chapter_production" in by_key
+    first_lifecycle_index = next(index for index, workflow in enumerate(workflows) if workflow.get("workflow_kind") == "prompt_lifecycle")
+    first_prompt_library_index = next(index for index, workflow in enumerate(workflows) if workflow.get("workflow_kind") == "prompt_library")
+    assert first_lifecycle_index < first_prompt_library_index
+
+    lifecycle = by_key["chapter_closed_loop_lifecycle"]
+    assert lifecycle["workflow_kind"] == "prompt_lifecycle"
+    assert lifecycle["runtime_status"] == "applied_via_prompt_binding"
+    assert lifecycle["trigger_policy"] == "on_chapter_generation"
+
+    node_ids = [node["id"] for node in lifecycle["nodes"]]
+    assert node_ids[:4] == ["next_chapter_state_change", "chapter_card", "scene_outline", "draft_generation"]
+    assert "minimal_work_template" not in node_ids
+    assert all(node["node_subtype"] == "prompt_agent" for node in lifecycle["nodes"] if node["type"] == "prompt")
+
+    legacy = by_key["chapter_production"]
+    assert legacy["workflow_kind"] == "prompt_library"
+    assert legacy["runtime_status"] == "applied_via_prompt_binding"
+
+
 def test_call_agent_json_replaces_template_input_placeholders_before_llm_call() -> None:
     captured = {}
 
@@ -375,4 +404,3 @@ def test_creation_star_session_workflow_is_registered_for_visualization() -> Non
     assert edge_labels[("core_constitution", "constitution_review")] == "压力测试"
     assert edge_labels[("constitution_review", "canon_preview")] == "passed / passed_with_notes"
     assert edge_labels[("canon_preview", "commit_creation")] == "审批六项后提交"
-

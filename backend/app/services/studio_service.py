@@ -18,7 +18,7 @@ from app.agents.llm_io import call_agent_json
 from app.agents.outline_swarm.service import run_outline_swarm
 from app.agents.outline_swarm.swarm import OUTLINE_SWARM_AGENT_NAMES
 from app.agents.prompts import AGENT_PROMPT_BINDINGS, AGENT_SPECS_BY_NAME, DEFAULT_AGENT_SPECS, OUTLINE_AGENT_SEQUENCE
-from app.agents.shared.prompt_catalog import get_prompt_entry, list_prompt_workflows
+from app.agents.shared.prompt_catalog import get_prompt_entry, list_prompt_lifecycle_workflows, list_prompt_workflows
 from app.core.config import LLMProviderResolver, get_settings
 from app.core.ids import generate_id
 from app.core.json import dumps, loads
@@ -1798,6 +1798,12 @@ class StudioService:
             self._apply_agent_model_configs_to_workflow(self._with_workflow_runtime_metadata(workflow), model_configs)
             for workflow in workflows
         ]
+        workflows.extend(
+            [
+                self._apply_agent_model_configs_to_workflow(self._with_workflow_runtime_metadata(workflow), model_configs)
+                for workflow in list_prompt_lifecycle_workflows()
+            ]
+        )
         workflows.extend(
             [
                 self._apply_agent_model_configs_to_workflow(self._with_workflow_runtime_metadata(workflow), model_configs)
