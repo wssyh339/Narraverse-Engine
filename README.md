@@ -133,6 +133,15 @@ cp .env.example .env
 docker compose up --build
 ```
 
+如果 Docker Hub 拉取基础镜像超时，可以在 `.env` 中临时切换可访问的镜像源和包源：
+
+```env
+DOCKER_NODE_IMAGE=docker.1ms.run/library/node:24-alpine
+DOCKER_PYTHON_IMAGE=docker.1ms.run/library/python:3.13-slim
+NPM_REGISTRY=https://registry.npmmirror.com
+PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
 启动后访问：
 
 - Web 应用：<http://localhost:5173>
