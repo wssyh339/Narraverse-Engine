@@ -329,6 +329,7 @@ export interface WorkflowNode {
   provider?: string | null;
   model?: string | null;
   model_config_id?: string | null;
+  tags?: string[];
 }
 
 export interface WorkflowEdge {
@@ -341,6 +342,9 @@ export interface WorkflowDefinition {
   id: string;
   key?: string;
   label: string;
+  workflow_kind?: "runtime" | "prompt_lifecycle" | "prompt_library" | string;
+  trigger_policy?: string;
+  tags?: string[];
   runtime_status: "active_runtime" | "applied_via_prompt_binding";
   runtime_note: string;
   entrypoints: string[];

@@ -63,3 +63,18 @@ test("agents page lets each workflow agent select an LLM model", () => {
   assert.match(page, /restoreModelConfig/);
   assert.match(page, /listLlmModels/);
 });
+
+test("agents page defaults to lifecycle workflows and keeps prompt library visible", () => {
+  const page = read("src/pages/AgentsPage.tsx");
+  const types = read("src/types/api.ts");
+
+  assert.match(types, /workflow_kind\?: "runtime" \| "prompt_lifecycle" \| "prompt_library" \| string/);
+  assert.match(types, /trigger_policy\?: string/);
+  assert.match(types, /tags\?: string\[\]/);
+  assert.match(page, /chapter_closed_loop_lifecycle/);
+  assert.match(page, /workflowKindLabel/);
+  assert.match(page, /prompt_lifecycle/);
+  assert.match(page, /prompt_library/);
+  assert.match(page, /工作流视图/);
+  assert.match(page, /提示词库视图/);
+});

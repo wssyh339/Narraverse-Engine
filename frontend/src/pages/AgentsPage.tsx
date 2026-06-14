@@ -86,6 +86,25 @@ function workflowRuntimeLabel(status?: WorkflowDefinition["runtime_status"]) {
   return status === "active_runtime" ? "已接入实际执行" : "已通过提示词绑定应用";
 }
 
+function workflowKindRank(workflow: WorkflowDefinition) {
+  if (workflow.workflow_kind === "prompt_lifecycle") return 0;
+  if (workflow.runtime_status === "active_runtime") return 1;
+  if (workflow.workflow_kind === "prompt_library") return 2;
+  return 3;
+}
+
+function workflowKindLabel(workflow: WorkflowDefinition) {
+  if (workflow.workflow_kind === "prompt_lifecycle") return "工作流视图";
+  if (workflow.workflow_kind === "prompt_library") return "提示词库视图";
+  return workflow.runtime_status === "active_runtime" ? "运行工作流" : "工作流";
+}
+
+function workflowKindColor(workflow: WorkflowDefinition) {
+  if (workflow.workflow_kind === "prompt_lifecycle") return "green";
+  if (workflow.workflow_kind === "prompt_library") return "purple";
+  return workflow.runtime_status === "active_runtime" ? "blue" : "default";
+}
+
 function nodeTypeColor(type: WorkflowNode["type"]) {
   if (type === "agent") return "blue";
   if (type === "prompt") return "purple";
@@ -122,7 +141,7 @@ export function AgentsPage() {
   const agentsQuery = useQuery({ queryKey: ["agents"], queryFn: studioApi.listAgents });
   const workflowsQuery = useQuery({ queryKey: ["workflows"], queryFn: studioApi.listWorkflows });
   const llmModelsQuery = useQuery({ queryKey: ["llm-models"], queryFn: studioApi.listLlmModels });
-  const [workflowId, setWorkflowId] = useState("chapter_draft");
+  const [workflowId, setWorkflowId] = useState("chapter_closed_loop_lifecycle");
   const [selectedNode, setSelectedNode] = useState<WorkflowNode | null>(null);
   const [prompt, setPrompt] = useState("");
   const [selectedProvider, setSelectedProvider] = useState<string | undefined>();
@@ -130,7 +149,13 @@ export function AgentsPage() {
   const [controlDescription, setControlDescription] = useState("");
   const [controlConfigs, setControlConfigs] = useState<Record<string, string>>(() => loadControlConfigs());
 
-  const workflows = workflowsQuery.data?.workflows ?? [];
+  const workflows = useMemo(() => {
+    return [...(workflowsQuery.data?.workflows ?? [])].sort((left, right) => {
+      const rankDelta = workflowKindRank(left) - workflowKindRank(right);
+      if (rankDelta !== 0) return rankDelta;
+      return left.label.localeCompare(right.label, "zh-CN");
+    });
+  }, [workflowsQuery.data?.workflows]);
   const activeWorkflow = useMemo(
     () => workflows.find((workflow) => workflow.id === workflowId) ?? workflows[0],
     [workflowId, workflows],
@@ -313,7 +338,10 @@ export function AgentsPage() {
           value={activeWorkflow?.id}
           style={{ width: 220 }}
           onChange={setWorkflowId}
-          options={workflows.map((workflow) => ({ value: workflow.id, label: workflow.label }))}
+          options={workflows.map((workflow) => ({
+            value: workflow.id,
+            label: `${workflowKindLabel(workflow)} · ${workflow.label}`,
+          }))}
         />
       </div>
 
@@ -328,6 +356,7 @@ export function AgentsPage() {
           showIcon
           message={
             <Space wrap>
+              <Tag color={workflowKindColor(activeWorkflow)}>{workflowKindLabel(activeWorkflow)}</Tag>
               <Tag color={workflowRuntimeColor(activeWorkflow.runtime_status)}>
                 {workflowRuntimeLabel(activeWorkflow.runtime_status)}
               </Tag>
@@ -349,6 +378,7 @@ export function AgentsPage() {
             >
               <Tag color={nodeTypeColor(node.type)}>{node.type}</Tag>
               {node.node_subtype ? <Tag color="purple">{nodeSubtypeLabel(node)}</Tag> : null}
+              {node.tags?.includes("shortcut") ? <Tag color="gold">shortcut</Tag> : null}
               {node.label}
             </Button>
           ))}
