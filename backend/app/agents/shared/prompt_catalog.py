@@ -366,5 +366,5 @@ def _prompt_workflow_node(
         "layer": position + 1,
         "prompt_id": entry.prompt_id,
         "prompt_filename": entry.filename,
-        "tags": node_tags,
+        "tags": list(dict.fromkeys(node_tags)),
     }

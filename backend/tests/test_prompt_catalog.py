@@ -201,6 +201,27 @@ def test_special_booster_contains_shortcut_prompt_agents() -> None:
     assert all("shortcut" in node["tags"] for node in shortcut_nodes)
 
 
+def test_lifecycle_node_tags_are_unique_for_shortcut_nodes() -> None:
+    workflows = list_prompt_lifecycle_workflows()
+
+    for workflow in workflows:
+        for node in workflow["nodes"]:
+            assert node["tags"] == list(dict.fromkeys(node["tags"]))
+
+    special_booster = next(
+        item for item in workflows
+        if item["key"] == "special_booster_lifecycle"
+    )
+    shortcut_nodes = [
+        node
+        for node in special_booster["nodes"]
+        if node["id"] in {"minimal_work_template", "single_round_generation_combo"}
+    ]
+
+    assert shortcut_nodes
+    assert all(node["tags"].count("shortcut") == 1 for node in shortcut_nodes)
+
+
 def test_lifecycle_prompt_nodes_reuse_prompt_agent_schemas() -> None:
     workflows = list_prompt_lifecycle_workflows()
     prompt_nodes = [
