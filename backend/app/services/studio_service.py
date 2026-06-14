@@ -5,29 +5,44 @@ import json
 from pathlib import Path
 import random
 import zipfile
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from fastapi import HTTPException
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.agents.contracts import NovelStudioState
+from app.agents.chapter_writing.service import chapter_writing_service
+from app.agents.creation_star.service import creation_star_agent_service
 from app.agents.llm_io import call_agent_json
 from app.agents.outline_swarm.service import run_outline_swarm
 from app.agents.outline_swarm.swarm import OUTLINE_SWARM_AGENT_NAMES
-from app.agents.prompts import AGENT_SPECS_BY_NAME, DEFAULT_AGENT_SPECS, OUTLINE_AGENT_SEQUENCE
-from app.agents.workflow import agent_workflow
+from app.agents.prompts import AGENT_PROMPT_BINDINGS, AGENT_SPECS_BY_NAME, DEFAULT_AGENT_SPECS, OUTLINE_AGENT_SEQUENCE
+from app.agents.shared.prompt_catalog import get_prompt_entry, list_prompt_workflows
 from app.core.config import LLMProviderResolver, get_settings
 from app.core.ids import generate_id
 from app.core.json import dumps, loads
 from app.db import models
 from app.db.models import utcnow
+from app.db.session import SessionLocal
 from app.schemas.chapter import PlanChaptersRequest
+from app.schemas.outline import (
+    BookOutlineCommitRequest,
+    BookOutlineGenerateRequest,
+    ChapterOutlineBatchGenerateRequest,
+    ChapterOutlineCommitRequest,
+)
 from app.schemas.studio import (
+    AgentModelConfigRequest,
     AgentPromptUpdateRequest,
     BatchGenerateRequest,
     BranchVersionRequest,
     ChapterChatRequest,
+    CreationSessionCardRequest,
+    CreationSessionCommitRequest,
+    CreationSessionCreateRequest,
+    CreationSessionRunRequest,
+    CreationSessionSeedRequest,
     CreationStarCommitRequest,
     CreationStarDrawRequest,
     CreateCharacterRequest,
@@ -58,11 +73,13 @@ from app.schemas.studio import (
     VersionCompareRequest,
     WriteGenerateRequest,
 )
+from app.services.llm_catalog import catalog_payload
 from app.services.serializers import (
     isoformat,
     serialize_agent_run,
     serialize_chapter,
     serialize_character,
+    serialize_creation_session,
     serialize_continuity_issue,
     serialize_export_job,
     serialize_foreshadowing_item,
@@ -75,9 +92,23 @@ from app.services.serializers import (
     serialize_story_bible,
     serialize_story_entity,
     serialize_version_snapshot,
+    serialize_volume,
     serialize_world_fact,
 )
 from app.services.llm_client import llm_client
+
+
+BOOK_OUTLINE_AGENT_SEQUENCE = tuple(agent for agent in OUTLINE_AGENT_SEQUENCE if agent != "beat_control")
+BOOK_OUTLINE_SWARM_AGENT_NAMES = tuple(agent for agent in OUTLINE_SWARM_AGENT_NAMES if agent != "BeatControllerAgent")
+CHAPTER_OUTLINE_AGENT_SEQUENCE = ("beat_control", "foreshadowing_manager", "logic_audit")
+CREATION_CANON_APPROVAL_SECTIONS = ("project", "story_bible", "characters", "entities", "world_facts", "graph")
+TOPOLOGY_ARTIFACT_EVENT_TYPES = {"outline_piece", "canon_candidate", "completion_ticket", "uncertainty_ticket"}
+
+
+def _outline_swarm_agent_names_for_generation_kind(generation_kind: str) -> tuple[str, ...]:
+    if generation_kind == "book_outline":
+        return BOOK_OUTLINE_SWARM_AGENT_NAMES
+    return OUTLINE_SWARM_AGENT_NAMES
 
 
 def _not_found(message: str) -> HTTPException:
@@ -246,166 +277,385 @@ CREATION_STAR_OPTIONS: dict[str, Any] = {
 
 class StudioService:
     def creation_star_options(self) -> dict:
-        return {"options": CREATION_STAR_OPTIONS}
+        return creation_star_agent_service.options(CREATION_STAR_OPTIONS)
 
     def creation_star_draw(self, db: Session, project_id: str, request: CreationStarDrawRequest) -> dict:
-        project = self._project(db, project_id)
-        job = self._create_job(db, project_id, None, "creation_star_draw", request.model, request.model_dump(), total_steps=1)
-        basic = self._normalized_creation_basic(project, request.basic_info)
-        draw_id = generate_id("draw")
-        rng = random.SystemRandom()
-        prompt_snapshot = self._creation_star_prompt_snapshot(request, basic)
-        if request.step == "worldview":
-            payload: dict[str, Any] = {
-                "step": request.step,
-                "cards": self._creation_worldview_cards(basic, request.count, request.manual_input, draw_id, rng),
-            }
-        elif request.step == "protagonist":
-            payload = {
-                "step": request.step,
-                "cards": self._creation_protagonist_cards(
-                    basic,
-                    request.selected_worldview,
-                    request.count,
-                    request.manual_input,
-                    draw_id,
-                    rng,
-                ),
-            }
-        elif request.step == "project_bible":
-            project_bible, world_rules = self._creation_bible_and_rules(
-                basic,
-                request.selected_worldview,
-                request.selected_protagonist,
-                request.manual_input,
-                rng,
-            )
-            payload = {"step": request.step, "project_bible": project_bible, "world_rules": world_rules, "cards": []}
-        elif request.step == "world_rules":
-            _, world_rules = self._creation_bible_and_rules(
-                basic,
-                request.selected_worldview,
-                request.selected_protagonist,
-                request.manual_input,
-                rng,
-            )
-            payload = {"step": request.step, "world_rules": world_rules, "cards": []}
-        elif request.step == "title":
-            payload = {
-                "step": request.step,
-                "cards": self._creation_title_cards(
-                    basic,
-                    request.selected_worldview,
-                    request.selected_protagonist,
-                    request.project_bible,
-                    request.world_rules,
-                    request.count,
-                    request.manual_input,
-                    draw_id,
-                    rng,
-                ),
-            }
-        else:
-            raise _bad_request("不支持的创作 Star 步骤", {"step": request.step})
-        payload["draw_id"] = draw_id
-        payload["prompt_snapshot"] = prompt_snapshot
-        payload, llm_meta = call_agent_json(
-            llm_client=llm_client,
-            agent_name="creation_star",
-            role=AGENT_SPECS_BY_NAME["creation_star"].role,
-            system_prompt=AGENT_SPECS_BY_NAME["creation_star"].prompt,
-            task=f"执行创作 Star 的 {request.step} 抽卡/生成步骤，输出可供用户选择或确认的结构化候选。",
-            context={
-                "project": serialize_project(project),
-                "request": request.model_dump(),
-                "basic_info": basic,
-                "prompt_snapshot": prompt_snapshot,
-                "fallback_output": payload,
-            },
-            fallback=payload,
-            model=request.model,
-        )
-        payload["draw_id"] = payload.get("draw_id") or draw_id
-        payload["prompt_snapshot"] = payload.get("prompt_snapshot") or prompt_snapshot
-        payload["_llm"] = llm_meta
-        self._record_agent_run(
-            db,
-            job,
-            "creation_star",
-            payload,
-            {"project": serialize_project(project), "request": request.model_dump(), "prompt_snapshot": prompt_snapshot},
-        )
-        self._finish_job(db, job, payload)
-        db.commit()
-        return {"job": serialize_job(job), **payload}
+        return creation_star_agent_service.draw(self, db, project_id, request, llm_client_instance=llm_client)
 
     def creation_star_commit(self, db: Session, project_id: str, request: CreationStarCommitRequest) -> dict:
+        return creation_star_agent_service.commit(self, db, project_id, request)
+
+    def create_creation_session(self, db: Session, project_id: str, request: CreationSessionCreateRequest) -> dict:
+        project = self._project(db, project_id)
+        basic = self._normalized_creation_basic(project, request.basic_info)
+        state = {
+            "worldview_candidates": [],
+            "protagonist_candidates": [],
+            "title_candidates": [],
+            "market_position_candidates": [],
+            "project_seed": {},
+            "core_conflict_system": {},
+            "novel_constitution": {},
+            "constitution_review": {},
+            "canon_candidates": {},
+            "model": request.model,
+        }
+        session = models.CreationSession(
+            id=generate_id("crs"),
+            project_id=project_id,
+            status="draft",
+            current_step="brief",
+            basic_info_json=dumps(basic),
+            state_json=dumps(state),
+        )
+        db.add(session)
+        db.commit()
+        db.refresh(session)
+        return {"session": serialize_creation_session(session)}
+
+    def get_creation_session(self, db: Session, project_id: str, session_id: str) -> dict:
+        return {"session": serialize_creation_session(self._creation_session(db, project_id, session_id))}
+
+    def creation_session_worldviews(self, db: Session, project_id: str, session_id: str, request: CreationSessionCardRequest) -> dict:
+        project = self._project(db, project_id)
+        session = self._creation_session(db, project_id, session_id)
+        basic = loads(session.basic_info_json, {})
+        state = self._creation_session_state(session)
+        if request.replace_existing:
+            self._reset_creation_session_after(state, "worldview")
+        previous_cards = state.get("worldview_candidates") if isinstance(state.get("worldview_candidates"), list) else []
+        payload, job = self._run_creation_star_draw_step(
+            db,
+            project,
+            "worldview",
+            basic,
+            {},
+            {},
+            {},
+            {},
+            request.count,
+            request.manual_input,
+            self._configured_model_for_agent(db, "creation_star_session", "creation_star", request.model or state.get("model")),
+            "creation_worldview_card",
+            previous_cards=previous_cards,
+        )
+        cards = payload.get("cards") if isinstance(payload.get("cards"), list) else []
+        state["worldview_candidates"] = [*state.get("worldview_candidates", []), *cards]
+        if cards and not state.get("selected_worldview"):
+            state["selected_worldview"] = cards[0]
+        session.current_step = "worldview"
+        self._save_creation_session_state(session, state)
+        self._finish_job(db, job, {**payload, "session_id": session.id})
+        db.commit()
+        db.refresh(session)
+        return {"session": serialize_creation_session(session), "job": serialize_job(job), **payload}
+
+    def creation_session_protagonists(self, db: Session, project_id: str, session_id: str, request: CreationSessionCardRequest) -> dict:
+        project = self._project(db, project_id)
+        session = self._creation_session(db, project_id, session_id)
+        basic = loads(session.basic_info_json, {})
+        state = self._creation_session_state(session)
+        worldview = request.selected_worldview or state.get("selected_worldview") or self._pick(state.get("worldview_candidates", []), 0, {})
+        if not worldview:
+            raise _bad_request("请先选择或生成世界观卡片")
+        if request.replace_existing:
+            self._reset_creation_session_after(state, "protagonist")
+        state["selected_worldview"] = worldview
+        payload, job = self._run_creation_star_draw_step(
+            db,
+            project,
+            "protagonist",
+            basic,
+            worldview,
+            {},
+            {},
+            {},
+            request.count,
+            request.manual_input,
+            self._configured_model_for_agent(db, "creation_star_session", "creation_star", request.model or state.get("model")),
+            "creation_protagonist_card",
+        )
+        cards = payload.get("cards") if isinstance(payload.get("cards"), list) else []
+        state["protagonist_candidates"] = [*state.get("protagonist_candidates", []), *cards]
+        if cards and not state.get("selected_protagonist"):
+            state["selected_protagonist"] = cards[0]
+        session.current_step = "protagonist"
+        self._save_creation_session_state(session, state)
+        self._finish_job(db, job, {**payload, "session_id": session.id})
+        db.commit()
+        db.refresh(session)
+        return {"session": serialize_creation_session(session), "job": serialize_job(job), **payload}
+
+    def creation_session_market_position(self, db: Session, project_id: str, session_id: str, request: CreationSessionCardRequest) -> dict:
+        project = self._project(db, project_id)
+        session = self._creation_session(db, project_id, session_id)
+        basic = loads(session.basic_info_json, {})
+        state = self._creation_session_state(session)
+        worldview = request.selected_worldview or state.get("selected_worldview") or self._pick(state.get("worldview_candidates", []), 0, {})
+        protagonist = request.selected_protagonist or state.get("selected_protagonist") or self._pick(state.get("protagonist_candidates", []), 0, {})
+        if not worldview or not protagonist:
+            raise _bad_request("请先选择世界观和主角人设")
+        if request.replace_existing:
+            self._reset_creation_session_after(state, "market_position")
+        state["selected_worldview"] = worldview
+        state["selected_protagonist"] = protagonist
+        rng = random.SystemRandom()
+        provisional_bible, provisional_rules = self._creation_bible_and_rules(basic, worldview, protagonist, request.manual_input, rng)
+        payload, job = self._run_creation_star_draw_step(
+            db,
+            project,
+            "title",
+            basic,
+            worldview,
+            protagonist,
+            provisional_bible,
+            provisional_rules,
+            request.count,
+            request.manual_input,
+            self._configured_model_for_agent(db, "creation_star_session", "creation_star", request.model or state.get("model")),
+            "creation_market_position_card",
+        )
+        title_cards = payload.get("cards") if isinstance(payload.get("cards"), list) else []
+        market_cards = self._creation_market_position_cards(basic, worldview, protagonist, title_cards, request.count, job.id)
+        state["title_candidates"] = [*state.get("title_candidates", []), *title_cards]
+        state["market_position_candidates"] = [*state.get("market_position_candidates", []), *market_cards]
+        if title_cards and not state.get("selected_title"):
+            state["selected_title"] = title_cards[0]
+        if market_cards and not state.get("market_position"):
+            state["market_position"] = market_cards[0]
+        session.current_step = "market_position"
+        self._save_creation_session_state(session, state)
+        self._finish_job(db, job, {**payload, "market_position_candidates": market_cards, "session_id": session.id})
+        db.commit()
+        db.refresh(session)
+        return {
+            "session": serialize_creation_session(session),
+            "job": serialize_job(job),
+            "title_candidates": title_cards,
+            "market_position_candidates": market_cards,
+            "prompt_snapshot": payload.get("prompt_snapshot", {}),
+        }
+
+    def creation_session_seed(self, db: Session, project_id: str, session_id: str, request: CreationSessionSeedRequest) -> dict:
+        session = self._creation_session(db, project_id, session_id)
+        state = self._creation_session_state(session)
+        worldview = request.selected_worldview or state.get("selected_worldview") or self._pick(state.get("worldview_candidates", []), 0, {})
+        protagonist = request.selected_protagonist or state.get("selected_protagonist") or self._pick(state.get("protagonist_candidates", []), 0, {})
+        title = request.selected_title or state.get("selected_title") or self._pick(state.get("title_candidates", []), 0, {})
+        market_position = request.market_position or state.get("market_position") or self._pick(state.get("market_position_candidates", []), 0, {})
+        if not worldview or not protagonist:
+            raise _bad_request("立项种子至少需要已选世界观和主角人设")
+        project_seed = {
+            "basic_info": loads(session.basic_info_json, {}),
+            "selected_worldview": worldview,
+            "selected_protagonist": protagonist,
+            "selected_title": title,
+            "market_position": market_position,
+            "user_note": request.user_note,
+        }
+        state["selected_worldview"] = worldview
+        state["selected_protagonist"] = protagonist
+        state["selected_title"] = title
+        state["market_position"] = market_position
+        state["project_seed"] = project_seed
+        session.current_step = "seed"
+        self._save_creation_session_state(session, state)
+        db.commit()
+        db.refresh(session)
+        return {"session": serialize_creation_session(session), "project_seed": project_seed}
+
+    def creation_session_core_conflict(self, db: Session, project_id: str, session_id: str, request: CreationSessionRunRequest) -> dict:
+        project = self._project(db, project_id)
+        session = self._creation_session(db, project_id, session_id)
+        state = self._creation_session_state(session)
+        seed = self._require_project_seed(state)
+        fallback = self._core_conflict_from_seed(seed)
+        payload, job, llm_meta = self._run_structured_creation_agent(
+            db,
+            project,
+            "creation_core_conflict",
+            "chief_architect",
+            "根据创作 Star 已确认的立项种子生成核心矛盾系统。必须输出 protagonist_desire、world_resistance、core_conflict、external_resistance、internal_resistance、relationship_resistance、institutional_resistance、typical_cost、long_form_engine、possible_endpoint、theme_question。",
+            {"project": serialize_project(project), "project_seed": seed, "instruction": request.instruction},
+            fallback,
+            self._configured_model_for_agent(db, "creation_star_session", "chief_architect", request.model or state.get("model")),
+        )
+        if not isinstance(payload, dict):
+            payload = fallback
+        payload = {**fallback, **payload}
+        state["core_conflict_system"] = payload
+        session.current_step = "core_conflict"
+        self._save_creation_session_state(session, state)
+        self._record_agent_run(db, job, "chief_architect", {**payload, "_llm": llm_meta}, {"project_seed": seed})
+        self._finish_job(db, job, {"core_conflict_system": payload, "session_id": session.id})
+        db.commit()
+        db.refresh(session)
+        return {"session": serialize_creation_session(session), "job": serialize_job(job), "core_conflict_system": payload}
+
+    def creation_session_constitution(self, db: Session, project_id: str, session_id: str, request: CreationSessionRunRequest) -> dict:
+        project = self._project(db, project_id)
+        session = self._creation_session(db, project_id, session_id)
+        state = self._creation_session_state(session)
+        seed = self._require_project_seed(state)
+        core_conflict = state.get("core_conflict_system") or self._core_conflict_from_seed(seed)
+        fallback = self._novel_constitution_from_seed(seed, core_conflict)
+        payload, job, llm_meta = self._run_structured_creation_agent(
+            db,
+            project,
+            "creation_novel_constitution",
+            "chief_architect",
+            "根据核心矛盾系统生成小说宪法。必须输出 basic_positioning、core_narrative_engine、protagonist_arc、world_rules、character_functions、theme_pressure、cost_mechanism、forbidden_directions、long_form_sustainability。",
+            {"project": serialize_project(project), "project_seed": seed, "core_conflict_system": core_conflict, "instruction": request.instruction},
+            fallback,
+            self._configured_model_for_agent(db, "creation_star_session", "chief_architect", request.model or state.get("model")),
+        )
+        if not isinstance(payload, dict):
+            payload = fallback
+        payload = {**fallback, **payload}
+        payload["core_narrative_engine"] = payload.get("core_narrative_engine") or core_conflict
+        state["novel_constitution"] = payload
+        session.current_step = "constitution"
+        self._save_creation_session_state(session, state)
+        self._record_agent_run(db, job, "chief_architect", {**payload, "_llm": llm_meta}, {"project_seed": seed, "core_conflict_system": core_conflict})
+        self._finish_job(db, job, {"novel_constitution": payload, "session_id": session.id})
+        db.commit()
+        db.refresh(session)
+        return {"session": serialize_creation_session(session), "job": serialize_job(job), "novel_constitution": payload}
+
+    def creation_session_constitution_review(self, db: Session, project_id: str, session_id: str, request: CreationSessionRunRequest) -> dict:
+        project = self._project(db, project_id)
+        session = self._creation_session(db, project_id, session_id)
+        state = self._creation_session_state(session)
+        seed = self._require_project_seed(state)
+        constitution = state.get("novel_constitution") or self._novel_constitution_from_seed(seed, state.get("core_conflict_system") or {})
+        fallback = self._constitution_review_from_constitution(constitution)
+        payload, job, llm_meta = self._run_structured_creation_agent(
+            db,
+            project,
+            "creation_constitution_review",
+            "reviewer",
+            "对小说宪法做压力测试。必须输出 status、largest_strength、largest_risk、blocking_issues、revision_suggestions、recommended_next_stage。status 只能是 passed、passed_with_notes、needs_revision、blocked。",
+            {"project": serialize_project(project), "project_seed": seed, "novel_constitution": constitution, "instruction": request.instruction},
+            fallback,
+            self._configured_model_for_agent(db, "creation_star_session", "reviewer", request.model or state.get("model")),
+        )
+        if not isinstance(payload, dict):
+            payload = fallback
+        payload = {**fallback, **payload}
+        if payload.get("status") not in {"passed", "passed_with_notes", "needs_revision", "blocked"}:
+            payload["status"] = fallback["status"]
+        state["constitution_review"] = payload
+        session.current_step = "constitution_review"
+        self._save_creation_session_state(session, state)
+        self._record_agent_run(db, job, "reviewer", {**payload, "_llm": llm_meta}, {"project_seed": seed, "novel_constitution": constitution})
+        self._finish_job(db, job, {"constitution_review": payload, "session_id": session.id})
+        db.commit()
+        db.refresh(session)
+        return {"session": serialize_creation_session(session), "job": serialize_job(job), "constitution_review": payload}
+
+    def creation_session_canon_preview(self, db: Session, project_id: str, session_id: str, request: CreationSessionRunRequest) -> dict:
+        project = self._project(db, project_id)
+        session = self._creation_session(db, project_id, session_id)
+        state = self._creation_session_state(session)
+        seed = self._require_project_seed(state)
+        self._require_creation_constitution_ready(state)
+        candidates = self._canon_candidates_from_creation_state(project, loads(session.basic_info_json, {}), state)
+        payload, job, llm_meta = self._run_structured_creation_agent(
+            db,
+            project,
+            "creation_canon_preview",
+            "canon_curator",
+            "把创作 Star 立项种子、核心矛盾、小说宪法和压力测试结果映射为待用户确认的正典候选。不要写入正式设定集。",
+            {"project": serialize_project(project), "project_seed": seed, "creation_state": state, "instruction": request.instruction},
+            {"canon_candidates": candidates},
+            self._configured_model_for_agent(db, "creation_star_session", "canon_curator", request.model or state.get("model")),
+        )
+        if isinstance(payload, dict) and isinstance(payload.get("canon_candidates"), dict):
+            candidates = {**candidates, **payload["canon_candidates"]}
+        state["canon_candidates"] = candidates
+        state["project_bible"] = candidates.get("project_bible", state.get("project_bible", {}))
+        state["world_rules"] = candidates.get("world_rules", state.get("world_rules", {}))
+        session.current_step = "canon_preview"
+        self._save_creation_session_state(session, state)
+        self._record_agent_run(db, job, "canon_curator", {"canon_candidates": candidates, "_llm": llm_meta}, {"project_seed": seed, "creation_state": state})
+        self._finish_job(db, job, {"canon_candidates": candidates, "session_id": session.id})
+        db.commit()
+        db.refresh(session)
+        return {"session": serialize_creation_session(session), "job": serialize_job(job), "canon_candidates": candidates}
+
+    def creation_session_commit(self, db: Session, project_id: str, session_id: str, request: CreationSessionCommitRequest) -> dict:
         project = self._project(db, project_id)
         story_bible = self._story_bible(db, project_id)
-        job = self._create_job(db, project_id, None, "creation_star_commit", request.model, request.model_dump(), total_steps=4)
-        basic = self._normalized_creation_basic(project, request.basic_info)
-        worldview = request.selected_worldview
-        protagonist = request.selected_protagonist
-        selected_title = request.selected_title
-        project_bible = request.project_bible
-        world_rules = request.world_rules
+        session = self._creation_session(db, project_id, session_id)
+        state = self._creation_session_state(session)
+        seed = self._require_project_seed(state)
+        self._require_creation_constitution_ready(state)
+        self._require_approved_canon_sections(request.approved_canon_sections)
+        candidates = state.get("canon_candidates")
+        if not isinstance(candidates, dict) or not candidates:
+            candidates = self._canon_candidates_from_creation_state(project, loads(session.basic_info_json, {}), state)
+            state["canon_candidates"] = candidates
+        basic = loads(session.basic_info_json, {})
+        worldview = seed.get("selected_worldview") or {}
+        protagonist = seed.get("selected_protagonist") or {}
+        selected_title = seed.get("selected_title") or {}
+        project_bible = candidates.get("project_bible") or self._project_bible_from_creation_state(state)
+        world_rules = candidates.get("world_rules") or self._world_rules_from_creation_state(state)
+        story_candidate = candidates.get("story_bible_candidate") if isinstance(candidates.get("story_bible_candidate"), dict) else {}
+        job = self._create_job(
+            db,
+            project_id,
+            None,
+            "creation_canon_commit",
+            self._configured_model_for_agent(db, "creation_star_session", "canon_curator", request.model or state.get("model")),
+            {"session_id": session_id},
+            total_steps=2,
+        )
 
         project.title = str(selected_title.get("title") or project.title)
-        project.genre = basic["genre"]
-        project.target_reader = basic["target_reader"]
+        project.genre = basic.get("genre", project.genre)
+        project.target_reader = basic.get("target_reader", project.target_reader)
         project.target_words = int(basic.get("target_words") or project.target_words or 0)
         project.initial_idea = basic.get("initial_idea", project.initial_idea)
         project.style_guide = basic.get("style", project.style_guide)
-        project.premise = self._join_nonempty(
-            [
-                str(project_bible.get("核心命题", "")),
-                str(project_bible.get("核心矛盾", "")),
-                str(worldview.get("description", "")),
-            ],
-            "；",
-        ) or project.premise
+        project.premise = story_candidate.get("main_conflict") or project_bible.get("核心矛盾") or project.premise
 
         story_bible.version += 1
-        story_bible.world_setting = self._join_nonempty(
-            [
-                str(worldview.get("title", "")),
-                str(worldview.get("description", "")),
-                "力量体系：" + "、".join(self._as_str_list(world_rules.get("力量体系"))),
-                "社会结构：" + "、".join(self._as_str_list(world_rules.get("社会结构"))),
-            ],
-            "\n",
-        )
-        story_bible.main_conflict = str(project_bible.get("核心矛盾", story_bible.main_conflict))
-        story_bible.themes_json = dumps(self._as_str_list(project_bible.get("主线关键词")))
-        story_bible.style_guide = basic.get("style", story_bible.style_guide)
-        story_bible.forbidden_elements_json = dumps(self._as_str_list(world_rules.get("禁忌规则")))
-        story_bible.continuity_rules_json = dumps(self._as_str_list(world_rules.get("不可违反设定")))
+        story_bible.world_setting = story_candidate.get("world_setting") or story_bible.world_setting
+        story_bible.main_conflict = story_candidate.get("main_conflict") or project_bible.get("核心矛盾") or story_bible.main_conflict
+        story_bible.themes_json = dumps(story_candidate.get("themes") or project_bible.get("主线关键词") or [])
+        story_bible.style_guide = story_candidate.get("style_guide") or basic.get("style", story_bible.style_guide)
+        story_bible.narrative_pov = story_candidate.get("narrative_pov") or story_bible.narrative_pov
+        story_bible.forbidden_elements_json = dumps(story_candidate.get("forbidden_elements") or world_rules.get("禁忌规则") or [])
+        story_bible.continuity_rules_json = dumps(story_candidate.get("continuity_rules") or world_rules.get("不可违反设定") or [])
 
         character = self._upsert_creation_protagonist(db, project_id, protagonist, basic, worldview)
         entities = self._upsert_creation_entities(db, project_id, worldview, world_rules)
         facts = self._upsert_creation_world_facts(db, project_id, project_bible, world_rules, worldview)
         db.flush()
         self._link_creation_graph(db, project_id, character, entities, facts, worldview)
-
         output = {
-            "basic_info": basic,
-            "selected_worldview": worldview,
-            "selected_protagonist": protagonist,
-            "selected_title": selected_title,
-            "project_bible": project_bible,
-            "world_rules": world_rules,
+            "project_seed": seed,
+            "core_conflict_system": state.get("core_conflict_system", {}),
+            "novel_constitution": state.get("novel_constitution", {}),
+            "constitution_review": state.get("constitution_review", {}),
+            "canon_candidates": candidates,
         }
-        self._record_agent_run(db, job, "creation_star", output, {"project": serialize_project(project)})
+        self._record_agent_run(db, job, "canon_curator", output, {"session_id": session_id, "project_seed": seed})
         version = self._snapshot(
             db,
             project_id,
             None,
             job.id,
-            "creation_star",
-            "creation_star_setup",
+            "canon_curator",
+            "creation_session_canon",
             dumps(output),
-            request.user_note or "创作 Star 确认入库",
+            request.user_note or "解耦创作 Star 确认入库",
         )
+        session.status = "committed"
+        session.current_step = "committed"
+        state["confirmed_canon"] = output
+        self._save_creation_session_state(session, state)
         result = {
             "project": serialize_project(project),
             "story_bible": serialize_story_bible(story_bible),
@@ -413,10 +663,14 @@ class StudioService:
             "entities": [serialize_story_entity(item) for item in entities],
             "world_facts": [serialize_world_fact(item) for item in facts],
             "version": serialize_version_snapshot(version),
+            "session": serialize_creation_session(session),
         }
         self._finish_job(db, job, result)
         db.commit()
-        return {"job": serialize_job(job), **result}
+        db.refresh(session)
+        result["session"] = serialize_creation_session(session)
+        result["job"] = serialize_job(job)
+        return result
 
     def generate_story_bible(self, db: Session, project_id: str, request: GenerateStoryBibleRequest) -> dict:
         project = self._project(db, project_id)
@@ -424,9 +678,25 @@ class StudioService:
         job = self._create_job(db, project_id, None, "generate_story_bible", request.model, {"initial_idea": request.initial_idea})
         state = self._state_from_project(db, project, job.id)
         state.requested_model = request.model
+        state.agent_model_configs = self._model_configs_for_workflow(db, "initialization")
         state.initial_idea = request.initial_idea or project.initial_idea or project.premise
-        result = agent_workflow.run_initialization(state)
-        self._record_agent_run(db, job, "chief_architect", self._with_llm_meta(result.story_bible, result, "chief_architect"), {"project": serialize_project(project)})
+        result = chapter_writing_service.run_initialization(state)
+        self._record_agent_run(
+            db,
+            job,
+            "chief_architect",
+            self._with_llm_meta(
+                {
+                    "core_conflict_system": result.core_conflict_system,
+                    "novel_constitution": result.novel_constitution,
+                    "constitution_review": result.constitution_review,
+                    "story_bible": result.story_bible,
+                },
+                result,
+                "chief_architect",
+            ),
+            {"project": serialize_project(project)},
+        )
         self._record_agent_run(db, job, "canon_curator", self._with_llm_meta(result.canon_updates, result, "canon_curator"), {"story_bible": result.story_bible})
 
         story_bible.version += 1
@@ -450,11 +720,28 @@ class StudioService:
             None,
         )
         self._snapshot(db, project_id, None, job.id, "chief_architect", "story_bible", dumps(result.story_bible), "初始化项目工作流")
-        self._finish_job(db, job, {"story_bible": serialize_story_bible(story_bible), "canon_updates": result.canon_updates})
+        self._finish_job(
+            db,
+            job,
+            {
+                "core_conflict_system": result.core_conflict_system,
+                "novel_constitution": result.novel_constitution,
+                "constitution_review": result.constitution_review,
+                "story_bible": serialize_story_bible(story_bible),
+                "canon_updates": result.canon_updates,
+            },
+        )
         db.commit()
-        return {"job": serialize_job(job), "story_bible": serialize_story_bible(story_bible), "canon_updates": result.canon_updates}
+        return {
+            "job": serialize_job(job),
+            "core_conflict_system": result.core_conflict_system,
+            "novel_constitution": result.novel_constitution,
+            "constitution_review": result.constitution_review,
+            "story_bible": serialize_story_bible(story_bible),
+            "canon_updates": result.canon_updates,
+        }
 
-    def plan_chapters(self, db: Session, project_id: str, request: PlanChaptersRequest) -> dict:
+    def plan_chapters(self, db: Session, project_id: str, request: PlanChaptersRequest, background_tasks: Any | None = None) -> dict:
         project = self._project(db, project_id)
         existing = (
             db.query(models.GenerationJob)
@@ -480,15 +767,210 @@ class StudioService:
             request.model_dump(),
             request.idempotency_key,
             total_steps=len(OUTLINE_AGENT_SEQUENCE) + len(OUTLINE_SWARM_AGENT_NAMES),
+            queued=request.async_mode,
         )
+        if request.async_mode:
+            db.commit()
+            db.refresh(job)
+            if background_tasks is not None:
+                background_tasks.add_task(self.run_plan_chapters_job, job.id)
+            return {"job": serialize_job(job), "chapters": [], "outline_plan": None}
+
+        return self._execute_plan_chapters(db, project, request, job)
+
+    def generate_book_outline(self, db: Session, project_id: str, request: BookOutlineGenerateRequest, background_tasks: Any | None = None) -> dict:
+        project = self._project(db, project_id)
+        existing = (
+            db.query(models.GenerationJob)
+            .filter(models.GenerationJob.project_id == project_id, models.GenerationJob.idempotency_key == request.idempotency_key)
+            .first()
+        )
+        if existing:
+            result = loads(existing.result_json, {}) if existing.result_json else {}
+            return {"job": serialize_job(existing), "outline_plan": result.get("outline_plan")}
+        total_steps = len(BOOK_OUTLINE_AGENT_SEQUENCE) + (len(BOOK_OUTLINE_SWARM_AGENT_NAMES) if request.use_topology_inference else 0)
+        job = self._create_job(
+            db,
+            project_id,
+            None,
+            "book_outline",
+            request.model,
+            request.model_dump(),
+            request.idempotency_key,
+            total_steps=total_steps,
+            queued=request.async_mode,
+        )
+        if request.async_mode:
+            outline_plan = self._build_initial_book_outline_plan(db, project, request)
+            job.result_json = dumps({"outline_plan": outline_plan, "chapters": [], "status": "skeleton"})
+            db.commit()
+            db.refresh(job)
+            if background_tasks is not None:
+                background_tasks.add_task(self.run_book_outline_job, job.id)
+            return {"job": serialize_job(job), "outline_plan": outline_plan}
+        return self._execute_book_outline(db, project, request, job)
+
+    def run_book_outline_job(self, job_id: str) -> None:
+        db = SessionLocal()
+        try:
+            job = db.get(models.GenerationJob, job_id)
+            if job is None or job.status == "succeeded":
+                return
+            request = self._book_outline_request_from_job(job)
+            project = self._project(db, job.project_id)
+            self._start_job(db, job)
+            self._execute_book_outline(db, project, request, job)
+        except Exception as exc:  # pragma: no cover - API level verifies failed state
+            db.rollback()
+            job = db.get(models.GenerationJob, job_id)
+            if job is not None:
+                self._fail_job(db, job, exc)
+                db.commit()
+        finally:
+            db.close()
+
+    def commit_book_outline(self, db: Session, project_id: str, request: BookOutlineCommitRequest) -> dict:
+        project = self._project(db, project_id)
+        outline_plan = request.outline_plan
+        if request.job_id:
+            job = db.get(models.GenerationJob, request.job_id)
+            if job is None or job.project_id != project_id:
+                raise _not_found("大纲推演任务不存在")
+            result = loads(job.result_json, {}) if job.result_json else {}
+            outline_plan = result.get("outline_plan") or outline_plan
+        if not outline_plan:
+            raise _bad_request("没有可写入的大纲结果")
+        self._apply_book_outline(db, project, outline_plan)
+        db.commit()
+        story_bible = self._story_bible(db, project_id)
+        volumes = (
+            db.query(models.Volume)
+            .filter(models.Volume.project_id == project_id)
+            .order_by(models.Volume.sort_order.asc(), models.Volume.volume_no.asc())
+            .all()
+        )
+        return {
+            "project": serialize_project(project),
+            "story_bible": serialize_story_bible(story_bible),
+            "volumes": [serialize_volume(item) for item in volumes],
+            "outline_plan": outline_plan,
+        }
+
+    def generate_chapter_outlines_batch(self, db: Session, project_id: str, request: ChapterOutlineBatchGenerateRequest, background_tasks: Any | None = None) -> dict:
+        self._project(db, project_id)
+        existing = (
+            db.query(models.GenerationJob)
+            .filter(models.GenerationJob.project_id == project_id, models.GenerationJob.idempotency_key == request.idempotency_key)
+            .first()
+        )
+        if existing:
+            result = loads(existing.result_json, {}) if existing.result_json else {}
+            return {"job": serialize_job(existing), "chapter_outlines": result.get("chapter_outlines", [])}
+        self._ensure_batch_can_generate(db, project_id, request)
+        job = self._create_job(
+            db,
+            project_id,
+            None,
+            "chapter_outline_batch",
+            request.model,
+            request.model_dump(),
+            request.idempotency_key,
+            total_steps=len(CHAPTER_OUTLINE_AGENT_SEQUENCE),
+            queued=request.async_mode,
+        )
+        if request.async_mode:
+            db.commit()
+            db.refresh(job)
+            if background_tasks is not None:
+                background_tasks.add_task(self.run_chapter_outline_batch_job, job.id)
+            return {"job": serialize_job(job), "chapter_outlines": []}
+        project = self._project(db, project_id)
+        return self._execute_chapter_outline_batch(db, project, request, job)
+
+    def run_chapter_outline_batch_job(self, job_id: str) -> None:
+        db = SessionLocal()
+        try:
+            job = db.get(models.GenerationJob, job_id)
+            if job is None or job.status == "succeeded":
+                return
+            request = self._chapter_outline_batch_request_from_job(job)
+            project = self._project(db, job.project_id)
+            self._start_job(db, job)
+            self._execute_chapter_outline_batch(db, project, request, job)
+        except Exception as exc:  # pragma: no cover - API level verifies failed state
+            db.rollback()
+            job = db.get(models.GenerationJob, job_id)
+            if job is not None:
+                self._fail_job(db, job, exc)
+                db.commit()
+        finally:
+            db.close()
+
+    def commit_chapter_outlines(self, db: Session, project_id: str, request: ChapterOutlineCommitRequest) -> dict:
+        project = self._project(db, project_id)
+        chapter_outlines = request.chapter_outlines
+        overwrite_existing = request.overwrite_existing
+        job_id: str | None = None
+        if request.job_id:
+            job = db.get(models.GenerationJob, request.job_id)
+            if job is None or job.project_id != project_id:
+                raise _not_found("章纲生成任务不存在")
+            result = loads(job.result_json, {}) if job.result_json else {}
+            chapter_outlines = result.get("chapter_outlines") or chapter_outlines
+            overwrite_existing = bool(loads(job.request_json, {}).get("overwrite_existing", overwrite_existing))
+            job_id = job.id
+        if not chapter_outlines:
+            raise _bad_request("没有可写入的章纲结果")
+        chapters = self._persist_chapter_outline_candidates(db, project, chapter_outlines, job_id, overwrite_existing)
+        db.commit()
+        for chapter in chapters:
+            db.refresh(chapter)
+        return {"chapters": [serialize_chapter(chapter) for chapter in chapters], "chapter_outlines": chapter_outlines}
+
+    def run_plan_chapters_job(self, job_id: str) -> None:
+        db = SessionLocal()
+        try:
+            job = db.get(models.GenerationJob, job_id)
+            if job is None or job.status == "succeeded":
+                return
+            request = self._plan_request_from_job(job)
+            project = self._project(db, job.project_id)
+            self._start_job(db, job)
+            self._execute_plan_chapters(db, project, request, job)
+        except Exception as exc:  # pragma: no cover - exercised through API level failure state
+            db.rollback()
+            job = db.get(models.GenerationJob, job_id)
+            if job is not None:
+                self._fail_job(db, job, exc)
+                db.commit()
+        finally:
+            db.close()
+
+    def _execute_plan_chapters(self, db: Session, project: models.Project, request: PlanChaptersRequest, job: models.GenerationJob) -> dict:
+        project_id = project.id
         state = self._state_from_project(db, project, job.id)
         state.requested_model = request.model
+        state.agent_model_configs = self._model_configs_for_workflow(db, "chapter_planning")
         state.current_chapter = request.start_chapter_no
         state.target_chapters = request.chapter_count
-        result = agent_workflow.run_chapter_plan(state)
+        result = chapter_writing_service.run_chapter_plan(state)
         outline_plan = self._build_long_novel_outline_plan(db, project, request, state)
-        outline_plan = self._run_outline_agents_with_llm(project, request, outline_plan)
-        outline_plan = self._attach_outline_swarm_plan(db, project, request, outline_plan)
+        project_snapshot = serialize_project(project)
+        db.commit()
+        total_steps = len(OUTLINE_AGENT_SEQUENCE) + len(OUTLINE_SWARM_AGENT_NAMES)
+
+        def on_outline_agent(agent_name: str, completed_steps: int) -> None:
+            self._update_job_progress(db, job, agent_name, completed_steps, total_steps, f"{agent_name} 已完成")
+
+        outline_plan = self._run_outline_agents_with_llm(db, project_snapshot, request, outline_plan, progress_callback=on_outline_agent)
+        project = self._project(db, project_id)
+
+        def on_swarm_progress(swarm_state: dict[str, Any]) -> None:
+            completed_steps = min(total_steps - 1, len(OUTLINE_AGENT_SEQUENCE) + int(swarm_state.get("iteration_count") or 0))
+            active_agent = str(swarm_state.get("active_agent") or "outline_swarm")
+            self._update_job_progress(db, job, f"outline_swarm/{active_agent}", completed_steps, total_steps, f"{active_agent} 正在推演")
+
+        outline_plan = self._attach_outline_swarm_plan(db, project, request, outline_plan, progress_callback=on_swarm_progress)
         planned_chapters = outline_plan["chapters"]
         if request.target_words is not None:
             project.target_words = request.target_words
@@ -530,6 +1012,130 @@ class StudioService:
             "chapters": [serialize_chapter(chapter) for chapter in chapters],
             "outline_plan": {key: value for key, value in outline_plan.items() if key != "chapters"},
         }
+
+    def _execute_book_outline(self, db: Session, project: models.Project, request: BookOutlineGenerateRequest, job: models.GenerationJob) -> dict:
+        plan_request = self._book_outline_to_plan_request(project, request)
+        state = self._state_from_project(db, project, job.id)
+        state.requested_model = request.model
+        state.agent_model_configs = self._model_configs_for_workflow(db, "outline_generation")
+        state.current_chapter = 1
+        state.target_chapters = project.planned_chapter_count
+        outline_plan = self._build_long_novel_outline_plan(db, project, plan_request, state)
+        outline_plan = self._normalize_book_outline_plan(project, plan_request, outline_plan)
+        project_snapshot = serialize_project(project)
+        db.commit()
+        total_steps = len(BOOK_OUTLINE_AGENT_SEQUENCE) + (len(BOOK_OUTLINE_SWARM_AGENT_NAMES) if request.use_topology_inference else 0)
+
+        def on_outline_agent(agent_name: str, completed_steps: int) -> None:
+            self._update_job_progress(db, job, agent_name, completed_steps, total_steps, f"{agent_name} 已完成")
+
+        outline_plan = self._run_outline_agents_with_llm(
+            db,
+            project_snapshot,
+            plan_request,
+            outline_plan,
+            agent_sequence=BOOK_OUTLINE_AGENT_SEQUENCE,
+            progress_callback=on_outline_agent,
+        )
+        outline_plan = self._normalize_book_outline_plan(project, plan_request, outline_plan)
+        outline_plan["revision_route"] = self._build_outline_revision_route(outline_plan)
+        project = self._project(db, project.id)
+
+        if request.use_topology_inference:
+            def on_swarm_progress(swarm_state: dict[str, Any]) -> None:
+                completed_steps = min(total_steps - 1, len(BOOK_OUTLINE_AGENT_SEQUENCE) + int(swarm_state.get("iteration_count") or 0))
+                active_agent = str(swarm_state.get("active_agent") or "outline_swarm")
+                if active_agent == "BeatControllerAgent":
+                    active_agent = "ForeshadowingAgent"
+                self._update_job_progress(db, job, f"outline_swarm/{active_agent}", completed_steps, total_steps, f"{active_agent} 正在推演")
+
+            outline_plan = self._attach_outline_swarm_plan(db, project, plan_request, outline_plan, generation_kind="book_outline", progress_callback=on_swarm_progress)
+        outline_plan = self._normalize_book_outline_plan(project, plan_request, outline_plan)
+        outline_plan["revision_route"] = self._build_outline_revision_route(outline_plan)
+        outline_plan["change_summary"] = self._build_book_outline_change_summary(db, project, outline_plan)
+        outline_plan["outline_topology"] = self._build_outline_topology(
+            generation_kind="book_outline",
+            mode="topology" if request.use_topology_inference else "linear",
+            agent_sequence=BOOK_OUTLINE_AGENT_SEQUENCE,
+            outline_plan=outline_plan,
+            swarm_result=outline_plan.get("outline_swarm") if request.use_topology_inference else None,
+            planned_swarm_agents=BOOK_OUTLINE_SWARM_AGENT_NAMES if request.use_topology_inference else (),
+        )
+        outline_agent_outputs = outline_plan.get("agent_outputs", {})
+        previous_outputs: list[str] = []
+        for agent_name in BOOK_OUTLINE_AGENT_SEQUENCE:
+            self._record_agent_run(
+                db,
+                job,
+                agent_name,
+                outline_agent_outputs.get(agent_name, {}),
+                {
+                    "request": request.model_dump(),
+                    "structured_prompt": outline_plan.get("structured_prompt", {}),
+                    "story_state": outline_plan.get("story_state", {}),
+                    "previous_agents": previous_outputs,
+                },
+            )
+            previous_outputs.append(agent_name)
+        if request.use_topology_inference:
+            self._record_outline_swarm_agent_runs(db, job, plan_request, outline_plan)
+        self._finish_job(db, job, {"outline_plan": outline_plan, "chapters": []})
+        db.commit()
+        return {"job": serialize_job(job), "outline_plan": outline_plan}
+
+    def _execute_chapter_outline_batch(self, db: Session, project: models.Project, request: ChapterOutlineBatchGenerateRequest, job: models.GenerationJob) -> dict:
+        self._ensure_batch_can_generate(db, project.id, request)
+        chapter_outlines = self._build_chapter_outline_candidates(db, project, request)
+        context = self._chapter_outline_batch_context(db, project, request, chapter_outlines)
+        topology_instruction = (
+            "拓扑推演开启：请把章纲候选按依赖、冲突、伏笔、回收、风险和审查关系组织；保持与线性模式相同的章纲字段与章节数量。"
+            if request.use_topology_inference
+            else "拓扑推演关闭：请按线性章纲生产链生成；保持与拓扑模式相同的章纲字段与章节数量。"
+        )
+        total_steps = len(CHAPTER_OUTLINE_AGENT_SEQUENCE)
+        payload: dict[str, Any] = {"chapter_beats": chapter_outlines}
+        previous_outputs: list[dict[str, Any]] = []
+        for index, agent_name in enumerate(CHAPTER_OUTLINE_AGENT_SEQUENCE, start=1):
+            spec = AGENT_SPECS_BY_NAME[agent_name]
+            fallback = payload if agent_name == "beat_control" else {"chapter_beats": chapter_outlines}
+            output, meta = call_agent_json(
+                llm_client=llm_client,
+                agent_name=agent_name,
+                role=spec.role,
+                system_prompt=spec.prompt,
+                task=f"基于已确认总纲、卷纲和正典上下文，生成或审查本批章纲候选。不要改写总纲和卷纲。{topology_instruction}",
+                context={**context, "topology_mode": "topology" if request.use_topology_inference else "linear", "previous_agent_outputs": previous_outputs},
+                fallback=fallback,
+                model=self._configured_model_for_agent(db, "chapter_planning", agent_name, request.model),
+            )
+            output["_llm"] = meta
+            if agent_name == "beat_control":
+                candidate = output.get("chapter_beats")
+                if isinstance(candidate, list) and candidate:
+                    chapter_outlines = [self._normalize_chapter_outline_item(item, project, request) for item in candidate if isinstance(item, dict)]
+                    payload = {"chapter_beats": chapter_outlines}
+            previous_outputs.append({"agent_name": agent_name, "output": output})
+            self._record_agent_run(db, job, agent_name, output, {"request": request.model_dump(), "context": {**context, "topology_mode": "topology" if request.use_topology_inference else "linear"}})
+            self._update_job_progress(db, job, agent_name, index, total_steps, f"{agent_name} 已完成")
+        outline_plan = {
+            "generation_kind": "chapter_outline_batch",
+            "chapter_outlines": chapter_outlines,
+            "batch_request": request.model_dump(),
+        }
+        outline_plan["outline_topology"] = self._build_outline_topology(
+            generation_kind="chapter_outline_batch",
+            mode="topology" if request.use_topology_inference else "linear",
+            agent_sequence=CHAPTER_OUTLINE_AGENT_SEQUENCE,
+            outline_plan=outline_plan,
+        )
+        result = {
+            "generation_kind": "chapter_outline_batch",
+            "chapter_outlines": chapter_outlines,
+            "outline_plan": outline_plan,
+        }
+        self._finish_job(db, job, result)
+        db.commit()
+        return {"job": serialize_job(job), "chapter_outlines": chapter_outlines, "outline_plan": result["outline_plan"]}
 
     def list_chapters(self, db: Session, project_id: str) -> dict:
         self._project(db, project_id)
@@ -582,23 +1188,28 @@ class StudioService:
         )
         if existing:
             return {"job": serialize_job(existing)}
-        job = self._create_job(db, project_id, chapter_id, "draft_chapter", request.model, request.model_dump(), idem, total_steps=10)
+        job = self._create_job(db, project_id, chapter_id, "draft_chapter", request.model, request.model_dump(), idem, total_steps=14)
         state = self._state_from_project(db, project, job.id)
         state.requested_model = request.model
+        state.agent_model_configs = self._model_configs_for_workflow(db, "chapter_draft")
         state.current_chapter = chapter.chapter_no
         state.current_chapter_outline = serialize_chapter(chapter)
         state.canon_context = self.build_canon_context(db, project_id, chapter_id)["canon_context"]
-        result = agent_workflow.run_chapter_draft(state)
+        result = chapter_writing_service.run_chapter_draft(state)
         for agent_name, payload in [
             ("canon_context", {"canon_context": result.canon_context}),
+            ("chapter_card", {"chapter_card": result.chapter_card}),
+            ("scene_outline", {"scene_outline": result.scene_outline}),
             ("plot_narrator", {"plot_draft": result.plot_draft}),
             ("dialogue_writer", {"dialogue_draft": result.dialogue_draft}),
             ("environment_writer", {"environment_draft": result.environment_draft}),
             ("integrator", {"integrated_draft": result.integrated_draft, "chapter_summary": result.chapter_summary}),
-            ("reviewer", {"review_notes": result.review_notes}),
+            ("reviewer", {"review_notes": result.review_notes, "health_check_report": result.health_check_report}),
             ("fact_checker", result.fact_check_report),
+            ("draft_rewrite", {"integrated_draft": result.integrated_draft}),
             ("quality_gate", result.quality_gate),
             ("style_unifier", {"style_polished_text": result.style_polished_text, "final_chapter_text": result.final_chapter_text}),
+            ("narrative_ledger", {"narrative_ledger": result.narrative_ledger}),
             ("canon_curator", result.candidate_canon_updates or result.canon_updates),
         ]:
             payload = self._with_llm_meta(payload, result, agent_name)
@@ -620,7 +1231,17 @@ class StudioService:
             title=chapter.title,
             content=result.final_chapter_text,
             summary=result.chapter_summary,
-            metadata_json=dumps({"review_notes": result.review_notes, "fact_check_report": result.fact_check_report, "canon_updates": result.canon_updates}),
+            metadata_json=dumps(
+                {
+                    "chapter_card": result.chapter_card,
+                    "scene_outline": result.scene_outline,
+                    "review_notes": result.review_notes,
+                    "health_check_report": result.health_check_report,
+                    "fact_check_report": result.fact_check_report,
+                    "narrative_ledger": result.narrative_ledger,
+                    "canon_updates": result.canon_updates,
+                }
+            ),
         )
         db.add(output)
         self._finish_job(
@@ -631,6 +1252,9 @@ class StudioService:
                 "draft_text": result.style_polished_text,
                 "polished_text": result.final_chapter_text,
                 "continuity_issues": result.continuity_issues,
+                "chapter_card": result.chapter_card,
+                "scene_outline": result.scene_outline,
+                "narrative_ledger": result.narrative_ledger,
                 "canon_updates": result.canon_updates,
                 "updated_characters": result.canon_updates.get("character_updates", []),
                 "updated_entities": result.canon_updates.get("entity_updates", []),
@@ -738,16 +1362,191 @@ class StudioService:
         db.commit()
         return {"job": serialize_job(job)}
 
+    def list_llm_models(self) -> dict:
+        resolved = LLMProviderResolver(get_settings()).resolve()
+        return catalog_payload(default_model=resolved.model, default_provider=resolved.provider)
+
+    def _serialize_agent_model_config(self, row: models.AgentModelConfig) -> dict[str, Any]:
+        return {
+            "id": row.id,
+            "workflow_id": row.workflow_id,
+            "agent_name": row.agent_name,
+            "provider": row.provider,
+            "model": row.model,
+            "metadata": loads(row.metadata_json, {}),
+            "created_at": isoformat(row.created_at),
+            "updated_at": isoformat(row.updated_at),
+        }
+
+    def _agent_model_config_rows(self, db: Session) -> list[models.AgentModelConfig]:
+        query = db.query(models.AgentModelConfig)
+        if not hasattr(query, "order_by"):
+            return []
+        return query.order_by(models.AgentModelConfig.workflow_id.asc(), models.AgentModelConfig.agent_name.asc()).all()
+
+    def _agent_model_config_map(self, db: Session) -> dict[tuple[str, str], models.AgentModelConfig]:
+        return {(row.workflow_id, row.agent_name): row for row in self._agent_model_config_rows(db)}
+
+    def _agent_model_configs_by_agent(self, db: Session) -> dict[str, dict[str, dict[str, Any]]]:
+        grouped: dict[str, dict[str, dict[str, Any]]] = {}
+        for row in self._agent_model_config_rows(db):
+            grouped.setdefault(row.agent_name, {})[row.workflow_id] = self._serialize_agent_model_config(row)
+        return grouped
+
+    def list_agent_model_configs(self, db: Session) -> dict:
+        return {"configs": [self._serialize_agent_model_config(row) for row in self._agent_model_config_rows(db)]}
+
+    def update_agent_model_config(self, db: Session, request: AgentModelConfigRequest) -> dict:
+        if request.agent_name not in AGENT_SPECS_BY_NAME:
+            raise _not_found("Agent 不存在")
+        workflow_ids = {workflow["id"] for workflow in self.list_workflows()["workflows"]}
+        if request.workflow_id not in workflow_ids:
+            raise _not_found("工作流不存在")
+        provider_config = LLMProviderResolver(get_settings()).resolve(request.model)
+        model_to_store = request.model if ":" in request.model else provider_config.model
+        row = (
+            db.query(models.AgentModelConfig)
+            .filter(models.AgentModelConfig.workflow_id == request.workflow_id, models.AgentModelConfig.agent_name == request.agent_name)
+            .first()
+        )
+        if row is None:
+            row = models.AgentModelConfig(
+                id=generate_id("amc"),
+                workflow_id=request.workflow_id,
+                agent_name=request.agent_name,
+                provider=provider_config.provider,
+                model=model_to_store,
+                metadata_json=dumps({"requested_model": request.model}),
+            )
+            db.add(row)
+        else:
+            row.provider = provider_config.provider
+            row.model = model_to_store
+            row.metadata_json = dumps({"requested_model": request.model})
+            row.updated_at = utcnow()
+        db.commit()
+        db.refresh(row)
+        return {"config": self._serialize_agent_model_config(row)}
+
+    def delete_agent_model_config(self, db: Session, workflow_id: str, agent_name: str) -> dict:
+        row = (
+            db.query(models.AgentModelConfig)
+            .filter(models.AgentModelConfig.workflow_id == workflow_id, models.AgentModelConfig.agent_name == agent_name)
+            .first()
+        )
+        if row is None:
+            return {"deleted": False, "workflow_id": workflow_id, "agent_name": agent_name}
+        db.delete(row)
+        db.commit()
+        return {"deleted": True, "workflow_id": workflow_id, "agent_name": agent_name}
+
+    def _configured_model_for_agent(self, db: Session, workflow_id: str, agent_name: str, requested_model: str | None = None) -> str | None:
+        if requested_model:
+            return requested_model
+        row = (
+            db.query(models.AgentModelConfig.model)
+            .filter(models.AgentModelConfig.workflow_id == workflow_id, models.AgentModelConfig.agent_name == agent_name)
+            .first()
+        )
+        return row[0] if row else None
+
+    def _model_configs_for_workflow(self, db: Session, workflow_id: str) -> dict[str, str]:
+        rows = db.query(models.AgentModelConfig).filter(models.AgentModelConfig.workflow_id == workflow_id).all()
+        return {row.agent_name: row.model for row in rows}
+
     def list_agents(self, db: Session) -> dict:
         templates = {template.agent_name: template for template in db.query(models.PromptTemplate).filter(models.PromptTemplate.is_active == 1).all()}
+        model_configs = self._agent_model_configs_by_agent(db)
         agents = []
         for spec in DEFAULT_AGENT_SPECS:
             template = templates.get(spec.name)
-            agents.append({"name": spec.name, "role": spec.role, "order": spec.order, "prompt": template.prompt if template else spec.prompt})
+            agents.append(self._serialize_agent_config(spec, template, model_configs.get(spec.name, {})))
         return {"agents": agents}
 
-    def list_workflows(self) -> dict:
+    def _serialize_agent_config(self, spec: Any, template: models.PromptTemplate | None = None, model_configs: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+        prompt_ids = list(AGENT_PROMPT_BINDINGS.get(spec.name, ()))
+        return {
+            "name": spec.name,
+            "role": spec.role,
+            "order": spec.order,
+            "prompt": template.prompt if template else spec.prompt,
+            "default_prompt": spec.prompt,
+            "is_custom": template is not None,
+            "active_template_id": template.id if template else None,
+            "prompt_ids": prompt_ids,
+            "prompt_titles": {prompt_id: get_prompt_entry(prompt_id).title for prompt_id in prompt_ids},
+            "model_configs": model_configs or {},
+        }
+
+    def _workflow_runtime_metadata(self, workflow_id: str) -> dict[str, Any]:
+        active: dict[str, tuple[list[str], str]] = {
+            "initialization": (
+                ["/api/projects/{project_id}/story-bible/generate"],
+                "已接入 chapter_writing_service.run_initialization，用于故事圣经生成。",
+            ),
+            "outline_generation": (
+                ["/api/projects/{project_id}/chapters/plan", "/api/projects/{project_id}/outline/book/generate"],
+                "已接入 OUTLINE_AGENT_SEQUENCE 和 outline_swarm，用于旧章节规划与新版总纲/卷纲生成。",
+            ),
+            "chapter_planning": (
+                ["/api/projects/{project_id}/chapters/plan"],
+                "已接入 chapter_writing_service.run_chapter_plan，并作为章节规划前置链路。",
+            ),
+            "chapter_draft": (
+                ["/api/projects/{project_id}/chapters/{chapter_id}/draft", "/api/write/generate"],
+                "已接入 chapter_writing_service.run_chapter_draft，用于单章正文生成。",
+            ),
+            "batch_generation": (
+                ["/api/write/batch-generate"],
+                "已接入 batch_generate，逐章复用单章正文生成并保存任务结果。",
+            ),
+            "creation_star_session": (
+                [
+                    "/api/projects/{project_id}/creation/sessions",
+                    "/api/projects/{project_id}/creation/sessions/{session_id}/worldviews",
+                    "/api/projects/{project_id}/creation/sessions/{session_id}/protagonists",
+                    "/api/projects/{project_id}/creation/sessions/{session_id}/market-position",
+                    "/api/projects/{project_id}/creation/sessions/{session_id}/seed",
+                    "/api/projects/{project_id}/creation/sessions/{session_id}/core-conflict",
+                    "/api/projects/{project_id}/creation/sessions/{session_id}/constitution",
+                    "/api/projects/{project_id}/creation/sessions/{session_id}/constitution-review",
+                    "/api/projects/{project_id}/creation/sessions/{session_id}/canon-preview",
+                    "/api/projects/{project_id}/creation/sessions/{session_id}/commit",
+                ],
+                "已接入新版创作 Star 会话式接口：creation_star 抽卡、chief_architect 生成核心与宪法、reviewer 压力测试、canon_curator 正典预览与提交。",
+            ),
+        }
+        if workflow_id in active:
+            entrypoints, note = active[workflow_id]
+            return {"runtime_status": "active_runtime", "entrypoints": entrypoints, "runtime_note": note}
+        return {
+            "runtime_status": "applied_via_prompt_binding",
+            "entrypoints": ["/api/agents", "AGENT_SPECS_BY_NAME / AgentSpec prompt binding"],
+            "runtime_note": "提示词流程已通过 AgentSpec 的提示词库绑定被实际 Agent 调用；不是独立 API 执行入口。",
+        }
+
+    def _with_workflow_runtime_metadata(self, workflow: dict[str, Any]) -> dict[str, Any]:
+        return {**workflow, **self._workflow_runtime_metadata(str(workflow.get("id", "")))}
+
+    def _apply_agent_model_configs_to_workflow(
+        self,
+        workflow: dict[str, Any],
+        configs: dict[tuple[str, str], models.AgentModelConfig],
+    ) -> dict[str, Any]:
+        workflow_id = str(workflow.get("id") or workflow.get("key") or "")
+        nodes: list[dict[str, Any]] = []
+        for node in workflow.get("nodes", []):
+            agent_name = node.get("agent_name")
+            row = configs.get((workflow_id, agent_name)) if agent_name else None
+            if row:
+                nodes.append({**node, "provider": row.provider, "model": row.model, "model_config_id": row.id})
+            else:
+                nodes.append({**node, "provider": None, "model": None, "model_config_id": None})
+        return {**workflow, "nodes": nodes}
+
+    def list_workflows(self, db: Session | None = None) -> dict:
         agent_descriptions = {spec.name: spec.role for spec in DEFAULT_AGENT_SPECS}
+        model_configs = self._agent_model_config_map(db) if db is not None else {}
 
         def agent_node(node_id: str, label: str, agent_name: str, inputs: list[str], outputs: list[str], layer: int) -> dict[str, Any]:
             return {
@@ -822,7 +1621,98 @@ class StudioService:
         ]
         workflows = [
             {
+                "id": "creation_star_session",
+                "key": "creation_star_session",
+                "label": "创作 Star 立项流程",
+                "nodes": [
+                    control_node(
+                        "basic_info",
+                        "1 基本信息",
+                        "创建创作 Star 会话，保存频道、类型、标签、目标读者、目标字数、风格和初始想法。",
+                        ["channel", "genre", "tags", "target_reader", "target_words", "initial_idea"],
+                        ["creation_session", "basic_info"],
+                        0,
+                    ),
+                    agent_node(
+                        "worldview_cards",
+                        "2 世界观抽卡",
+                        "creation_star",
+                        ["basic_info", "manual_input", "previous_worldview_cards"],
+                        ["worldview_candidates", "prompt_snapshot"],
+                        1,
+                    ),
+                    agent_node(
+                        "protagonist_cards",
+                        "3 主角人设",
+                        "creation_star",
+                        ["basic_info", "selected_worldview", "manual_input"],
+                        ["protagonist_candidates", "prompt_snapshot"],
+                        2,
+                    ),
+                    agent_node(
+                        "market_position",
+                        "4 标题与卖点",
+                        "creation_star",
+                        ["basic_info", "selected_worldview", "selected_protagonist", "manual_input"],
+                        ["title_candidates", "market_position_candidates", "prompt_snapshot"],
+                        3,
+                    ),
+                    control_node(
+                        "project_seed",
+                        "5 立项种子",
+                        "用户确认已选世界观、主角、标题和市场定位后，固化为 project_seed；后续 Agent 只读取已确认种子。",
+                        ["selected_worldview", "selected_protagonist", "selected_title", "market_position"],
+                        ["project_seed"],
+                        4,
+                    ),
+                    agent_node(
+                        "core_constitution",
+                        "6 核心与宪法",
+                        "chief_architect",
+                        ["project_seed"],
+                        ["core_conflict_system", "novel_constitution"],
+                        5,
+                    ),
+                    agent_node(
+                        "constitution_review",
+                        "7 压力测试",
+                        "reviewer",
+                        ["project_seed", "core_conflict_system", "novel_constitution"],
+                        ["constitution_review"],
+                        6,
+                    ),
+                    agent_node(
+                        "canon_preview",
+                        "8 正典预览",
+                        "canon_curator",
+                        ["project_seed", "core_conflict_system", "novel_constitution", "constitution_review"],
+                        ["canon_candidates"],
+                        7,
+                    ),
+                    agent_node(
+                        "commit_creation",
+                        "9 完成创建",
+                        "canon_curator",
+                        ["canon_candidates", "approved_canon_sections"],
+                        ["project", "story_bible", "characters", "entities", "world_facts", "graph", "version_snapshot"],
+                        8,
+                    ),
+                ],
+                "edges": [
+                    {"source": "basic_info", "target": "worldview_cards", "label": "创建会话"},
+                    {"source": "worldview_cards", "target": "protagonist_cards", "label": "选择世界观"},
+                    {"source": "protagonist_cards", "target": "market_position", "label": "选择主角"},
+                    {"source": "market_position", "target": "project_seed", "label": "选择标题与卖点"},
+                    {"source": "project_seed", "target": "core_constitution", "label": "确认立项种子"},
+                    {"source": "core_constitution", "target": "constitution_review", "label": "压力测试"},
+                    {"source": "constitution_review", "target": "core_constitution", "label": "needs_revision / blocked"},
+                    {"source": "constitution_review", "target": "canon_preview", "label": "passed / passed_with_notes"},
+                    {"source": "canon_preview", "target": "commit_creation", "label": "审批六项后提交"},
+                ],
+            },
+            {
                 "id": "initialization",
+                "key": "initialization",
                 "label": "初始化项目",
                 "nodes": [
                     agent_node("chief_architect", "总策划 Agent", "chief_architect", ["title", "genre", "initial_idea"], ["story_bible", "characters", "outline"], 1),
@@ -832,6 +1722,7 @@ class StudioService:
             },
             {
                 "id": "outline_generation",
+                "key": "outline_generation",
                 "label": "长篇大纲推演",
                 "nodes": outline_nodes,
                 "edges": [
@@ -841,6 +1732,7 @@ class StudioService:
             },
             {
                 "id": "chapter_planning",
+                "key": "chapter_planning",
                 "label": "章节规划",
                 "nodes": [
                     agent_node("chapter_planner", "章节规划 Agent", "chapter_planner", ["outline", "canon_context"], ["chapters"], 1),
@@ -854,6 +1746,7 @@ class StudioService:
             },
             {
                 "id": "chapter_draft",
+                "key": "chapter_draft",
                 "label": "单章正文生成",
                 "nodes": [
                     control_node("canon_context", "canon_context", "聚合项目、故事圣经、角色、实体、图谱和前文摘要。", ["project_id", "chapter_id"], ["canon_context"], 0),
@@ -886,6 +1779,7 @@ class StudioService:
             },
             {
                 "id": "batch_generation",
+                "key": "batch_generation",
                 "label": "批量生成",
                 "nodes": [
                     control_node("batch_generate", "batch_generate", "创建批量任务并逐章派发单章正文生成。", ["chapter_start", "chapter_end"], ["jobs"], 1),
@@ -900,6 +1794,16 @@ class StudioService:
                 ],
             },
         ]
+        workflows = [
+            self._apply_agent_model_configs_to_workflow(self._with_workflow_runtime_metadata(workflow), model_configs)
+            for workflow in workflows
+        ]
+        workflows.extend(
+            [
+                self._apply_agent_model_configs_to_workflow(self._with_workflow_runtime_metadata(workflow), model_configs)
+                for workflow in list_prompt_workflows()
+            ]
+        )
         return {"workflows": workflows}
 
     def get_agent(self, db: Session, agent_name: str) -> dict:
@@ -911,24 +1815,48 @@ class StudioService:
             .filter(models.PromptTemplate.agent_name == agent_name, models.PromptTemplate.is_active == 1)
             .first()
         )
-        return {"agent": {"name": spec.name, "role": spec.role, "order": spec.order, "prompt": template.prompt if template else spec.prompt}}
+        model_configs = self._agent_model_configs_by_agent(db).get(agent_name, {})
+        return {"agent": self._serialize_agent_config(spec, template, model_configs)}
 
     def update_agent_prompt(self, db: Session, agent_name: str, request: AgentPromptUpdateRequest) -> dict:
-        if agent_name not in AGENT_SPECS_BY_NAME:
+        spec = AGENT_SPECS_BY_NAME.get(agent_name)
+        if spec is None:
             raise _not_found("Agent 不存在")
-        template = models.PromptTemplate(
-            id=generate_id("tpl"),
-            agent_name=agent_name,
-            template_name=request.template_name,
-            prompt=request.prompt,
-            is_active=0 if request.temporary else 1,
-            metadata_json=dumps({"temporary": request.temporary}),
+        template = (
+            db.query(models.PromptTemplate)
+            .filter(models.PromptTemplate.agent_name == agent_name, models.PromptTemplate.template_name == request.template_name)
+            .first()
         )
         if not request.temporary:
             db.query(models.PromptTemplate).filter(models.PromptTemplate.agent_name == agent_name).update({"is_active": 0})
-        db.add(template)
+        if template is None:
+            template = models.PromptTemplate(
+                id=generate_id("tpl"),
+                agent_name=agent_name,
+                template_name=request.template_name,
+                prompt=request.prompt,
+                is_active=0 if request.temporary else 1,
+                metadata_json=dumps({"temporary": request.temporary}),
+            )
+            db.add(template)
+        else:
+            template.prompt = request.prompt
+            template.is_active = 0 if request.temporary else 1
+            template.metadata_json = dumps({"temporary": request.temporary})
+            template.updated_at = utcnow()
         db.commit()
-        return {"agent": self.get_agent(db, agent_name)["agent"], "template": serialize_prompt_template(template)}
+        db.refresh(template)
+        model_configs = self._agent_model_configs_by_agent(db).get(agent_name, {})
+        return {"agent": self._serialize_agent_config(spec, None if request.temporary else template, model_configs), "template": serialize_prompt_template(template)}
+
+    def restore_agent_prompt(self, db: Session, agent_name: str) -> dict:
+        spec = AGENT_SPECS_BY_NAME.get(agent_name)
+        if spec is None:
+            raise _not_found("Agent 不存在")
+        db.query(models.PromptTemplate).filter(models.PromptTemplate.agent_name == agent_name).update({"is_active": 0})
+        db.commit()
+        model_configs = self._agent_model_configs_by_agent(db).get(agent_name, {})
+        return {"agent": self._serialize_agent_config(spec, None, model_configs)}
 
     def create_prompt_template(self, db: Session, request: PromptTemplateRequest) -> dict:
         template = models.PromptTemplate(
@@ -1144,6 +2072,175 @@ class StudioService:
         created_entities: list[dict[str, Any]] = []
         created_world_facts: list[dict[str, Any]] = []
         instruction = request.instruction or project.premise or "补充可供后续章节调用的设定。"
+        if request.preview_only:
+            timestamp = isoformat(utcnow())
+
+            def merge_candidate(fallback: dict[str, Any], candidate: Any, field_map: dict[str, str]) -> dict[str, Any]:
+                if not isinstance(candidate, dict):
+                    return fallback
+                item = dict(fallback)
+                for target_key, source_key in field_map.items():
+                    value = candidate.get(source_key) if source_key in candidate else candidate.get(target_key)
+                    if value not in (None, ""):
+                        item[target_key] = value
+                return item
+
+            if request.target in {"characters", "all"}:
+                role_templates = [
+                    ("关键盟友", "supporting", "major", 78),
+                    ("隐秘对手", "antagonist", "major", 76),
+                    ("线索见证人", "supporting", "medium", 62),
+                ]
+                fallback_characters = []
+                for index in range(request.count):
+                    label, role_type, level, score = role_templates[index % len(role_templates)]
+                    fallback_characters.append(
+                        {
+                            "id": f"preview_chr_{index + 1}",
+                            "project_id": project_id,
+                            "name": f"{label}{index + 1}",
+                            "aliases": [],
+                            "role": role_type,
+                            "role_type": role_type,
+                            "importance_level": level,
+                            "importance_score": max(45, score - index),
+                            "summary": f"Agent 根据“{instruction}”生成的{label}候选，确认后才会写入正式角色卡。",
+                            "appearance": "",
+                            "personality": "目标明确，拥有可被剧情检验的弱点。",
+                            "profile": "",
+                            "goals": ["推动第一卷主线", "制造与主角价值观相关的选择"],
+                            "motivations": ["保护自身秘密", "改变当前秩序"],
+                            "secrets": [],
+                            "abilities": [],
+                            "weaknesses": [],
+                            "character_arc": "从功能性出场逐步显露个人选择与代价。",
+                            "current_status": "candidate",
+                            "related_entity_ids": [],
+                            "related_character_ids": [],
+                            "updated_reason": "agent_assisted_setting_preview",
+                            "relations": [],
+                            "status": "active",
+                            "source": "agent",
+                            "created_at": timestamp,
+                            "updated_at": timestamp,
+                        }
+                    )
+                character_payload, character_meta = call_agent_json(
+                    llm_client=llm_client,
+                    agent_name="chief_architect",
+                    role=AGENT_SPECS_BY_NAME["chief_architect"].role,
+                    system_prompt=AGENT_SPECS_BY_NAME["chief_architect"].prompt,
+                    task="为项目生成候选角色卡预览。必须输出 characters 数组；不要假定已写入正式设定。",
+                    context={"project": serialize_project(project), "target": request.target, "instruction": instruction, "count": request.count, "preview_only": True},
+                    fallback={"characters": fallback_characters},
+                    model=request.model,
+                )
+                created_characters = [
+                    merge_candidate(fallback, candidate, {"name": "name", "summary": "summary", "personality": "personality", "character_arc": "character_arc"})
+                    for fallback, candidate in zip(fallback_characters, character_payload.get("characters", []))
+                ] or fallback_characters
+                self._record_agent_run(db, job, "chief_architect", {"characters": created_characters, "_llm": character_meta, "preview_only": True}, {"instruction": instruction})
+
+            if request.target in {"entities", "all"}:
+                entity_templates = [
+                    ("location", "关键地点", "第一卷反复出现的行动舞台。"),
+                    ("organization", "隐秘组织", "掌握规则解释权的势力。"),
+                    ("item", "核心物件", "连接角色秘密与世界观规则的信物。"),
+                ]
+                fallback_entities = []
+                for index in range(request.count):
+                    entity_type, label, description = entity_templates[index % len(entity_templates)]
+                    fallback_entities.append(
+                        {
+                            "id": f"preview_ent_{index + 1}",
+                            "project_id": project_id,
+                            "entity_type": entity_type,
+                            "name": f"{label}{index + 1}",
+                            "importance_level": "major" if index == 0 else "medium",
+                            "importance_score": max(45, 76 - index),
+                            "description": f"{description} Agent 生成依据：{instruction}",
+                            "current_status": "candidate",
+                            "source": "agent",
+                            "created_at": timestamp,
+                            "updated_at": timestamp,
+                        }
+                    )
+                entity_payload, entity_meta = call_agent_json(
+                    llm_client=llm_client,
+                    agent_name="canon_curator",
+                    role=AGENT_SPECS_BY_NAME["canon_curator"].role,
+                    system_prompt=AGENT_SPECS_BY_NAME["canon_curator"].prompt,
+                    task="为项目生成候选剧情实体预览。必须输出 entities 数组；不要假定已写入正式设定。",
+                    context={"project": serialize_project(project), "target": request.target, "instruction": instruction, "count": request.count, "preview_only": True},
+                    fallback={"entities": fallback_entities},
+                    model=request.model,
+                )
+                created_entities = [
+                    merge_candidate(fallback, candidate, {"entity_type": "entity_type", "name": "name", "description": "description"})
+                    for fallback, candidate in zip(fallback_entities, entity_payload.get("entities", []))
+                ] or fallback_entities
+                self._record_agent_run(db, job, "canon_curator", {"entities": created_entities, "_llm": entity_meta, "preview_only": True}, {"instruction": instruction})
+
+            if request.target in {"world_facts", "all"}:
+                fact_templates = [
+                    ("culture", "社会禁忌", "能制造角色选择压力的公共规则。"),
+                    ("history", "旧事件", "解释当前冲突来源的历史事实。"),
+                    ("magic_rule", "能力规则", "限制角色行动并提供伏笔回收空间的规则。"),
+                ]
+                fallback_world_facts = []
+                for index in range(request.count):
+                    category, label, content = fact_templates[index % len(fact_templates)]
+                    fallback_world_facts.append(
+                        {
+                            "id": f"preview_wld_{index + 1}",
+                            "project_id": project_id,
+                            "category": category,
+                            "title": f"{label}{index + 1}",
+                            "content": f"{content} Agent 生成依据：{instruction}",
+                            "importance_level": "major" if index == 0 else "medium",
+                            "importance_score": max(45, 80 - index),
+                            "confidence": 0.65,
+                            "source_chapter_id": None,
+                            "related_entity_ids": [],
+                            "created_at": timestamp,
+                            "updated_at": timestamp,
+                        }
+                    )
+                fact_payload, fact_meta = call_agent_json(
+                    llm_client=llm_client,
+                    agent_name="canon_curator",
+                    role=AGENT_SPECS_BY_NAME["canon_curator"].role,
+                    system_prompt=AGENT_SPECS_BY_NAME["canon_curator"].prompt,
+                    task="为项目生成候选世界观事实预览。必须输出 world_facts 数组；不要假定已写入正式设定。",
+                    context={"project": serialize_project(project), "target": request.target, "instruction": instruction, "count": request.count, "preview_only": True},
+                    fallback={"world_facts": fallback_world_facts},
+                    model=request.model,
+                )
+                created_world_facts = [
+                    merge_candidate(fallback, candidate, {"category": "category", "title": "title", "content": "content"})
+                    for fallback, candidate in zip(fallback_world_facts, fact_payload.get("world_facts", []))
+                ] or fallback_world_facts
+                self._record_agent_run(db, job, "canon_curator", {"world_facts": created_world_facts, "_llm": fact_meta, "preview_only": True}, {"instruction": instruction})
+
+            self._finish_job(
+                db,
+                job,
+                {
+                    "characters": created_characters,
+                    "entities": created_entities,
+                    "world_facts": created_world_facts,
+                    "instruction": instruction,
+                    "preview_only": True,
+                },
+            )
+            db.commit()
+            return {
+                "job": serialize_job(job),
+                "characters": created_characters,
+                "entities": created_entities,
+                "world_facts": created_world_facts,
+                "preview_only": True,
+            }
 
         if request.target in {"characters", "all"}:
             existing_count = db.query(models.Character).filter(models.Character.project_id == project_id).count()
@@ -1305,6 +2402,7 @@ class StudioService:
             "characters": created_characters,
             "entities": created_entities,
             "world_facts": created_world_facts,
+            "preview_only": False,
         }
 
     def get_graph(self, db: Session, project_id: str, chapter_id: str | None = None) -> dict:
@@ -1698,16 +2796,469 @@ class StudioService:
             "initial_idea": str(basic_info.get("initial_idea") or project.initial_idea or project.premise),
         }
 
-    def _creation_star_prompt_snapshot(self, request: CreationStarDrawRequest, basic: dict[str, Any]) -> dict[str, Any]:
+    def _creation_session(self, db: Session, project_id: str, session_id: str) -> models.CreationSession:
+        session = db.get(models.CreationSession, session_id)
+        if session is None or session.project_id != project_id:
+            raise _not_found("创作 Star 会话不存在")
+        return session
+
+    def _creation_session_state(self, session: models.CreationSession) -> dict[str, Any]:
+        state = loads(session.state_json, {})
+        return state if isinstance(state, dict) else {}
+
+    def _save_creation_session_state(self, session: models.CreationSession, state: dict[str, Any]) -> None:
+        session.state_json = dumps(state)
+        session.updated_at = utcnow()
+
+    def _reset_creation_session_after(self, state: dict[str, Any], step: str) -> None:
+        downstream_keys = {
+            "project_seed",
+            "core_conflict_system",
+            "novel_constitution",
+            "constitution_review",
+            "canon_candidates",
+            "project_bible",
+            "world_rules",
+            "confirmed_canon",
+        }
+        if step == "worldview":
+            downstream_keys.update(
+                {
+                    "worldview_candidates",
+                    "selected_worldview",
+                    "protagonist_candidates",
+                    "selected_protagonist",
+                    "title_candidates",
+                    "selected_title",
+                    "market_position_candidates",
+                    "market_position",
+                }
+            )
+        elif step == "protagonist":
+            downstream_keys.update(
+                {
+                    "protagonist_candidates",
+                    "selected_protagonist",
+                    "title_candidates",
+                    "selected_title",
+                    "market_position_candidates",
+                    "market_position",
+                }
+            )
+        elif step == "market_position":
+            downstream_keys.update({"title_candidates", "selected_title", "market_position_candidates", "market_position"})
+        for key in downstream_keys:
+            if key.endswith("_candidates"):
+                state[key] = []
+            else:
+                state[key] = {}
+
+    def _require_creation_constitution_ready(self, state: dict[str, Any]) -> dict[str, Any]:
+        review = state.get("constitution_review")
+        if not isinstance(review, dict) or not review:
+            raise _bad_request("请先完成小说宪法压力测试")
+        status = str(review.get("status") or "")
+        blocking = review.get("blocking_issues")
+        has_blocking = isinstance(blocking, list) and bool(blocking)
+        if status not in {"passed", "passed_with_notes"} or has_blocking:
+            raise _bad_request(
+                "小说宪法压力测试未通过，不能进入正典预览或提交",
+                {"status": status, "blocking_issues": blocking or []},
+            )
+        return review
+
+    def _require_approved_canon_sections(self, approved_sections: list[str] | None) -> tuple[str, ...]:
+        if approved_sections is None:
+            return CREATION_CANON_APPROVAL_SECTIONS
+        approved = set(approved_sections)
+        required = set(CREATION_CANON_APPROVAL_SECTIONS)
+        missing = sorted(required - approved)
+        unknown = sorted(approved - required)
+        if missing or unknown:
+            raise _bad_request("正典审批项不完整", {"missing": missing, "unknown": unknown})
+        return CREATION_CANON_APPROVAL_SECTIONS
+
+    def _run_creation_star_draw_step(
+        self,
+        db: Session,
+        project: models.Project,
+        step: str,
+        basic: dict[str, Any],
+        selected_worldview: dict[str, Any],
+        selected_protagonist: dict[str, Any],
+        project_bible: dict[str, Any],
+        world_rules: dict[str, Any],
+        count: int,
+        manual_input: str,
+        model: str | None,
+        job_type: str,
+        previous_cards: list[dict[str, Any]] | None = None,
+    ) -> tuple[dict[str, Any], models.GenerationJob]:
+        request = CreationStarDrawRequest(
+            step=step,  # type: ignore[arg-type]
+            basic_info=basic,
+            selected_worldview=selected_worldview,
+            selected_protagonist=selected_protagonist,
+            project_bible=project_bible,
+            world_rules=world_rules,
+            count=count,
+            manual_input=manual_input,
+            model=model,
+        )
+        job = self._create_job(db, project.id, None, job_type, model, request.model_dump(), total_steps=1)
+        draw_id = generate_id("draw")
+        rng = random.SystemRandom()
+        prompt_snapshot = self._creation_star_prompt_snapshot(request, basic, previous_cards=previous_cards)
+        if step == "worldview":
+            fallback: dict[str, Any] = {
+                "step": step,
+                "cards": self._creation_worldview_cards(basic, count, manual_input, draw_id, rng),
+            }
+        elif step == "protagonist":
+            fallback = {
+                "step": step,
+                "cards": self._creation_protagonist_cards(basic, selected_worldview, count, manual_input, draw_id, rng),
+            }
+        elif step == "title":
+            fallback = {
+                "step": step,
+                "cards": self._creation_title_cards(
+                    basic,
+                    selected_worldview,
+                    selected_protagonist,
+                    project_bible,
+                    world_rules,
+                    count,
+                    manual_input,
+                    draw_id,
+                    rng,
+                ),
+            }
+        else:
+            raise _bad_request("不支持的创作 Star 会话步骤", {"step": step})
+        fallback["draw_id"] = draw_id
+        fallback["prompt_snapshot"] = prompt_snapshot
+        payload, llm_meta = call_agent_json(
+            llm_client=llm_client,
+            agent_name="creation_star",
+            role=AGENT_SPECS_BY_NAME["creation_star"].role,
+            system_prompt=AGENT_SPECS_BY_NAME["creation_star"].prompt,
+            task=f"执行解耦创作 Star 的 {step} 单步生成。count={count} 时只输出本轮新增候选。",
+            context={
+                "project": serialize_project(project),
+                "request": request.model_dump(),
+                "basic_info": basic,
+                "prompt_snapshot": prompt_snapshot,
+                "fallback_output": fallback,
+            },
+            fallback=fallback,
+            model=model,
+        )
+        if not isinstance(payload, dict):
+            payload = fallback
+        cards = payload.get("cards")
+        if not isinstance(cards, list) or not cards:
+            payload["cards"] = fallback["cards"]
+        payload["step"] = payload.get("step") or step
+        payload["draw_id"] = payload.get("draw_id") or draw_id
+        payload["prompt_snapshot"] = payload.get("prompt_snapshot") or prompt_snapshot
+        payload["_llm"] = llm_meta
+        self._record_agent_run(
+            db,
+            job,
+            "creation_star",
+            payload,
+            {"project": serialize_project(project), "request": request.model_dump(), "prompt_snapshot": prompt_snapshot},
+        )
+        return payload, job
+
+    def _run_structured_creation_agent(
+        self,
+        db: Session,
+        project: models.Project,
+        job_type: str,
+        agent_name: str,
+        task: str,
+        context: dict[str, Any],
+        fallback: dict[str, Any],
+        model: str | None,
+    ) -> tuple[dict[str, Any], models.GenerationJob, dict[str, Any]]:
+        job = self._create_job(db, project.id, None, job_type, model, context, total_steps=1)
+        payload, llm_meta = call_agent_json(
+            llm_client=llm_client,
+            agent_name=agent_name,
+            role=AGENT_SPECS_BY_NAME[agent_name].role,
+            system_prompt=AGENT_SPECS_BY_NAME[agent_name].prompt,
+            task=task,
+            context={**context, "fallback_output": fallback},
+            fallback=fallback,
+            model=model,
+        )
+        return payload if isinstance(payload, dict) else fallback, job, llm_meta
+
+    def _creation_market_position_cards(
+        self,
+        basic: dict[str, Any],
+        worldview: dict[str, Any],
+        protagonist: dict[str, Any],
+        title_cards: list[dict[str, Any]],
+        count: int,
+        job_id: str,
+    ) -> list[dict[str, Any]]:
+        tags = self._as_str_list(basic.get("tags")) or self._as_str_list(worldview.get("tags")) or [basic.get("genre", "类型小说")]
+        title = title_cards[0].get("title") if title_cards else worldview.get("title", basic.get("genre", "新书"))
+        reader = basic.get("target_reader") or "类型小说读者"
+        selling = title_cards[0].get("selling_point") if title_cards else worldview.get("selling_point", "高概念长篇卖点")
+        cards = []
+        for index in range(max(1, count)):
+            tag = self._pick(tags, index, "成长")
+            cards.append(
+                {
+                    "id": f"market_{job_id[-8:]}_{index + 1}",
+                    "title": f"{basic.get('genre', '类型')} · {tag} · {title}",
+                    "target_reader": reader,
+                    "platform_fit": basic.get("channel", "通用"),
+                    "selling_point": selling,
+                    "hook": worldview.get("conflict_hook") or protagonist.get("long_term_goal") or "主角正面撞上旧秩序。",
+                    "risk": worldview.get("risk") or "需要在前三章快速展示规则、代价和主角欲望。",
+                    "tags": list(dict.fromkeys([*tags[:4], str(basic.get("genre") or "类型小说")])),
+                    "source": "agent",
+                }
+            )
+        return cards
+
+    def _require_project_seed(self, state: dict[str, Any]) -> dict[str, Any]:
+        seed = state.get("project_seed")
+        if not isinstance(seed, dict) or not seed:
+            raise _bad_request("请先确认立项种子")
+        return seed
+
+    def _core_conflict_from_seed(self, seed: dict[str, Any]) -> dict[str, Any]:
+        worldview = seed.get("selected_worldview") if isinstance(seed.get("selected_worldview"), dict) else {}
+        protagonist = seed.get("selected_protagonist") if isinstance(seed.get("selected_protagonist"), dict) else {}
+        basic = seed.get("basic_info") if isinstance(seed.get("basic_info"), dict) else {}
+        protagonist_name = str(protagonist.get("name") or "主角")
+        desire = str(protagonist.get("long_term_goal") or "夺回选择命运的主动权")
+        world_pressure = str(worldview.get("conflict_hook") or "旧秩序、资源垄断和关系压力阻止主角前进")
+        core_conflict = f"{protagonist_name}想要{desire}，但{world_pressure}。"
+        return {
+            "protagonist_desire": desire,
+            "world_resistance": world_pressure,
+            "core_conflict": core_conflict,
+            "external_resistance": worldview.get("description") or f"{basic.get('genre', '世界')}规则持续制造外部压力。",
+            "internal_resistance": protagonist.get("inner_wound") or "主角害怕再次被旧秩序定义。",
+            "relationship_resistance": protagonist.get("relationship_hook") or "关键关系既提供帮助也制造误判。",
+            "institutional_resistance": "资格、资源、榜单、势力分配共同构成制度阻力。",
+            "typical_cost": "每次前进都必须付出资源、关系、名誉或认知代价。",
+            "long_form_engine": "欲望、阻力、选择和代价可持续循环升级，支撑长篇连载。",
+            "possible_endpoint": "主角重新定义规则，但必须承担新秩序的代价。",
+            "theme_question": "普通人能否在不被旧秩序同化的前提下夺回选择权。",
+        }
+
+    def _novel_constitution_from_seed(self, seed: dict[str, Any], core_conflict: dict[str, Any]) -> dict[str, Any]:
+        basic = seed.get("basic_info") if isinstance(seed.get("basic_info"), dict) else {}
+        worldview = seed.get("selected_worldview") if isinstance(seed.get("selected_worldview"), dict) else {}
+        protagonist = seed.get("selected_protagonist") if isinstance(seed.get("selected_protagonist"), dict) else {}
+        tags = self._as_str_list(basic.get("tags")) or self._as_str_list(worldview.get("tags"))
+        return {
+            "basic_positioning": {
+                "genre": basic.get("genre") or "类型小说",
+                "tone": basic.get("style") or "清晰、有悬念",
+                "target_reader_experience": basic.get("target_reader") or "类型小说读者",
+                "story_keywords": tags[:8],
+                "type_promise": worldview.get("selling_point") or "稳定兑现主角成长、规则压力和阶段爽点。",
+            },
+            "core_narrative_engine": core_conflict,
+            "protagonist_arc": {
+                "opening_state": protagonist.get("identity") or "被旧秩序限制的人",
+                "surface_goal": protagonist.get("long_term_goal") or core_conflict.get("protagonist_desire"),
+                "deep_need": "夺回解释自身命运的主动权。",
+                "largest_flaw": protagonist.get("weakness") or "习惯独自承担代价。",
+                "ending_state": core_conflict.get("possible_endpoint"),
+            },
+            "world_rules": {
+                "primary_logic": worldview.get("description") or "世界规则必须持续制造选择与代价。",
+                "power_distribution": "权力和资源由明面制度与暗面势力共同分配。",
+                "rules_not_to_break": ["胜利必须有代价", "新增设定必须可追溯", "主角认知不能越过亲历和被告知的信息"],
+            },
+            "character_functions": {
+                "protagonist": protagonist.get("name") or "主角",
+                "antagonist": "代表旧秩序合理性与压迫性的核心对手",
+                "mirror": "走向另一种答案的镜像人物",
+                "ally": "既帮助主角也迫使主角付出关系代价的人",
+            },
+            "theme_pressure": {
+                "core_question": core_conflict.get("theme_question"),
+                "wrong_answer": "只要赢就可以复制旧秩序。",
+                "final_answer": "真正的胜利是让后来者不必重复同样的压迫。",
+            },
+            "cost_mechanism": ["获得力量必须付出代价", "赢得关系必须承担误解或牺牲", "靠近真相会改变主角处境"],
+            "forbidden_directions": ["无铺垫反转", "机械降神", "无代价复活", "主角动机突变"],
+            "long_form_sustainability": "核心矛盾可通过地图、制度、关系、真相和代价逐层升级。",
+        }
+
+    def _constitution_review_from_constitution(self, constitution: dict[str, Any]) -> dict[str, Any]:
+        engine = constitution.get("core_narrative_engine") if isinstance(constitution.get("core_narrative_engine"), dict) else {}
+        return {
+            "status": "passed_with_notes",
+            "largest_strength": "核心矛盾、代价机制和世界规则能形成持续推进。",
+            "largest_risk": "需要在章纲阶段持续检查爽点兑现和设定边界，避免规则只停留在说明层。",
+            "blocking_issues": [],
+            "revision_suggestions": ["前三章尽快展示主角欲望、世界阻力和一次明确代价。", "卷纲中为每卷设置一条不可逆状态变化。"],
+            "recommended_next_stage": "canon_preview" if engine else "core_conflict",
+        }
+
+    def _project_bible_from_creation_state(self, state: dict[str, Any]) -> dict[str, Any]:
+        seed = state.get("project_seed") if isinstance(state.get("project_seed"), dict) else {}
+        constitution = state.get("novel_constitution") if isinstance(state.get("novel_constitution"), dict) else {}
+        core = state.get("core_conflict_system") if isinstance(state.get("core_conflict_system"), dict) else {}
+        protagonist = seed.get("selected_protagonist") if isinstance(seed.get("selected_protagonist"), dict) else {}
+        keywords = self._as_str_list(constitution.get("basic_positioning", {}).get("story_keywords") if isinstance(constitution.get("basic_positioning"), dict) else [])
+        return {
+            "核心命题": constitution.get("theme_pressure", {}).get("core_question") if isinstance(constitution.get("theme_pressure"), dict) else core.get("theme_question", ""),
+            "核心矛盾": core.get("core_conflict", ""),
+            "主角长期目标": protagonist.get("long_term_goal") or core.get("protagonist_desire", ""),
+            "最终结局方向": core.get("possible_endpoint", ""),
+            "主线关键词": keywords or ["成长", "代价", "破局"],
+        }
+
+    def _world_rules_from_creation_state(self, state: dict[str, Any]) -> dict[str, Any]:
+        constitution = state.get("novel_constitution") if isinstance(state.get("novel_constitution"), dict) else {}
+        rules = constitution.get("world_rules") if isinstance(constitution.get("world_rules"), dict) else {}
+        return {
+            "力量体系": self._as_str_list(rules.get("primary_logic")) or ["力量必须经由训练、资源或风险获得"],
+            "社会结构": ["明面制度与暗面势力共同分配资源", "普通人需要通过资格或战绩获得上升通道"],
+            "资源系统": ["资格", "证据", "训练资源", "关系信用"],
+            "势力分布": ["官方机构", "旧秩序代表", "地下资源网络", "主角同盟"],
+            "禁忌规则": self._as_str_list(constitution.get("forbidden_directions")) or ["无铺垫反转", "机械降神"],
+            "不可违反设定": self._as_str_list(rules.get("rules_not_to_break")) or ["新增设定必须可追溯"],
+        }
+
+    def _canon_candidates_from_creation_state(self, project: models.Project, basic: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        seed = state.get("project_seed") if isinstance(state.get("project_seed"), dict) else {}
+        worldview = seed.get("selected_worldview") if isinstance(seed.get("selected_worldview"), dict) else {}
+        protagonist = seed.get("selected_protagonist") if isinstance(seed.get("selected_protagonist"), dict) else {}
+        core = state.get("core_conflict_system") if isinstance(state.get("core_conflict_system"), dict) else self._core_conflict_from_seed(seed)
+        constitution = state.get("novel_constitution") if isinstance(state.get("novel_constitution"), dict) else self._novel_constitution_from_seed(seed, core)
+        project_bible = self._project_bible_from_creation_state({**state, "core_conflict_system": core, "novel_constitution": constitution})
+        world_rules = self._world_rules_from_creation_state({**state, "novel_constitution": constitution})
+        story_bible_candidate = {
+            "world_setting": "\n".join(
+                [
+                    str(worldview.get("title") or project.title),
+                    str(worldview.get("description") or project.premise),
+                    "世界规则：" + "；".join(self._as_str_list(world_rules.get("不可违反设定"))),
+                ]
+            ),
+            "main_conflict": project_bible.get("核心矛盾") or project.premise,
+            "themes": project_bible.get("主线关键词") or [],
+            "style_guide": basic.get("style") or project.style_guide,
+            "narrative_pov": "third_person_limited",
+            "forbidden_elements": world_rules.get("禁忌规则") or [],
+            "continuity_rules": world_rules.get("不可违反设定") or [],
+        }
+        protagonist_name = str(protagonist.get("name") or "待定主角")
+        return {
+            "story_bible_candidate": story_bible_candidate,
+            "character_candidates": [
+                {
+                    "name": protagonist_name,
+                    "role_type": "protagonist",
+                    "importance_level": "core",
+                    "importance_score": 100,
+                    "summary": protagonist.get("summary") or protagonist.get("identity") or "创作 Star 确认的主角。",
+                    "goals": [project_bible.get("主角长期目标", "")],
+                    "character_arc": protagonist.get("character_arc") or "从被规则限制到重新定义规则。",
+                }
+            ],
+            "entity_candidates": [
+                {"entity_type": "organization", "name": self._pick(self._as_str_list(world_rules.get("势力分布")), 0, "核心势力"), "importance_level": "core"},
+                {"entity_type": "rule", "name": self._pick(self._as_str_list(world_rules.get("力量体系")), 0, "核心规则"), "importance_level": "core"},
+            ],
+            "world_fact_candidates": [
+                {"category": "culture", "title": "核心命题", "content": project_bible.get("核心命题", ""), "importance_level": "core"},
+                {"category": "politics", "title": "核心矛盾", "content": project_bible.get("核心矛盾", ""), "importance_level": "core"},
+                {"category": "taboo", "title": "不可违反设定", "content": "；".join(self._as_str_list(world_rules.get("不可违反设定"))), "importance_level": "core"},
+            ],
+            "graph_candidate_edges": [
+                {"source": protagonist_name, "target": worldview.get("title") or project.title, "edge_type": "rooted_in", "label": "主角由立项世界观生成"},
+            ],
+            "project_bible": project_bible,
+            "world_rules": world_rules,
+            "constitution_review": state.get("constitution_review", {}),
+        }
+
+    def _creation_worldview_step_prompt(self) -> str:
+        return (
+            "你正在执行创作 Star 的“世界观抽卡”环节。你的任务不是写正文，也不是写普通设定简介，"
+            "而是生成可供作者选择和编辑的世界观候选卡。\n\n"
+            "必须参考前序基本信息：频道、类型、细分类型、标签、目标读者、目标字数、风格、初始想法、"
+            "用户手动补充，以及上一批候选摘要。\n\n"
+            "每张卡必须像立项天花板测试：读者一眼能看出题材组合、世界为什么特殊、主角为什么会被卷入、"
+            "冲突为什么能长期升级、爽点从哪里来。\n\n"
+            "每批卡之间必须差异明显。差异不允许只体现在名称替换，而要体现在核心世界规则、社会压迫机制、"
+            "主角切入方式、长线主线和爽点机制上。\n\n"
+            "允许较高随机性和跨类型混搭，但内部逻辑必须自洽。不要提前写正文，不要替用户最终确认设定；"
+            "所有输出都只是候选，用户确认后才允许写入正式设定集。"
+        )
+
+    def _creation_worldview_output_schema(self) -> dict[str, Any]:
+        return {
+            "cards": [
+                {
+                    "id": "worldview_<draw>_<index>",
+                    "title": "8-18 字，有网文立项感的世界观卡标题",
+                    "summary": "一句话概括这个世界观",
+                    "description": "说明世界基础设定、核心规则、社会压力和主角处境",
+                    "genre_mix": ["类型组合 1", "类型组合 2"],
+                    "core_rule": "这个世界最核心、最能持续制造剧情的规则",
+                    "social_pressure": "这个世界如何压迫主角或普通人",
+                    "power_or_resource_system": "力量、资源、身份、系统、金手指或规则机制",
+                    "main_conflict_seed": "可以发展成长篇主线的核心矛盾",
+                    "protagonist_entry": "主角从哪里切入这个世界，为什么非他不可",
+                    "long_form_potential": "为什么它能支撑长篇、多卷、多阶段升级",
+                    "reader_hooks": ["爽点 1", "爽点 2", "爽点 3"],
+                    "tags": ["标签 1", "标签 2", "标签 3", "标签 4"],
+                    "selling_point": "面向目标读者的核心卖点",
+                    "conflict_hook": "能驱动下一步主角行动的冲突钩子",
+                    "risk": "这个设定写作时最容易翻车的问题",
+                    "revision_hint": "用户手动修改时最值得调整的方向",
+                }
+            ]
+        }
+
+    def _creation_previous_worldviews_summary(self, previous_cards: list[dict[str, Any]] | None) -> str:
+        if not previous_cards:
+            return "无上一批候选。"
+        pieces = []
+        for card in previous_cards[-6:]:
+            pieces.append(
+                " / ".join(
+                    [
+                        self._short(card.get("title"), 36),
+                        f"核心规则={self._short(card.get('core_rule'), 52)}",
+                        f"社会压力={self._short(card.get('social_pressure'), 52)}",
+                        f"主角入口={self._short(card.get('protagonist_entry'), 52)}",
+                    ]
+                )
+            )
+        return "\n".join(pieces)
+
+    def _creation_star_prompt_snapshot(
+        self,
+        request: CreationStarDrawRequest,
+        basic: dict[str, Any],
+        previous_cards: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         context_summary = self._creation_star_context_summary(request, basic)
         step_prompts = {
-            "worldview": "生成世界观抽卡：必须参考基本信息、标签、目标读者、初始想法和额外约束，输出差异明显的世界观卡。",
+            "worldview": self._creation_worldview_step_prompt(),
             "protagonist": "生成主角人设抽卡：必须读取已选世界观，主角的身份、欲望、能力和伤口都要服务该世界观的核心规则与冲突。",
             "project_bible": "生成项目总设定表和世界观规则表：必须读取已选世界观与主角人设，形成可长期约束正文生成的正式设定候选。",
             "world_rules": "重抽世界观规则表：必须读取基本信息、已选世界观和主角人设，只调整规则表，不破坏已确认的主线方向。",
             "title": "生成书名抽卡：必须读取基本信息、已选世界观、已选主角、项目总设定表和世界观规则表，提供多种平台感书名方向。",
         }
-        return {
+        snapshot = {
             "agent_name": "creation_star",
             "system_prompt": AGENT_SPECS_BY_NAME["creation_star"].prompt,
             "step_prompt": step_prompts.get(request.step, "生成创作 Star 候选卡。"),
@@ -1720,6 +3271,24 @@ class StudioService:
                 "title": ["basic_info", "selected_worldview", "selected_protagonist", "project_bible", "world_rules"],
             }.get(request.step, []),
         }
+        if request.step == "worldview":
+            snapshot["previous_cards_summary"] = self._creation_previous_worldviews_summary(previous_cards)
+            snapshot["output_schema"] = self._creation_worldview_output_schema()
+            snapshot["generation_settings"] = {
+                "temperature": 0.9,
+                "top_p": 0.95,
+                "max_tokens": 3000,
+                "count": request.count,
+                "presence_penalty": 0.4,
+                "frequency_penalty": 0.3,
+            }
+            snapshot["dedupe_rules"] = [
+                "不能使用与上一批相同的核心世界规则",
+                "不能使用与上一批相同的社会压迫机制",
+                "不能使用与上一批相同的主角切入方式",
+                "不能只替换名词或地名",
+            ]
+        return snapshot
 
     def _creation_star_context_summary(self, request: CreationStarDrawRequest, basic: dict[str, Any]) -> str:
         worldview = request.selected_worldview
@@ -1793,6 +3362,27 @@ class StudioService:
         tones = ["高压爽文", "悬疑升级", "群像暗线", "热血反抗", "轻脑洞", "冷峻权谋"]
         selected_seeds = self._random_cycle(seeds, count, rng)
         tag_offset = rng.randrange(len(tags)) if tags else 0
+        resource_systems = [
+            "资格牌照、考试名额和秘传功法共同构成上升通道",
+            "气血值、债务契约和榜单排名绑定生存资源",
+            "旧宗门遗产、城市许可证和黑市情报互相制衡",
+            "义体零件、真气节点和官方积分决定阶层位置",
+            "怪谈规则、镇压功勋和亲属担保共同决定安全区资格",
+        ]
+        protagonist_entries = [
+            "主角从被筛掉的底层候选者切入，因一次违规操作看见规则漏洞",
+            "主角卷入旧案重审，被迫在公开制度和暗面宗门之间求生",
+            "主角原本只是旁观者，却因亲近之人被规则吞噬而必须破局",
+            "主角掌握一条不被承认的成长路径，因此同时被官方和地下势力盯上",
+            "主角被错误标记为危险样本，只能用反常识行动证明旧秩序有罪",
+        ]
+        long_form_engines = [
+            "可通过考试、城市、势力、遗迹和真相五级地图持续扩展，每卷改变一层规则。",
+            "资源争夺、身份晋升、关系误判和旧案真相能循环升级，适合多卷连载。",
+            "每个阶段都能引出新的规则漏洞和更高层监管者，形成长期追读钩子。",
+            "主角每次胜利都会暴露更深制度问题，推动个人爽点升级为世界级冲突。",
+            "明线成长、暗线追凶、势力博弈和禁忌规则可并行推进，支撑长篇结构。",
+        ]
         cards = []
         draw_key = draw_id.rsplit("_", 1)[-1][-6:]
         for index, (title, description) in enumerate(selected_seeds):
@@ -1800,16 +3390,36 @@ class StudioService:
             tag_b = self._pick(tags, index + tag_offset + 1, subgenre)
             pressure = self._pick(self._random_cycle(pressures, count, rng), index, "资源垄断")
             tone = self._pick(self._random_cycle(tones, count, rng), index, "热血反抗")
+            resource_system = self._pick(self._random_cycle(resource_systems, count, rng), index, "资格与资源绑定")
+            protagonist_entry = self._pick(self._random_cycle(protagonist_entries, count, rng), index, "主角从底层破局")
+            long_form_potential = self._pick(self._random_cycle(long_form_engines, count, rng), index, "规则逐卷升级")
+            core_rule = f"{pressure}不是背景，而是会惩罚越界者的硬规则；主角必须找到规则漏洞才能上升。"
+            social_pressure = f"{pressure}把普通人的升学、工作、资源和亲密关系绑定在同一套评价体系里。"
+            main_conflict_seed = f"主角想夺回选择权，但维护{pressure}的组织会不断升级封锁与污名。"
             idea_hint = self._short(basic.get("initial_idea"), 42)
             cards.append(
                 {
                     "id": f"worldview_{draw_key}_{index + 1}",
                     "title": title if not manual_input else f"{title}：{manual_input[:18]}",
+                    "summary": f"{genre}/{subgenre}框架下，{pressure}变成可见规则，主角用非常规路径撬动旧秩序。",
                     "description": f"{description} 类型基底：{basic.get('channel')}/{genre}/{subgenre}；核心爽点围绕“{tag_a}”展开，主要社会压力是{pressure}。{('初始脑洞：' + idea_hint + '。') if idea_hint else ''}",
+                    "genre_mix": list(dict.fromkeys([genre, subgenre, tag_a, tone]))[:4],
+                    "core_rule": core_rule,
+                    "social_pressure": social_pressure,
+                    "power_or_resource_system": resource_system,
+                    "main_conflict_seed": main_conflict_seed,
+                    "protagonist_entry": protagonist_entry,
+                    "long_form_potential": long_form_potential,
+                    "reader_hooks": [
+                        f"{tag_a}带来的即时反馈",
+                        f"主角钻破{pressure}规则的反差爽点",
+                        f"{tone}节奏下的势力破防",
+                    ],
                     "tags": list(dict.fromkeys([tag_a, tag_b, genre, subgenre]))[:5],
                     "selling_point": f"把{genre}的熟悉期待、{tone}的阅读节奏和{tag_a}的持续反馈绑定到可升级的社会规则里。",
                     "conflict_hook": f"主角越接近上层资源，越会发现{pressure}本身就是阻碍。",
                     "risk": f"需要尽早明确{tag_a}的代价和边界，避免只靠设定名词堆砌。",
+                    "revision_hint": f"可重点调整{pressure}的表现形式、主角切入身份，或把{tag_b}强化成第一卷主钩子。",
                     "draw_id": draw_id,
                     "source": "agent",
                 }
@@ -2163,10 +3773,20 @@ class StudioService:
             wrapped["_llm"] = meta
         return wrapped
 
-    def _run_outline_agents_with_llm(self, project: models.Project, request: PlanChaptersRequest, outline_plan: dict[str, Any]) -> dict[str, Any]:
+    def _run_outline_agents_with_llm(
+        self,
+        db: Session,
+        project: models.Project | dict[str, Any],
+        request: PlanChaptersRequest,
+        outline_plan: dict[str, Any],
+        agent_sequence: tuple[str, ...] | list[str] | None = None,
+        progress_callback: Callable[[str, int], None] | None = None,
+    ) -> dict[str, Any]:
+        project_payload = project if isinstance(project, dict) else serialize_project(project)
         previous_outputs: list[dict[str, Any]] = []
         agent_outputs = dict(outline_plan.get("agent_outputs", {}))
         updated_outputs: dict[str, dict[str, Any]] = {}
+        sequence = list(agent_sequence or OUTLINE_AGENT_SEQUENCE)
         output_key_by_agent = {
             "one_sentence_expansion": "故事核心",
             "genre_market_position": "类型卖点定位",
@@ -2181,7 +3801,7 @@ class StudioService:
             "foreshadowing_manager": "伏笔账本",
             "logic_audit": "逻辑审计报告",
         }
-        for agent_name in OUTLINE_AGENT_SEQUENCE:
+        for index, agent_name in enumerate(sequence, start=1):
             spec = AGENT_SPECS_BY_NAME[agent_name]
             fallback = agent_outputs.get(agent_name, {})
             if not isinstance(fallback, dict):
@@ -2196,7 +3816,7 @@ class StudioService:
                     "输出该 Agent 负责的结构化 JSON。"
                 ),
                 context={
-                    "project": serialize_project(project),
+                    "project": project_payload,
                     "request": request.model_dump(),
                     "structured_prompt": outline_plan.get("structured_prompt", {}),
                     "story_state": outline_plan.get("story_state", {}),
@@ -2204,11 +3824,13 @@ class StudioService:
                     "fallback_output": fallback,
                 },
                 fallback=fallback,
-                model=request.model,
+                model=self._configured_model_for_agent(db, "outline_generation", agent_name, request.model),
             )
             payload["_llm"] = meta
             updated_outputs[agent_name] = payload
             previous_outputs.append({"agent_name": agent_name, "output": payload})
+            if progress_callback is not None:
+                progress_callback(agent_name, index)
         outline_plan["agent_outputs"] = updated_outputs
         for agent_name, output_key in output_key_by_agent.items():
             if agent_name in updated_outputs:
@@ -2234,7 +3856,10 @@ class StudioService:
         project: models.Project,
         request: PlanChaptersRequest,
         outline_plan: dict[str, Any],
+        generation_kind: str = "legacy_plan_chapters",
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
+        project_snapshot = serialize_project(project)
         story_bible = db.query(models.StoryBible).filter(models.StoryBible.project_id == project.id).first()
         characters = db.query(models.Character).filter(models.Character.project_id == project.id).order_by(models.Character.importance_score.desc()).limit(8).all()
         entities = db.query(models.StoryEntity).filter(models.StoryEntity.project_id == project.id).order_by(models.StoryEntity.importance_score.desc()).limit(8).all()
@@ -2243,14 +3868,14 @@ class StudioService:
         volume_target = int(request.volume_count or parameters.get("volume_count") or 1)
         chapter_target = int(request.chapter_count or parameters.get("chapters_per_volume") or 10)
         seed = {
-            "title": project.title,
-            "genre": project.genre,
-            "target_reader": project.target_reader,
-            "premise": project.premise,
-            "one_sentence_story": project.premise,
-            "worldview": story_bible.world_setting if story_bible and story_bible.world_setting else project.premise,
-            "style": project.style_guide or (story_bible.style_guide if story_bible else ""),
-            "target_length": f"{parameters.get('target_words', project.target_words)}字，{volume_target}卷，本次推演{chapter_target}章",
+            "title": project_snapshot["title"],
+            "genre": project_snapshot["genre"],
+            "target_reader": project_snapshot["target_reader"],
+            "premise": project_snapshot["premise"],
+            "one_sentence_story": project_snapshot["premise"],
+            "worldview": story_bible.world_setting if story_bible and story_bible.world_setting else project_snapshot["premise"],
+            "style": project_snapshot["style_guide"] or (story_bible.style_guide if story_bible else ""),
+            "target_length": f"{parameters.get('target_words', project_snapshot.get('target_words'))}字，{volume_target}卷，本次推演{chapter_target}章",
             "outline_requirement": request.outline_requirement,
             "characters": [serialize_character(character) for character in characters],
             "story_entities": [serialize_story_entity(entity) for entity in entities],
@@ -2261,15 +3886,18 @@ class StudioService:
                 "volume_count": len(outline_plan.get("10卷单元总表", [])),
             },
         }
+        db.commit()
         swarm_result = run_outline_swarm(
             {
-                "project_id": project.id,
+                "project_id": project_snapshot["id"],
                 "seed": seed,
+                "generation_kind": generation_kind,
                 "volume_target": volume_target,
                 "chapter_target": chapter_target,
                 "model": request.model,
                 "max_iterations": 18,
-            }
+            },
+            progress_callback=progress_callback,
         )
         outline_plan["outline_swarm"] = swarm_result
         outline_plan["outline_swarm_agent_trace"] = swarm_result.get("agent_trace", [])
@@ -2292,7 +3920,15 @@ class StudioService:
         llm_results = swarm_result.get("agent_llm_results", {})
         if not isinstance(llm_results, dict):
             llm_results = {}
-        for agent_name in OUTLINE_SWARM_AGENT_NAMES:
+        generation_kind = str(outline_plan.get("generation_kind") or "legacy_plan_chapters")
+        expected_agent_names = set(_outline_swarm_agent_names_for_generation_kind(generation_kind))
+        trace_agent_names = {
+            str(event.get("agent_name"))
+            for event in trace_events
+            if isinstance(event, dict) and event.get("agent_name")
+        }
+        executed_agent_names = [agent_name for agent_name in OUTLINE_SWARM_AGENT_NAMES if agent_name in expected_agent_names and (agent_name in trace_agent_names or agent_name in llm_results)]
+        for agent_name in executed_agent_names:
             agent_trace = [
                 event
                 for event in trace_events
@@ -2317,6 +3953,277 @@ class StudioService:
                     "trace_event_count": len(agent_trace),
                 },
             )
+
+    def _agent_role_label(self, agent_name: str) -> str:
+        normalized = agent_name.removeprefix("outline_swarm/")
+        spec = AGENT_SPECS_BY_NAME.get(agent_name) or AGENT_SPECS_BY_NAME.get(normalized)
+        if spec is not None:
+            return spec.role
+        swarm_labels = {
+            "StoryDirectorAgent": "故事总导演 Agent",
+            "WhyInterrogatorAgent": "为什么审问 Agent",
+            "WorldSettingAgent": "世界构建 Agent",
+            "CharacterArcAgent": "人物弧光 Agent",
+            "ConflictAgent": "冲突矩阵 Agent",
+            "PlotArchitectAgent": "长篇结构 Agent",
+            "BeatControllerAgent": "章节节拍 Agent",
+            "ForeshadowingAgent": "伏笔设计 Agent",
+            "EntityExtractorAgent": "实体抽取 Agent",
+            "ContinuityAgent": "连续性审查 Agent",
+        }
+        return swarm_labels.get(normalized, normalized)
+
+    def _topology_node(
+        self,
+        node_id: str,
+        label: str,
+        node_type: str,
+        summary: str,
+        *,
+        status: str = "succeeded",
+        agent_name: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        node: dict[str, Any] = {
+            "id": node_id,
+            "label": label,
+            "type": node_type,
+            "status": status,
+            "summary": summary,
+        }
+        if agent_name:
+            node["agent_name"] = agent_name
+        if payload:
+            node["payload"] = payload
+        return node
+
+    def _topology_edge(self, source: str, target: str, edge_type: str, label: str, *, reason: str = "", weight: float = 1.0) -> dict[str, Any]:
+        return {
+            "id": f"{edge_type}:{source}->{target}",
+            "source": source,
+            "target": target,
+            "type": edge_type,
+            "label": label,
+            "reason": reason,
+            "weight": weight,
+        }
+
+    def _summarize_topology_payload(self, payload: Any, limit: int = 160) -> str:
+        if payload is None:
+            return ""
+        if isinstance(payload, str):
+            return payload[:limit]
+        if isinstance(payload, dict):
+            for key in ("kind", "title", "name", "question", "message", "summary", "content"):
+                value = payload.get(key)
+                if value:
+                    return str(value)[:limit]
+        return dumps(payload)[:limit]
+
+    def _append_outline_artifact_nodes(
+        self,
+        nodes: list[dict[str, Any]],
+        edges: list[dict[str, Any]],
+        artifacts: list[dict[str, Any]],
+        source_node_id: str,
+        outline_plan: dict[str, Any],
+        generation_kind: str,
+    ) -> None:
+        artifact_specs: list[tuple[str, str, str, Any]] = []
+        if generation_kind == "chapter_outline_batch":
+            artifact_specs.append(("chapter_outlines", "章纲候选", "chapter_outline", outline_plan.get("chapter_outlines", [])))
+        else:
+            artifact_specs.extend(
+                [
+                    ("book_outline", "全书总纲", "book_outline", outline_plan.get("book_outline") or outline_plan.get("全书10卷总纲")),
+                    ("volume_outlines", "分卷卷纲", "volume_outline", outline_plan.get("volume_outlines") or outline_plan.get("10卷单元总表")),
+                    ("logic_audit", "结构审查", "gate_report", outline_plan.get("逻辑审计报告")),
+                ]
+            )
+        for key, label, artifact_type, payload in artifact_specs:
+            if payload in (None, "", [], {}):
+                continue
+            count = len(payload) if isinstance(payload, list) else 1
+            artifact_id = f"artifact:{generation_kind}:{key}"
+            artifact = {
+                "id": artifact_id,
+                "label": label,
+                "type": artifact_type,
+                "summary": self._summarize_topology_payload(payload),
+                "source_node_id": source_node_id,
+                "count": count,
+            }
+            artifacts.append(artifact)
+            nodes.append(self._topology_node(artifact_id, label, "artifact", f"生成 {count} 项{label}", payload={"artifact_type": artifact_type, "count": count}))
+            edges.append(self._topology_edge(source_node_id, artifact_id, "emits", "产出", reason=f"{label}由推演链生成"))
+
+    def _build_outline_topology(
+        self,
+        *,
+        generation_kind: str,
+        mode: str,
+        agent_sequence: tuple[str, ...] | list[str],
+        outline_plan: dict[str, Any],
+        swarm_result: dict[str, Any] | None = None,
+        planned_swarm_agents: tuple[str, ...] | list[str] = (),
+        planned_status: str = "succeeded",
+    ) -> dict[str, Any]:
+        nodes: list[dict[str, Any]] = []
+        edges: list[dict[str, Any]] = []
+        events: list[dict[str, Any]] = []
+        artifacts: list[dict[str, Any]] = []
+        seen_nodes: set[str] = set()
+        agent_outputs = outline_plan.get("agent_outputs") if isinstance(outline_plan.get("agent_outputs"), dict) else {}
+        swarm_llm_results = outline_plan.get("outline_swarm_llm_results") if isinstance(outline_plan.get("outline_swarm_llm_results"), dict) else {}
+        allowed_swarm_agent_names = set(_outline_swarm_agent_names_for_generation_kind(generation_kind))
+
+        def llm_meta_for(agent_name: str) -> dict[str, Any]:
+            normalized = agent_name.removeprefix("outline_swarm/")
+            if agent_name.startswith("outline_swarm/"):
+                meta = swarm_llm_results.get(normalized)
+                return meta if isinstance(meta, dict) else {}
+            output = agent_outputs.get(agent_name)
+            if isinstance(output, dict) and isinstance(output.get("_llm"), dict):
+                return output["_llm"]
+            return {}
+
+        def add_agent(agent_name: str, *, prefix: str = "agent", status: str = "succeeded", summary: str | None = None) -> str:
+            node_id = f"{prefix}:{agent_name}"
+            if node_id not in seen_nodes:
+                seen_nodes.add(node_id)
+                llm_meta = llm_meta_for(agent_name)
+                payload = {"llm": llm_meta} if llm_meta else None
+                nodes.append(
+                    self._topology_node(
+                        node_id,
+                        self._agent_role_label(agent_name),
+                        "agent",
+                        summary or f"{self._agent_role_label(agent_name)}参与{generation_kind}推演。",
+                        status=status,
+                        agent_name=agent_name,
+                        payload=payload,
+                    )
+                )
+            return node_id
+
+        previous_node_id = ""
+        for agent_name in agent_sequence:
+            node_id = add_agent(agent_name, status=planned_status)
+            events.append(
+                {
+                    "id": f"event:{generation_kind}:{agent_name}:linear",
+                    "agent_name": agent_name,
+                    "event_type": "agent_step",
+                    "message": "线性大纲 Agent 完成结构推演",
+                    "node_id": node_id,
+                }
+            )
+            if previous_node_id:
+                edges.append(self._topology_edge(previous_node_id, node_id, "handoff", "交接", reason="线性 Agent 顺序执行"))
+            previous_node_id = node_id
+
+        trace_events = []
+        if swarm_result and isinstance(swarm_result.get("agent_trace"), list):
+            trace_events = [event for event in swarm_result["agent_trace"] if isinstance(event, dict)]
+        if planned_swarm_agents and (not trace_events or planned_status != "succeeded"):
+            previous_planned_node_id = previous_node_id
+            for agent_name in planned_swarm_agents:
+                node_id = add_agent(
+                    f"outline_swarm/{agent_name}",
+                    prefix="agent",
+                    status=planned_status,
+                    summary=f"{self._agent_role_label(agent_name)}计划参与{generation_kind}拓扑推演。",
+                )
+                if previous_planned_node_id:
+                    edges.append(self._topology_edge(previous_planned_node_id, node_id, "handoff", "计划交接", reason="任务创建时的拓扑骨架"))
+                previous_planned_node_id = node_id
+        previous_swarm_node_id = ""
+        first_swarm_node_id = ""
+        for index, event in enumerate(trace_events):
+            agent_name = str(event.get("agent_name") or "outline_swarm")
+            if agent_name not in allowed_swarm_agent_names:
+                continue
+            node_id = add_agent(f"outline_swarm/{agent_name}", prefix="agent")
+            first_swarm_node_id = first_swarm_node_id or node_id
+            event_id = f"event:{generation_kind}:swarm:{index}"
+            event_type = str(event.get("event_type") or "agent_step")
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            events.append(
+                {
+                    "id": event_id,
+                    "timestamp": event.get("timestamp"),
+                    "agent_name": agent_name,
+                    "event_type": event_type,
+                    "message": event.get("message", ""),
+                    "node_id": node_id,
+                    "payload": payload,
+                }
+            )
+            next_agent = payload.get("next_agent")
+            if event_type == "agent_step" and next_agent and str(next_agent) in allowed_swarm_agent_names:
+                target_node_id = add_agent(f"outline_swarm/{next_agent}", prefix="agent")
+                edges.append(self._topology_edge(node_id, target_node_id, "handoff", "Swarm 交接", reason=str(event.get("message") or "")))
+            elif previous_swarm_node_id and previous_swarm_node_id != node_id:
+                edges.append(self._topology_edge(previous_swarm_node_id, node_id, "depends_on", "承接", reason="Swarm trace 顺序承接", weight=0.7))
+            if event_type in TOPOLOGY_ARTIFACT_EVENT_TYPES:
+                artifact_id = f"artifact:{generation_kind}:trace:{index}"
+                artifact = {
+                    "id": artifact_id,
+                    "label": str(event.get("message") or event_type),
+                    "type": event_type,
+                    "summary": self._summarize_topology_payload(payload),
+                    "source_node_id": node_id,
+                    "count": 1,
+                }
+                artifacts.append(artifact)
+                nodes.append(self._topology_node(artifact_id, artifact["label"], "artifact", artifact["summary"], payload={"artifact_type": event_type}))
+                edges.append(self._topology_edge(node_id, artifact_id, "emits", "记录产物", reason=event_type))
+            previous_swarm_node_id = node_id
+
+        if first_swarm_node_id and previous_node_id:
+            edges.append(self._topology_edge(previous_node_id, first_swarm_node_id, "handoff", "进入拓扑推演", reason="线性结构交给 Swarm 做动态推演"))
+
+        source_node_id = previous_swarm_node_id or previous_node_id or (nodes[-1]["id"] if nodes else "agent:outline")
+        self._append_outline_artifact_nodes(nodes, edges, artifacts, source_node_id, outline_plan, generation_kind)
+        revision_route = outline_plan.get("revision_route") if isinstance(outline_plan.get("revision_route"), dict) else {}
+        if revision_route.get("revision_required"):
+            route_node_id = f"decision:{generation_kind}:revision_route"
+            nodes.append(
+                self._topology_node(
+                    route_node_id,
+                    "返工路由",
+                    "decision",
+                    "逻辑审计发现阻塞问题，按问题类型路由回对应 Agent。",
+                    status="blocked",
+                    payload={"revision_route": revision_route},
+                )
+            )
+            edges.append(self._topology_edge(source_node_id, route_node_id, "blocks", "触发返工", reason="logic_audit blocking / needs_revision"))
+            for route in revision_route.get("routes", []):
+                if not isinstance(route, dict):
+                    continue
+                target_agent = str(route.get("to_agent") or "")
+                if not target_agent:
+                    continue
+                target_node_id = add_agent(target_agent, status="pending")
+                edges.append(self._topology_edge(route_node_id, target_node_id, "revises", "返工", reason=str(route.get("reason") or "")))
+        metrics = {
+            "mode": mode,
+            "node_count": len(nodes),
+            "edge_count": len(edges),
+            "event_count": len(events),
+            "artifact_count": len(artifacts),
+            "agent_count": len([node for node in nodes if node.get("type") == "agent"]),
+        }
+        return {
+            "mode": mode,
+            "generation_kind": generation_kind,
+            "nodes": nodes,
+            "edges": edges,
+            "events": events,
+            "artifacts": artifacts,
+            "metrics": metrics,
+        }
 
     def _project(self, db: Session, project_id: str) -> models.Project:
         project = db.get(models.Project, project_id)
@@ -2358,26 +4265,609 @@ class StudioService:
             job_id=job_id,
         )
 
-    def _create_job(self, db: Session, project_id: str, chapter_id: str | None, job_type: str, requested_model: str | None, request_payload: dict, idempotency_key: str | None = None, total_steps: int = 1) -> models.GenerationJob:
+    def _create_job(
+        self,
+        db: Session,
+        project_id: str,
+        chapter_id: str | None,
+        job_type: str,
+        requested_model: str | None,
+        request_payload: dict,
+        idempotency_key: str | None = None,
+        total_steps: int = 1,
+        queued: bool = False,
+    ) -> models.GenerationJob:
         provider = LLMProviderResolver(get_settings()).resolve(requested_model)
+        now = utcnow()
         job = models.GenerationJob(
             id=generate_id("job"),
             project_id=project_id,
             chapter_id=chapter_id,
             job_type=job_type,
-            status="running",
+            status="queued" if queued else "running",
             run_id=generate_id("run"),
             idempotency_key=idempotency_key or f"{job_type}:{project_id}:{chapter_id or 'project'}:{generate_id('idem')}",
             model=provider.model,
             request_json=dumps({**request_payload, "provider": provider.provider, "has_api_key": bool(provider.api_key)}),
-            progress_json=dumps({"current_step": "running", "total_steps": total_steps, "completed_steps": 0, "message": "工作流正在执行"}),
+            progress_json=dumps(
+                {
+                    "current_step": "queued" if queued else "running",
+                    "total_steps": total_steps,
+                    "completed_steps": 0,
+                    "message": "任务已入队，等待后台推演" if queued else "工作流正在执行",
+                }
+            ),
             current_agent="",
-            started_at=utcnow(),
-            heartbeat_at=utcnow(),
+            started_at=None if queued else now,
+            heartbeat_at=now,
         )
         db.add(job)
         db.flush()
         return job
+
+    def _plan_request_from_job(self, job: models.GenerationJob) -> PlanChaptersRequest:
+        payload = loads(job.request_json, {})
+        allowed = {field: payload[field] for field in PlanChaptersRequest.model_fields if field in payload}
+        allowed["async_mode"] = False
+        return PlanChaptersRequest.model_validate(allowed)
+
+    def _book_outline_request_from_job(self, job: models.GenerationJob) -> BookOutlineGenerateRequest:
+        payload = loads(job.request_json, {})
+        allowed = {field: payload[field] for field in BookOutlineGenerateRequest.model_fields if field in payload}
+        allowed["async_mode"] = False
+        return BookOutlineGenerateRequest.model_validate(allowed)
+
+    def _chapter_outline_batch_request_from_job(self, job: models.GenerationJob) -> ChapterOutlineBatchGenerateRequest:
+        payload = loads(job.request_json, {})
+        allowed = {field: payload[field] for field in ChapterOutlineBatchGenerateRequest.model_fields if field in payload}
+        allowed["async_mode"] = False
+        return ChapterOutlineBatchGenerateRequest.model_validate(allowed)
+
+    def _book_outline_to_plan_request(self, project: models.Project, request: BookOutlineGenerateRequest) -> PlanChaptersRequest:
+        chapter_count = max(1, min(100, int(request.chapters_per_volume or 50)))
+        topology_instruction = (
+            "拓扑推演开启：按 Agent 交接、依赖、产物、审查和候选正典关系组织推演；不得减少总纲、卷纲字段或内容量。"
+            if request.use_topology_inference
+            else "拓扑推演关闭：按线性 Agent 链生成；不得减少总纲、卷纲字段或内容量，并保持与拓扑模式基本一致的输出结构。"
+        )
+        return PlanChaptersRequest(
+            volume_title="第一卷",
+            start_chapter_no=1,
+            chapter_count=chapter_count,
+            outline_requirement=f"{request.outline_requirement}\n\n{topology_instruction}",
+            overwrite_existing=True,
+            idempotency_key=f"{request.idempotency_key}:internal-plan",
+            target_words=request.target_words or project.target_words or max(30000, project.planned_chapter_count * project.chapter_word_target),
+            volume_count=request.volume_count,
+            chapters_per_volume=request.chapters_per_volume,
+            chapter_word_target=request.chapter_word_target or project.chapter_word_target,
+            model=request.model,
+            async_mode=False,
+        )
+
+    def _build_initial_book_outline_plan(self, db: Session, project: models.Project, request: BookOutlineGenerateRequest) -> dict[str, Any]:
+        plan_request = self._book_outline_to_plan_request(project, request)
+        outline_plan: dict[str, Any] = {
+            "generation_kind": "book_outline",
+            "parameters": {
+                "target_words": plan_request.target_words,
+                "volume_count": plan_request.volume_count,
+                "chapters_per_volume": plan_request.chapters_per_volume,
+                "chapter_word_target": plan_request.chapter_word_target,
+                "use_topology_inference": request.use_topology_inference,
+            },
+            "book_outline": {},
+            "volume_outlines": [],
+            "10卷单元总表": [],
+            "change_summary": {},
+            "revision_route": {"revision_required": False, "routes": [], "issues": [], "status": "planned"},
+        }
+        outline_plan["change_summary"] = self._build_book_outline_change_summary(db, project, outline_plan)
+        outline_plan["outline_topology"] = self._build_outline_topology(
+            generation_kind="book_outline",
+            mode="topology" if request.use_topology_inference else "linear",
+            agent_sequence=BOOK_OUTLINE_AGENT_SEQUENCE,
+            outline_plan=outline_plan,
+            planned_swarm_agents=BOOK_OUTLINE_SWARM_AGENT_NAMES if request.use_topology_inference else (),
+            planned_status="pending",
+        )
+        return outline_plan
+
+    def _build_book_outline_change_summary(self, db: Session, project: models.Project, outline_plan: dict[str, Any]) -> dict[str, Any]:
+        story_bible = db.query(models.StoryBible).filter(models.StoryBible.project_id == project.id).first()
+        volume_outlines = outline_plan.get("volume_outlines") if isinstance(outline_plan.get("volume_outlines"), list) else []
+        existing_volumes = {
+            row.volume_no: row
+            for row in db.query(models.Volume).filter(models.Volume.project_id == project.id).all()
+        }
+        incoming_numbers = [
+            int(item.get("volume_no") or index)
+            for index, item in enumerate(volume_outlines, start=1)
+            if isinstance(item, dict)
+        ]
+        overwritten = [volume_no for volume_no in incoming_numbers if volume_no in existing_volumes]
+        created = [volume_no for volume_no in incoming_numbers if volume_no not in existing_volumes]
+        parameters = outline_plan.get("parameters") if isinstance(outline_plan.get("parameters"), dict) else {}
+        return {
+            "source": "book_outline_preview",
+            "requires_user_confirmation": True,
+            "will_update": [
+                "project.target_words",
+                "project.planned_chapter_count",
+                "project.chapter_word_target",
+                "story_bible.world_setting",
+                "story_bible.main_conflict",
+                "story_bible.themes",
+                "volumes.title",
+                "volumes.outline",
+            ],
+            "story_bible_version": story_bible.version if story_bible else None,
+            "target_words": parameters.get("target_words"),
+            "volume_count": parameters.get("volume_count") or len(volume_outlines),
+            "will_create_volume_numbers": created,
+            "will_overwrite_volume_numbers": overwritten,
+            "preserved_manual_settings": [
+                "不创建或覆盖章节正文",
+                "不直接覆盖角色卡、实体、世界事实或图谱",
+                "不删除未出现在本次预览中的既有章节",
+                "AI 新设定仍需用户确认后才能进入正式设定集",
+            ],
+        }
+
+    def _collect_audit_issues(self, audit_payload: Any) -> list[dict[str, Any]]:
+        if not isinstance(audit_payload, dict):
+            return []
+        issues: list[dict[str, Any]] = []
+        for key in ("issues", "blocking_issues", "revision_suggestions"):
+            value = audit_payload.get(key)
+            if not isinstance(value, list):
+                continue
+            for item in value:
+                if isinstance(item, dict):
+                    issues.append(item)
+                elif item:
+                    issues.append({"severity": "warning", "issue": str(item)})
+        return issues
+
+    def _route_outline_issue(self, issue: dict[str, Any]) -> str:
+        text = dumps(issue)
+        if any(keyword in text for keyword in ("世界", "规则", "设定", "力量体系", "圣经")):
+            return "world_bible"
+        if any(keyword in text for keyword in ("卷", "结构", "节奏", "断裂", "阶段", "主线")):
+            return "full_structure" if "全书" in text or "结构" in text else "volume_outline"
+        if any(keyword in text for keyword in ("伏笔", "回收", "暗线", "线索")):
+            return "foreshadowing_manager"
+        if any(keyword in text for keyword in ("人物", "主角", "欲望", "成长")):
+            return "protagonist_arc"
+        return "editor_orchestrator"
+
+    def _build_outline_revision_route(self, outline_plan: dict[str, Any]) -> dict[str, Any]:
+        agent_outputs = outline_plan.get("agent_outputs") if isinstance(outline_plan.get("agent_outputs"), dict) else {}
+        audit_payload = outline_plan.get("逻辑审计报告")
+        if not isinstance(audit_payload, dict):
+            audit_payload = agent_outputs.get("logic_audit") if isinstance(agent_outputs.get("logic_audit"), dict) else {}
+        issues = self._collect_audit_issues(audit_payload)
+        status = str(audit_payload.get("status") or audit_payload.get("conclusion") or "")
+        passed = audit_payload.get("passed")
+        blocking_issues = [
+            issue
+            for issue in issues
+            if str(issue.get("severity") or issue.get("level") or "").lower() in {"blocking", "error", "fatal", "a", "a级"}
+            or "blocking" in str(issue).lower()
+        ]
+        revision_required = bool(audit_payload.get("revision_required") or blocking_issues or passed is False or status in {"blocked", "needs_revision", "需要返工"})
+        routes = []
+        for issue in blocking_issues or issues[:3]:
+            target = self._route_outline_issue(issue)
+            routes.append(
+                {
+                    "from_agent": "logic_audit",
+                    "to_agent": target,
+                    "reason": str(issue.get("issue") or issue.get("message") or issue.get("suggestion") or issue)[:240],
+                    "status": "planned" if revision_required else "informational",
+                }
+            )
+        return {
+            "revision_required": revision_required,
+            "status": "needs_revision" if revision_required else "passed",
+            "issues": issues,
+            "routes": routes if revision_required else [],
+        }
+
+    def _normalize_book_outline_plan(self, project: models.Project, request: PlanChaptersRequest, outline_plan: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(outline_plan)
+        normalized["generation_kind"] = "book_outline"
+        normalized.pop("chapters", None)
+        normalized.pop("章节节拍表", None)
+        story_state = normalized.get("story_state")
+        if isinstance(story_state, dict):
+            story_state = dict(story_state)
+            story_state.pop("beat_sheets", None)
+            normalized["story_state"] = story_state
+        volume_source = normalized.get("volume_outlines") or normalized.get("10卷单元总表") or normalized.get("逐卷50章大纲") or []
+        if not isinstance(volume_source, list):
+            volume_source = []
+        volume_outlines = self._dynamic_volume_outlines(volume_source, project.genre, int(request.chapters_per_volume or project.chapter_word_target or 50))
+        normalized["volume_outlines"] = volume_outlines
+        normalized["10卷单元总表"] = volume_outlines
+        book_outline = normalized.get("book_outline")
+        if not isinstance(book_outline, dict):
+            full_structure = normalized.get("全书10卷总纲")
+            if not isinstance(full_structure, dict):
+                full_structure = {}
+            book_outline = {
+                "title": project.title,
+                "genre": project.genre,
+                "premise": project.premise,
+                "core_theme": "主角在长期冲突中以有代价的选择回应世界压力。",
+                "core_conflict": full_structure.get("full_story_one_sentence") or project.premise,
+                "protagonist_long_term_goal": "持续夺回解释自身命运和世界规则的主动权。",
+                "ending_direction": full_structure.get("ending_closure_design", {}),
+                "mainline_keywords": ["成长", "代价", "破局", "伏笔", "终局"],
+            }
+        normalized["book_outline"] = book_outline
+        return normalized
+
+    def _dynamic_volume_outlines(self, volumes: list[dict[str, Any]], genre: str, chapters_per_volume: int) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for index, item in enumerate(volumes, start=1):
+            if not isinstance(item, dict):
+                continue
+            volume_no = int(item.get("volume_no") or item.get("volume") or "".join([char for char in str(item.get("第X卷", index)) if char.isdigit()]) or index)
+            phase_source = item.get("phases") or item.get("50章高密度剧情流水线执行协议") or []
+            if not isinstance(phase_source, list):
+                phase_source = []
+            rhythm = self._choose_rhythm_model(genre, item, max(1, len(phase_source) or 4), chapters_per_volume)
+            normalized.append(
+                {
+                    "volume_no": volume_no,
+                    "title": str(item.get("title") or item.get("卷名") or f"第{volume_no}卷"),
+                    "chapter_range": str(item.get("chapter_range") or item.get("章节区间") or self._chapter_range_from_volume_no(volume_no, chapters_per_volume)),
+                    "volume_function": str(item.get("volume_function") or item.get("core_goal") or "推动主线升级并改变主角处境。"),
+                    "rhythm_model": rhythm,
+                    "core_goal": str(item.get("core_goal") or item.get("主线") or item.get("剧情多轨道架构", {}).get("主线", "完成本卷阶段目标。")),
+                    "main_track": str(item.get("main_track") or item.get("剧情多轨道架构", {}).get("主线", "主线目标推进。")),
+                    "hidden_track": str(item.get("hidden_track") or item.get("剧情多轨道架构", {}).get("暗线", "暗线推进一格。")),
+                    "character_track": str(item.get("character_track") or item.get("relationship_change") or "人物关系或认知发生变化。"),
+                    "world_reveal": str(item.get("world_reveal") or "揭开世界规则的一层新解释。"),
+                    "opposition_pressure": str(item.get("opposition_pressure") or item.get("core_enemy_or_pressure") or "阶段反对力量升级。"),
+                    "protagonist_change": item.get("protagonist_change") or item.get("protagonist_upgrade") or item.get("本卷主角提升目标", {}),
+                    "phases": self._normalize_volume_phases(phase_source),
+                    "volume_hook": str(item.get("volume_hook") or item.get("final_hook") or item.get("卷末大钩子") or "卷末留下通向下一卷的新问题。"),
+                    "continuity_requirements": item.get("continuity_requirements") if isinstance(item.get("continuity_requirements"), list) else ["不得推翻已确认世界规则", "暗线必须承接上一卷"],
+                    "risks": item.get("risks") if isinstance(item.get("risks"), list) else ["节奏重复", "暗线推进不足"],
+                    "revision_suggestions": item.get("revision_suggestions") if isinstance(item.get("revision_suggestions"), list) else [],
+                }
+            )
+        return normalized
+
+    def _choose_rhythm_model(self, genre: str, item: dict[str, Any], phase_count: int, chapters_per_volume: int) -> dict[str, Any]:
+        genre_text = f"{genre} {item}".lower()
+        if any(keyword in genre_text for keyword in ("悬疑", "推理", "怪谈", "规则")):
+            model_name = "线索递进 + 反转揭示"
+            recommended_count = 4
+        elif any(keyword in genre_text for keyword in ("权谋", "历史", "战争", "群像")):
+            model_name = "多线群像并进"
+            recommended_count = 6
+        elif any(keyword in genre_text for keyword in ("言情", "情感", "青春")):
+            model_name = "关系阶段递进"
+            recommended_count = 4
+        elif any(keyword in genre_text for keyword in ("玄幻", "仙侠", "升级", "高武")):
+            model_name = "地图进阶 + 力量升级"
+            recommended_count = 5
+        else:
+            model_name = "动态长篇升级"
+            recommended_count = max(3, min(6, phase_count))
+        count = max(3, min(7, recommended_count))
+        segment = max(1, chapters_per_volume // count)
+        distribution = []
+        start = 1
+        for phase_no in range(1, count + 1):
+            end = chapters_per_volume if phase_no == count else min(chapters_per_volume, start + segment - 1)
+            distribution.append(f"{start}-{end}")
+            start = end + 1
+        return {
+            "model_name": model_name,
+            "phase_count": count,
+            "why_this_model": "根据题材、目标读者和本卷功能动态选择，不强制套用固定五段模板。",
+            "chapter_distribution": " / ".join(distribution),
+        }
+
+    def _normalize_volume_phases(self, phases: list[Any]) -> list[dict[str, Any]]:
+        normalized = []
+        for index, phase in enumerate(phases, start=1):
+            if not isinstance(phase, dict):
+                continue
+            normalized.append(
+                {
+                    "phase_no": index,
+                    "phase_name": str(phase.get("phase") or phase.get("name") or f"阶段{index}"),
+                    "chapter_range": str(phase.get("章节区间") or phase.get("chapter_range") or ""),
+                    "dramatic_function": str(phase.get("dramatic_function") or phase.get("function") or phase.get("name") or "推进本卷阶段目标。"),
+                    "entry_condition": str(phase.get("entry_condition") or "承接上一阶段结果。"),
+                    "exit_condition": str(phase.get("exit_condition") or "制造下一阶段压力。"),
+                    "key_events": phase.get("major_events") if isinstance(phase.get("major_events"), list) else [str(phase.get(f"大事件{i}", "")) for i in range(1, 6) if phase.get(f"大事件{i}")],
+                    "main_reversal": str(phase.get("main_reversal") or phase.get("turning_point") or "阶段信息产生反转。"),
+                    "cost": str(phase.get("cost") or "主角付出资源、关系、身份或认知代价。"),
+                    "payoff": str(phase.get("payoff") or "兑现阶段目标或爽点。"),
+                    "next_pressure": str(phase.get("next_pressure") or "暴露更高层压力。"),
+                }
+            )
+        return normalized
+
+    def _chapter_range_from_volume_no(self, volume_no: int, chapters_per_volume: int) -> str:
+        start = (volume_no - 1) * chapters_per_volume + 1
+        return f"{start}-{start + chapters_per_volume - 1}"
+
+    def _apply_book_outline(self, db: Session, project: models.Project, outline_plan: dict[str, Any]) -> None:
+        story_bible = self._story_bible(db, project.id)
+        parameters = outline_plan.get("parameters") if isinstance(outline_plan.get("parameters"), dict) else {}
+        book_outline = outline_plan.get("book_outline") if isinstance(outline_plan.get("book_outline"), dict) else {}
+        world_bible = outline_plan.get("世界圣经") if isinstance(outline_plan.get("世界圣经"), dict) else {}
+        volume_outlines = outline_plan.get("volume_outlines") if isinstance(outline_plan.get("volume_outlines"), list) else []
+        if parameters.get("target_words") is not None:
+            project.target_words = int(parameters["target_words"])
+        if parameters.get("volume_count") is not None and parameters.get("chapters_per_volume") is not None:
+            project.planned_chapter_count = int(parameters["volume_count"]) * int(parameters["chapters_per_volume"])
+        if parameters.get("chapter_word_target") is not None:
+            project.chapter_word_target = int(parameters["chapter_word_target"])
+        story_bible.world_setting = self._outline_text_block(world_bible or book_outline)
+        story_bible.main_conflict = str(book_outline.get("core_conflict") or book_outline.get("mainline") or project.premise)
+        keywords = book_outline.get("mainline_keywords")
+        if not isinstance(keywords, list):
+            keywords = ["主线", "成长", "代价", "伏笔"]
+        story_bible.themes_json = dumps([str(item) for item in keywords[:8]])
+        story_bible.style_guide = project.style_guide or story_bible.style_guide
+        story_bible.version += 1
+        story_bible.updated_at = utcnow()
+        for item in volume_outlines:
+            if not isinstance(item, dict):
+                continue
+            volume_no = int(item.get("volume_no") or len(volume_outlines) + 1)
+            row = db.query(models.Volume).filter(models.Volume.project_id == project.id, models.Volume.volume_no == volume_no).first()
+            if row is None:
+                row = models.Volume(
+                    id=generate_id("vol"),
+                    project_id=project.id,
+                    volume_no=volume_no,
+                    title=str(item.get("title") or f"第{volume_no}卷"),
+                    sort_order=volume_no,
+                )
+                db.add(row)
+            row.title = str(item.get("title") or row.title)
+            row.outline = self._format_dynamic_volume_outline_text(item)
+            row.status = "active"
+            row.sort_order = volume_no
+
+    def _outline_text_block(self, payload: dict[str, Any]) -> str:
+        if not payload:
+            return ""
+        return "\n".join(self._format_mapping_lines(payload))
+
+    def _format_dynamic_volume_outline_text(self, item: dict[str, Any]) -> str:
+        lines = [
+            f"卷名：{item.get('title', '')}",
+            f"章节区间：{item.get('chapter_range', '')}",
+            f"本卷功能：{item.get('volume_function', '')}",
+        ]
+        rhythm = item.get("rhythm_model")
+        if isinstance(rhythm, dict):
+            lines.extend(
+                [
+                    "节奏模型：",
+                    f"- 模型：{rhythm.get('model_name', '')}",
+                    f"- 阶段数：{rhythm.get('phase_count', '')}",
+                    f"- 分布：{rhythm.get('chapter_distribution', '')}",
+                    f"- 选择理由：{rhythm.get('why_this_model', '')}",
+                ]
+            )
+        for label, key in [
+            ("核心目标", "core_goal"),
+            ("主线", "main_track"),
+            ("暗线", "hidden_track"),
+            ("人物线", "character_track"),
+            ("世界揭示", "world_reveal"),
+            ("阻力压力", "opposition_pressure"),
+            ("主角变化", "protagonist_change"),
+        ]:
+            value = item.get(key)
+            if value:
+                lines.append(f"{label}：{value if isinstance(value, str) else dumps(value)}")
+        phases = item.get("phases")
+        if isinstance(phases, list) and phases:
+            lines.append("阶段设计：")
+            for phase in phases:
+                if not isinstance(phase, dict):
+                    continue
+                lines.append(f"- {phase.get('phase_name', '阶段')}（{phase.get('chapter_range', '')}）：{phase.get('dramatic_function', '')}")
+                events = phase.get("key_events")
+                if isinstance(events, list):
+                    for event in events[:5]:
+                        lines.append(f"  - {event}")
+        if item.get("volume_hook"):
+            lines.append(f"卷末钩子：{item['volume_hook']}")
+        if item.get("risks"):
+            lines.append(f"风险：{', '.join([str(risk) for risk in item['risks']])}")
+        return "\n".join([line for line in lines if line.strip()])
+
+    def _ensure_batch_can_generate(self, db: Session, project_id: str, request: ChapterOutlineBatchGenerateRequest) -> None:
+        if request.overwrite_existing:
+            return
+        requested_numbers = self._chapter_numbers_from_ranges(request)
+        existing = (
+            db.query(models.Chapter)
+            .filter(models.Chapter.project_id == project_id, models.Chapter.chapter_no.in_(requested_numbers), models.Chapter.deleted_at.is_(None))
+            .all()
+        )
+        if existing:
+            raise _conflict("章纲范围已存在，且 overwrite_existing=false")
+
+    def _chapter_numbers_from_ranges(self, request: ChapterOutlineBatchGenerateRequest) -> list[int]:
+        numbers: list[int] = []
+        for item in request.chapter_ranges:
+            numbers.extend(range(item.start_chapter_no, item.end_chapter_no + 1))
+        return sorted(dict.fromkeys(numbers))
+
+    def _chapter_outline_batch_context(
+        self,
+        db: Session,
+        project: models.Project,
+        request: ChapterOutlineBatchGenerateRequest,
+        chapter_outlines: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        story_bible = db.query(models.StoryBible).filter(models.StoryBible.project_id == project.id).first()
+        volumes = db.query(models.Volume).filter(models.Volume.project_id == project.id).order_by(models.Volume.volume_no.asc()).all()
+        return {
+            "project": serialize_project(project),
+            "story_bible": serialize_story_bible(story_bible) if story_bible else {},
+            "volumes": [serialize_volume(volume) for volume in volumes],
+            "chapter_ranges": [item.model_dump() for item in request.chapter_ranges],
+            "generation_requirement": request.generation_requirement,
+            "fallback_chapter_outlines": chapter_outlines,
+        }
+
+    def _build_chapter_outline_candidates(self, db: Session, project: models.Project, request: ChapterOutlineBatchGenerateRequest) -> list[dict[str, Any]]:
+        volumes = {
+            volume.volume_no: volume
+            for volume in db.query(models.Volume).filter(models.Volume.project_id == project.id).all()
+        }
+        candidates: list[dict[str, Any]] = []
+        for item in request.chapter_ranges:
+            volume = volumes.get(item.volume_no)
+            if volume is None:
+                raise _bad_request(f"第{item.volume_no}卷不存在，请先确认总纲和卷纲")
+            for chapter_no in range(item.start_chapter_no, item.end_chapter_no + 1):
+                candidates.append(
+                    {
+                        "chapter_no": chapter_no,
+                        "volume_no": item.volume_no,
+                        "title": f"第{chapter_no}章：{self._chapter_title_seed(volume, chapter_no)}",
+                        "outline": f"承接「{volume.title}」卷纲，推进本批要求：{request.generation_requirement or '按已确认卷纲生成连续章纲'}。",
+                        "pov_character": "主角",
+                        "core_event": "围绕本卷核心目标推进一个明确因果节点。",
+                        "conflict": "主角目标与本卷阻力正面相撞。",
+                        "turn_point": "本章中段出现新信息或误判，改变下一步行动。",
+                        "emotional_beats": ["目标", "阻碍", "行动", "代价", "钩子"],
+                        "plot_purpose": "承接卷纲，制造下一章问题。",
+                        "cliffhanger": "以未解决选择、反常线索或敌方动作收束。",
+                        "word_target": project.chapter_word_target,
+                    }
+                )
+        return candidates
+
+    def _chapter_title_seed(self, volume: models.Volume, chapter_no: int) -> str:
+        seeds = ["目标浮现", "线索偏转", "阻力升级", "代价出现", "钩子落下"]
+        return f"{volume.title}·{seeds[(chapter_no - 1) % len(seeds)]}"
+
+    def _normalize_chapter_outline_item(self, item: dict[str, Any], project: models.Project, request: ChapterOutlineBatchGenerateRequest) -> dict[str, Any]:
+        chapter_no = int(item.get("chapter_no") or 1)
+        volume_no = int(item.get("volume_no") or 1)
+        return {
+            "chapter_no": chapter_no,
+            "volume_no": volume_no,
+            "title": str(item.get("title") or f"第{chapter_no}章"),
+            "outline": str(item.get("outline") or item.get("story_function") or "推进本章剧情节点。"),
+            "pov_character": str(item.get("pov_character") or "主角"),
+            "core_event": str(item.get("core_event") or item.get("action") or "主角采取行动推进目标。"),
+            "conflict": str(item.get("conflict") or item.get("opposition_force") or "主角目标遭遇阻力。"),
+            "turn_point": str(item.get("turn_point") or item.get("state_change") or "状态发生改变。"),
+            "emotional_beats": item.get("emotional_beats") if isinstance(item.get("emotional_beats"), list) else ["目标", "阻碍", "代价", "钩子"],
+            "plot_purpose": str(item.get("plot_purpose") or item.get("story_function") or "服务本批章纲因果链。"),
+            "cliffhanger": str(item.get("cliffhanger") or item.get("hook") or "留下下一章钩子。"),
+            "word_target": int(item.get("word_target") or project.chapter_word_target),
+        }
+
+    def _persist_chapter_outline_candidates(
+        self,
+        db: Session,
+        project: models.Project,
+        candidates: list[dict[str, Any]],
+        job_id: str | None,
+        overwrite_existing: bool,
+    ) -> list[models.Chapter]:
+        normalized = [self._normalize_chapter_outline_item(item, project, ChapterOutlineBatchGenerateRequest(chapter_ranges=[{"volume_no": int(item.get("volume_no", 1)), "start_chapter_no": int(item.get("chapter_no", 1)), "end_chapter_no": int(item.get("chapter_no", 1))}], idempotency_key="commit")) for item in candidates]
+        numbers = [int(item["chapter_no"]) for item in normalized]
+        existing_by_no = {
+            chapter.chapter_no: chapter
+            for chapter in db.query(models.Chapter).filter(models.Chapter.project_id == project.id, models.Chapter.chapter_no.in_(numbers)).all()
+        }
+        chapters: list[models.Chapter] = []
+        for item in normalized:
+            chapter_no = int(item["chapter_no"])
+            chapter = existing_by_no.get(chapter_no)
+            if chapter is not None and chapter.deleted_at is None and not overwrite_existing:
+                raise _conflict(f"第{chapter_no}章已存在，且 overwrite_existing=false")
+            if chapter is None:
+                chapter = models.Chapter(
+                    id=generate_id("chp"),
+                    project_id=project.id,
+                    volume_no=int(item["volume_no"]),
+                    chapter_no=chapter_no,
+                    title=item["title"],
+                    word_target=int(item["word_target"]),
+                    sort_order=chapter_no,
+                )
+                db.add(chapter)
+            chapter.volume_no = int(item["volume_no"])
+            chapter.title = item["title"]
+            chapter.outline = item["outline"]
+            chapter.pov_character = item["pov_character"]
+            chapter.core_event = item["core_event"]
+            chapter.conflict = item["conflict"]
+            chapter.turn_point = item["turn_point"]
+            chapter.emotional_beats_json = dumps(item["emotional_beats"])
+            chapter.plot_purpose = item["plot_purpose"]
+            chapter.cliffhanger = item["cliffhanger"]
+            chapter.word_target = int(item["word_target"])
+            chapter.sort_order = chapter_no
+            chapter.status = "planned"
+            chapter.deleted_at = None
+            chapters.append(chapter)
+            self._snapshot(db, project.id, chapter.id, job_id, "chapter_outline_batch", "chapter_outline", dumps(item), "批量章纲确认写入")
+        return chapters
+
+    def _start_job(self, db: Session, job: models.GenerationJob) -> None:
+        total_steps = max(int(loads(job.progress_json, {}).get("total_steps", 1)), 1)
+        job.status = "running"
+        job.started_at = job.started_at or utcnow()
+        job.heartbeat_at = utcnow()
+        job.progress_json = dumps(
+            {
+                "current_step": "running",
+                "total_steps": total_steps,
+                "completed_steps": 0,
+                "message": "后台推演已启动",
+            }
+        )
+        db.commit()
+
+    def _update_job_progress(self, db: Session, job: models.GenerationJob, current_agent: str, completed_steps: int, total_steps: int, message: str) -> None:
+        job.current_agent = current_agent
+        job.heartbeat_at = utcnow()
+        job.progress_json = dumps(
+            {
+                "current_step": current_agent,
+                "total_steps": total_steps,
+                "completed_steps": max(0, min(completed_steps, total_steps)),
+                "message": message,
+            }
+        )
+        db.commit()
+
+    def _fail_job(self, db: Session, job: models.GenerationJob, error: Exception) -> None:
+        progress = loads(job.progress_json, {})
+        job.status = "failed"
+        job.error_message = str(error)
+        job.finished_at = utcnow()
+        job.heartbeat_at = utcnow()
+        job.progress_json = dumps(
+            {
+                "current_step": "failed",
+                "total_steps": progress.get("total_steps", 1),
+                "completed_steps": progress.get("completed_steps", 0),
+                "message": "任务执行失败",
+            }
+        )
 
     def _finish_job(self, db: Session, job: models.GenerationJob, result: dict) -> None:
         total_steps = max(int(loads(job.progress_json, {}).get("total_steps", 1)), 1)
@@ -2452,6 +4942,9 @@ class StudioService:
                 )
                 db.add(chapter)
             chapter.title = item.get("title", chapter.title)
+            chapter.volume_no = int(item.get("volume_no", chapter.volume_no or 1))
+            chapter.word_target = int(item.get("word_target", chapter.word_target or project.chapter_word_target))
+            chapter.sort_order = chapter_no
             chapter.outline = item.get("outline", "")
             chapter.pov_character = item.get("pov_character", "")
             chapter.core_event = item.get("core_event", "")
@@ -2461,6 +4954,7 @@ class StudioService:
             chapter.plot_purpose = item.get("plot_purpose", "")
             chapter.cliffhanger = item.get("cliffhanger", "")
             chapter.status = "planned"
+            chapter.deleted_at = None
             chapters.append(chapter)
             self._snapshot(db, project.id, chapter.id, job_id, "chapter_planner", "chapter_outline", dumps(item), "章节规划")
         return chapters
@@ -3175,15 +5669,53 @@ class StudioService:
                 row = models.Volume(id=generate_id("vol"), project_id=project.id, volume_no=volume_no, title=item.get("卷名", f"第{volume_no}卷"), sort_order=volume_no)
                 db.add(row)
             row.title = item.get("卷名", row.title)
-            row.outline = dumps(
-                {
-                    "本卷主角提升目标": item.get("本卷主角提升目标", {}),
-                    "剧情多轨道架构": item.get("剧情多轨道架构", {}),
-                    "50章高密度剧情流水线执行协议": item.get("50章高密度剧情流水线执行协议", []),
-                    "卷末大钩子": item.get("卷末大钩子", ""),
-                    "全卷逻辑审计": item.get("全卷逻辑审计", {}),
-                }
-            )
+            row.outline = self._format_volume_outline_text(item)
+
+    def _format_mapping_lines(self, payload: dict[str, Any], indent: str = "") -> list[str]:
+        lines: list[str] = []
+        for key, value in payload.items():
+            if isinstance(value, dict):
+                lines.append(f"{indent}{key}：")
+                lines.extend(self._format_mapping_lines(value, f"{indent}  "))
+            elif isinstance(value, list):
+                lines.append(f"{indent}{key}：{'、'.join(str(item) for item in value) if value else '暂无'}")
+            else:
+                lines.append(f"{indent}{key}：{value or '暂无'}")
+        return lines
+
+    def _format_volume_outline_text(self, item: dict[str, Any]) -> str:
+        phase_blocks = item.get("50章高密度剧情流水线执行协议", [])
+        lines = [
+            f"{item.get('第X卷', '分卷')}：{item.get('卷名', '未命名卷')}",
+            f"章节区间：{item.get('章节区间', '未设置')}",
+            f"核心地图：{item.get('核心地图', '未设置')}",
+            "",
+            "本卷主角提升目标：",
+            *self._format_mapping_lines(item.get("本卷主角提升目标", {}) if isinstance(item.get("本卷主角提升目标"), dict) else {}, "  "),
+            "",
+            "剧情多轨道架构：",
+            *self._format_mapping_lines(item.get("剧情多轨道架构", {}) if isinstance(item.get("剧情多轨道架构"), dict) else {}, "  "),
+            "",
+            "50章高密度剧情流水线执行协议：",
+        ]
+        for phase in phase_blocks if isinstance(phase_blocks, list) else []:
+            if not isinstance(phase, dict):
+                continue
+            lines.append(f"{phase.get('phase', 'Phase')}（{phase.get('章节区间', '章节区间未设置')}）：")
+            for event_no in range(1, 6):
+                event = phase.get(f"大事件{event_no}")
+                if event:
+                    lines.append(f"  大事件{event_no}：{event}")
+        lines.extend(
+            [
+                "",
+                f"卷末大钩子：{item.get('卷末大钩子', '未设置')}",
+                "",
+                "全卷逻辑审计：",
+                *self._format_mapping_lines(item.get("全卷逻辑审计", {}) if isinstance(item.get("全卷逻辑审计"), dict) else {}, "  "),
+            ]
+        )
+        return "\n".join(line for line in lines if line is not None).strip()
 
     def _upsert_workflow_characters(self, db: Session, project_id: str, characters: list[dict[str, Any]], job_id: str) -> None:
         for item in characters:
@@ -3258,6 +5790,7 @@ class StudioService:
         evidence: str = "",
         source_chapter_id: str | None = None,
     ) -> models.GraphEdge:
+        db.flush()
         row = (
             db.query(models.GraphEdge)
             .filter(
