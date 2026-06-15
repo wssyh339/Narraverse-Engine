@@ -3,9 +3,11 @@ from fastapi import APIRouter
 from app.api.v1.endpoints import (
     agents,
     canon,
+    deep_agent,
     exporting,
     foreshadowing,
     knowledge,
+    langsmith,
     project_studio,
     projects,
     story_bible,
@@ -57,6 +59,7 @@ api_router.add_api_route("/agent-model-configs/{workflow_id}/{agent_name}", agen
 api_router.add_api_route("/creation-star/options", agents.creation_star_options, methods=["GET"])
 api_router.add_api_route("/projects/{project_id}/creation-star/draw", agents.creation_star_draw, methods=["POST"])
 api_router.add_api_route("/projects/{project_id}/creation-star/commit", agents.creation_star_commit, methods=["POST"])
+api_router.add_api_route("/projects/{project_id}/creation/basic-suggestions", agents.creation_basic_suggestions, methods=["POST"])
 api_router.add_api_route("/projects/{project_id}/creation/sessions", agents.create_creation_session, methods=["POST"])
 api_router.add_api_route("/projects/{project_id}/creation/sessions/{session_id}", agents.get_creation_session, methods=["GET"])
 api_router.add_api_route("/projects/{project_id}/creation/sessions/{session_id}/worldviews", agents.creation_session_worldviews, methods=["POST"])
@@ -79,6 +82,19 @@ api_router.add_api_route("/agents/templates/export", agents.export_prompt_templa
 api_router.add_api_route("/agents/{agent_name}", agents.get_agent, methods=["GET"])
 api_router.add_api_route("/agents/{agent_name}/prompt", agents.update_agent_prompt, methods=["PUT"])
 api_router.add_api_route("/agents/{agent_name}/prompt/restore", agents.restore_agent_prompt, methods=["POST"])
+api_router.add_api_route("/deep-agent/config", deep_agent.get_deep_agent_config, methods=["GET"])
+api_router.add_api_route("/deep-agent/config", deep_agent.update_deep_agent_config, methods=["PUT"])
+api_router.add_api_route("/projects/{project_id}/deep-agent/sessions", deep_agent.create_deep_agent_session, methods=["POST"])
+api_router.add_api_route("/projects/{project_id}/deep-agent/sessions", deep_agent.list_deep_agent_sessions, methods=["GET"])
+api_router.add_api_route("/projects/{project_id}/deep-agent/sessions/{session_id}", deep_agent.get_deep_agent_session, methods=["GET"])
+api_router.add_api_route("/projects/{project_id}/deep-agent/sessions/{session_id}/chat/stream", deep_agent.stream_deep_agent_chat, methods=["POST"])
+api_router.add_api_route("/projects/{project_id}/deep-agent/tool-calls/{tool_call_id}/approve", deep_agent.approve_deep_agent_tool_call, methods=["POST"])
+api_router.add_api_route("/projects/{project_id}/deep-agent/tool-calls/{tool_call_id}/reject", deep_agent.reject_deep_agent_tool_call, methods=["POST"])
+api_router.add_api_route("/langsmith/status", langsmith.get_langsmith_status, methods=["GET"])
+api_router.add_api_route("/langsmith/runs/{job_id}", langsmith.get_langsmith_runs, methods=["GET"])
+api_router.add_api_route("/langsmith/prompts/push", langsmith.push_langsmith_prompt, methods=["POST"])
+api_router.add_api_route("/langsmith/prompts/pull-preview", langsmith.pull_langsmith_prompt_preview, methods=["POST"])
+api_router.add_api_route("/langsmith/evals/run", langsmith.run_langsmith_eval, methods=["POST"])
 api_router.add_api_route("/write/generate", writing.write_generate, methods=["POST"])
 api_router.add_api_route("/write/batch-generate", writing.batch_generate, methods=["POST"])
 api_router.add_api_route("/write/pause", writing.pause_job, methods=["POST"])
@@ -110,6 +126,20 @@ api_router.add_api_route("/projects/{project_id}/world-facts", knowledge.list_wo
 api_router.add_api_route("/projects/{project_id}/world-facts", knowledge.create_world_fact, methods=["POST"])
 api_router.add_api_route("/projects/{project_id}/world-facts/{fact_id}", knowledge.update_world_fact, methods=["PUT"])
 api_router.add_api_route("/projects/{project_id}/world-facts/{fact_id}", knowledge.delete_world_fact, methods=["DELETE"])
+api_router.add_api_route("/projects/{project_id}/settings/tree", knowledge.list_canon_tree, methods=["GET"])
+api_router.add_api_route("/projects/{project_id}/settings/health", knowledge.get_canon_health, methods=["GET"])
+api_router.add_api_route("/projects/{project_id}/settings/folders", knowledge.create_canon_folder, methods=["POST"])
+api_router.add_api_route("/projects/{project_id}/settings/nodes/{node_id}/move", knowledge.move_canon_node, methods=["PATCH"])
+api_router.add_api_route("/projects/{project_id}/settings/proposals", knowledge.list_canon_proposals, methods=["GET"])
+api_router.add_api_route("/projects/{project_id}/settings/proposals/{proposal_id}/approve", knowledge.approve_canon_proposal, methods=["POST"])
+api_router.add_api_route("/projects/{project_id}/settings/proposals/{proposal_id}/reject", knowledge.reject_canon_proposal, methods=["POST"])
+api_router.add_api_route("/projects/{project_id}/settings/duplicates/scan", knowledge.scan_canon_duplicates, methods=["POST"])
+api_router.add_api_route("/projects/{project_id}/settings/export", knowledge.export_canon_package, methods=["GET"])
+api_router.add_api_route("/projects/{project_id}/settings/{ref_type}/{ref_id}/locks", knowledge.set_canon_locks, methods=["PUT"])
+api_router.add_api_route("/projects/{project_id}/settings/{ref_type}/{ref_id}/impact", knowledge.get_canon_impact, methods=["GET"])
+api_router.add_api_route("/projects/{project_id}/settings/{ref_type}/{ref_id}/versions", knowledge.list_canon_versions, methods=["GET"])
+api_router.add_api_route("/projects/{project_id}/settings/{ref_type}/{ref_id}/versions/{version_id}/rollback", knowledge.rollback_canon_version, methods=["POST"])
+api_router.add_api_route("/projects/{project_id}/settings/archive", knowledge.archive_canon_items, methods=["POST"])
 api_router.add_api_route("/projects/{project_id}/settings/generate", knowledge.generate_settings, methods=["POST"])
 api_router.add_api_route("/projects/{project_id}/graph", knowledge.get_graph, methods=["GET"])
 api_router.add_api_route("/projects/{project_id}/graph/subgraph", knowledge.get_subgraph, methods=["GET"])

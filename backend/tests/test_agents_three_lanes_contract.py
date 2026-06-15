@@ -41,8 +41,8 @@ def test_langgraph_swarm_dependency_is_declared() -> None:
 
 def test_docs_describe_three_agent_lanes() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    codex = (ROOT / "Codex.md").read_text(encoding="utf-8")
-    for doc in [readme, codex]:
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    for doc in [readme, agents]:
         assert "creation_star" in doc
         assert "outline_swarm" in doc
         assert "chapter_writing" in doc

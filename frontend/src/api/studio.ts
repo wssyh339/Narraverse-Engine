@@ -1,6 +1,13 @@
 import { API_BASE_URL, api, unwrap } from "./client";
 import type {
   AgentRun,
+  CanonChangeProposal,
+  CanonDuplicateScan,
+  CanonExportPackage,
+  CanonHealth,
+  CanonImpact,
+  CanonNode,
+  CanonVersion,
   Chapter,
   Character,
   EditorProposal,
@@ -19,11 +26,16 @@ import type {
   CreationStarBasicInfo,
   CreationStarCard,
   CreationStarOptions,
+  CreationBasicSuggestion,
   CreationSession,
   CanonRunPayload,
   CanonRunResult,
   AgentConfig,
   AgentModelConfig,
+  DeepAgentConfig,
+  DeepAgentSession,
+  DeepAgentToolCall,
+  LangSmithStatus,
   LLMModelOption,
   LLMProviderOption,
 } from "../types/api";
@@ -66,6 +78,8 @@ export interface CharacterPayload {
   related_entity_ids?: string[];
   related_character_ids?: string[];
   updated_reason?: string;
+  source_chapter_id?: string | null;
+  source_agent?: string;
 }
 
 export interface EntityPayload {
@@ -76,6 +90,8 @@ export interface EntityPayload {
   description?: string;
   current_status?: string;
   source?: string;
+  source_chapter_id?: string | null;
+  source_agent?: string;
 }
 
 export interface WorldFactPayload {
@@ -86,6 +102,8 @@ export interface WorldFactPayload {
   importance_score?: number;
   confidence?: number;
   related_entity_ids?: string[];
+  source_chapter_id?: string | null;
+  source_agent?: string;
 }
 
 export interface GenerateSettingPayload {
@@ -128,6 +146,14 @@ export interface CreationSessionCardPayload {
   manual_input?: string;
   count?: number;
   replace_existing?: boolean;
+  model?: string;
+}
+
+export interface CreationBasicSuggestionsPayload {
+  basic_info?: CreationStarBasicInfo;
+  manual_input?: string;
+  previous_suggestions?: CreationBasicSuggestion[];
+  count?: number;
   model?: string;
 }
 
@@ -359,6 +385,10 @@ export const studioApi = {
       world_facts: WorldFact[];
       version: VersionSnapshot;
     }>(api.post(`/projects/${projectId}/creation-star/commit`, payload)),
+  generateCreationBasicSuggestions: (projectId: string, payload: CreationBasicSuggestionsPayload) =>
+    unwrap<{ suggestions: CreationBasicSuggestion[]; prompt_snapshot?: Record<string, unknown>; llm: Record<string, unknown> }>(
+      api.post(`/projects/${projectId}/creation/basic-suggestions`, payload),
+    ),
   createCreationSession: (projectId: string, payload: { basic_info: CreationStarBasicInfo; model?: string }) =>
     unwrap<{ session: CreationSession }>(api.post(`/projects/${projectId}/creation/sessions`, payload)),
   getCreationSession: (projectId: string, sessionId: string) =>
@@ -421,6 +451,10 @@ export const studioApi = {
     unwrap<{
       default_provider: string;
       default_model: string;
+      configured: boolean;
+      default_provider_configured: boolean;
+      require_remote: boolean;
+      configuration_warning: string;
       providers: LLMProviderOption[];
       models: LLMModelOption[];
     }>(api.get("/llm/models")),
@@ -431,6 +465,26 @@ export const studioApi = {
     unwrap<{ deleted: boolean; workflow_id: string; agent_name: string }>(
       api.delete(`/agent-model-configs/${workflowId}/${agentName}`),
     ),
+  getDeepAgentConfig: () => unwrap<{ config: DeepAgentConfig }>(api.get("/deep-agent/config")),
+  updateDeepAgentConfig: (payload: {
+    deep_agent_enabled?: boolean;
+    deep_agent_mode?: "advisor" | "orchestrator";
+    deep_agent_allow_write?: boolean;
+    langsmith_tracing?: boolean;
+    langsmith_privacy_mode?: "off" | "metadata_only" | "redacted" | "full";
+    langsmith_prompt_sync?: "manual";
+  }) => unwrap<{ config: DeepAgentConfig }>(api.put("/deep-agent/config", payload)),
+  createDeepAgentSession: (projectId: string, payload: { objective: string }) =>
+    unwrap<{ session: DeepAgentSession }>(api.post(`/projects/${projectId}/deep-agent/sessions`, payload)),
+  listDeepAgentSessions: (projectId: string) =>
+    unwrap<{ sessions: DeepAgentSession[] }>(api.get(`/projects/${projectId}/deep-agent/sessions`)),
+  approveDeepAgentToolCall: (projectId: string, toolCallId: string) =>
+    unwrap<{ tool_call: DeepAgentToolCall }>(api.post(`/projects/${projectId}/deep-agent/tool-calls/${toolCallId}/approve`)),
+  rejectDeepAgentToolCall: (projectId: string, toolCallId: string) =>
+    unwrap<{ tool_call: DeepAgentToolCall }>(api.post(`/projects/${projectId}/deep-agent/tool-calls/${toolCallId}/reject`)),
+  getLangSmithStatus: () => unwrap<{ status: LangSmithStatus }>(api.get("/langsmith/status")),
+  runLangSmithEval: (payload: { project_id?: string; job_id?: string; dataset_name?: string }) =>
+    unwrap<{ eval_report: Record<string, unknown> }>(api.post("/langsmith/evals/run", payload)),
   updateAgentPrompt: (agentName: string, prompt: string) => unwrap<{ agent: AgentConfig }>(api.put(`/agents/${agentName}/prompt`, { prompt })),
   restoreAgentPrompt: (agentName: string) => unwrap<{ agent: AgentConfig }>(api.post(`/agents/${agentName}/prompt/restore`)),
   getJob: (jobId: string) => unwrap<{ job: GenerationJob }>(api.get(`/jobs/${jobId}`)),
@@ -457,8 +511,51 @@ export const studioApi = {
   deleteWorldFact: (projectId: string, factId: string) =>
     unwrap<{ deleted: boolean; world_fact_id: string }>(api.delete(`/projects/${projectId}/world-facts/${factId}`)),
   generateSettings: (projectId: string, payload: GenerateSettingPayload) =>
-    unwrap<{ job: GenerationJob; characters: Character[]; entities: StoryEntity[]; world_facts: WorldFact[]; preview_only: boolean }>(
+    unwrap<{
+      job: GenerationJob;
+      characters: Character[];
+      entities: StoryEntity[];
+      world_facts: WorldFact[];
+      proposals?: CanonChangeProposal[];
+      preview_only: boolean;
+    }>(
       api.post(`/projects/${projectId}/settings/generate`, payload),
+    ),
+  getSettingsTree: (projectId: string) =>
+    unwrap<{ nodes: CanonNode[]; health: CanonHealth }>(api.get(`/projects/${projectId}/settings/tree`)),
+  getSettingsHealth: (projectId: string) =>
+    unwrap<{ health: CanonHealth }>(api.get(`/projects/${projectId}/settings/health`)),
+  createCanonFolder: (projectId: string, payload: { title: string; parent_id?: string | null; sort_order?: number }) =>
+    unwrap<{ node: CanonNode }>(api.post(`/projects/${projectId}/settings/folders`, payload)),
+  moveCanonNode: (projectId: string, nodeId: string, payload: { parent_id?: string | null; sort_order?: number }) =>
+    unwrap<{ node: CanonNode }>(api.patch(`/projects/${projectId}/settings/nodes/${nodeId}/move`, payload)),
+  setCanonLocks: (projectId: string, refType: string, refId: string, payload: { locked_fields: string[]; reason?: string }) =>
+    unwrap<{ node: CanonNode }>(api.put(`/projects/${projectId}/settings/${refType}/${refId}/locks`, payload)),
+  getCanonImpact: (projectId: string, refType: string, refId: string) =>
+    unwrap<CanonImpact>(api.get(`/projects/${projectId}/settings/${refType}/${refId}/impact`)),
+  scanCanonDuplicates: (projectId: string, payload: { ref_types?: string[]; threshold?: number; create_proposals?: boolean }) =>
+    unwrap<CanonDuplicateScan>(api.post(`/projects/${projectId}/settings/duplicates/scan`, payload)),
+  exportCanonPackage: (projectId: string, format: "json" | "markdown") =>
+    unwrap<CanonExportPackage>(api.get(`/projects/${projectId}/settings/export`, { params: { format } })),
+  listCanonVersions: (projectId: string, refType: string, refId: string) =>
+    unwrap<{ versions: CanonVersion[] }>(api.get(`/projects/${projectId}/settings/${refType}/${refId}/versions`)),
+  rollbackCanonVersion: (projectId: string, refType: string, refId: string, versionId: string, user_note = "") =>
+    unwrap<{ rolled_back: boolean; item: Record<string, unknown>; version: CanonVersion }>(
+      api.post(`/projects/${projectId}/settings/${refType}/${refId}/versions/${versionId}/rollback`, { user_note }),
+    ),
+  listCanonProposals: (projectId: string, status?: string) =>
+    unwrap<{ proposals: CanonChangeProposal[] }>(api.get(`/projects/${projectId}/settings/proposals`, { params: { status } })),
+  approveCanonProposal: (projectId: string, proposalId: string, user_note = "") =>
+    unwrap<{ proposal: CanonChangeProposal; applied_ref: { ref_type: string; ref_id: string; item: Record<string, unknown> } }>(
+      api.post(`/projects/${projectId}/settings/proposals/${proposalId}/approve`, user_note ? { user_note } : undefined),
+    ),
+  rejectCanonProposal: (projectId: string, proposalId: string, user_note = "") =>
+    unwrap<{ proposal: CanonChangeProposal }>(
+      api.post(`/projects/${projectId}/settings/proposals/${proposalId}/reject`, user_note ? { user_note } : undefined),
+    ),
+  archiveCanonItems: (projectId: string, payload: { ref_type: string; ref_ids: string[]; reason?: string }) =>
+    unwrap<{ archived: Array<{ ref_type: string; ref_id: string; version: CanonVersion }> }>(
+      api.post(`/projects/${projectId}/settings/archive`, payload),
     ),
   listForeshadowing: (projectId: string) =>
     unwrap<{ foreshadowing_items: ForeshadowingItem[] }>(api.get(`/projects/${projectId}/foreshadowing`)),

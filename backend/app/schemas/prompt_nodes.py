@@ -73,6 +73,31 @@ class GeneralControlOutput(APIModel):
     recommendations: list[PromptRecommendation] = Field(default_factory=list, description="下一步建议。")
 
 
+class CreationWorldviewDrawInput(APIModel):
+    basic_info: dict[str, Any] = Field(description="创作 Star 基本信息，包括频道、类型、标签、读者、风格和初始想法。")
+    manual_input: str = Field(default="", description="作者本轮额外补充。")
+    previous_cards_summary: str = Field(default="", description="上一批世界观候选摘要，用于刷新去重。")
+    count: int = Field(default=1, ge=1, description="本轮需要生成的新增世界观卡数量。")
+
+
+class CreationWorldviewDrawOutput(APIModel):
+    cards: list[dict[str, Any]] = Field(min_length=1, description="世界观候选卡，只包含世界规则、主角入口和冲突发动机种子。")
+    generation_notes: list[str] = Field(default_factory=list, description="本轮差异化或风险说明。")
+
+
+class CreationProtagonistDrawInput(APIModel):
+    basic_info: dict[str, Any] = Field(description="创作 Star 基本信息，包括频道、类型、标签、读者、风格和初始想法。")
+    selected_worldview: dict[str, Any] = Field(description="作者已选世界观候选卡。")
+    manual_input: str = Field(default="", description="作者本轮额外补充。")
+    previous_cards_summary: str = Field(default="", description="上一批主角候选摘要，用于刷新去重。")
+    count: int = Field(default=1, ge=1, description="本轮需要生成的新增主角卡数量。")
+
+
+class CreationProtagonistDrawOutput(APIModel):
+    cards: list[dict[str, Any]] = Field(min_length=1, description="主角候选卡，只包含人物身份、欲望、能力代价、关系钩子和主角侧 conflict_seed。")
+    generation_notes: list[str] = Field(default_factory=list, description="本轮差异化或风险说明。")
+
+
 class CoreConflictSystemInput(APIModel):
     project_seed: dict[str, Any] = Field(description="创作 Star 已确认的立项种子。")
     canon_context: dict[str, Any] = Field(default_factory=dict, description="当前正典上下文。")

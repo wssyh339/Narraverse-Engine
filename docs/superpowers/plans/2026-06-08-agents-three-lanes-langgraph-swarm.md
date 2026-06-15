@@ -17,7 +17,7 @@
 - Create `backend/app/agents/outline_swarm/`: pydantic state, no-hardcode prompts, tools, validators, and Swarm builder.
 - Create `backend/app/agents/chapter_writing/`: wrapper around current chapter workflow and future quality-loop implementation.
 - Modify `backend/requirements.txt` and root `requirements.txt`: add `langgraph-swarm`.
-- Modify `Codex.md` and `README.md`: document three lanes and Swarm boundary.
+- Modify `AGENTS.md` and `README.md`: document three lanes and Swarm boundary.
 - Add tests under `backend/tests/`: structure contract, dependency contract, no-hardcoded-story guard, state/validator tests, and Swarm fallback tests.
 
 ---
@@ -808,7 +808,7 @@ Expected: PASS.
 ### Task 9: Documentation Update
 
 **Files:**
-- Modify: `Codex.md`
+- Modify: `AGENTS.md`
 - Modify: `README.md`
 - Test: `frontend/tests/frontend-contract.test.mjs` or new backend doc contract
 
@@ -819,7 +819,7 @@ Add to `backend/tests/test_agents_three_lanes_contract.py`:
 ```python
 def test_docs_describe_three_agent_lanes() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    codex = (ROOT / "Codex.md").read_text(encoding="utf-8")
+    codex = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     for doc in [readme, codex]:
         assert "creation_star" in doc
         assert "outline_swarm" in doc

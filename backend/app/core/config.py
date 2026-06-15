@@ -50,6 +50,15 @@ class Settings:
     ollama_base_url: str
     ollama_model: str
     embedding_model: str
+    deep_agent_enabled: bool
+    deep_agent_mode: str
+    deep_agent_allow_write: bool
+    langsmith_tracing: bool
+    langsmith_api_key: str
+    langsmith_project: str
+    langsmith_endpoint: str
+    langsmith_privacy_mode: str
+    langsmith_prompt_sync: str
     job_artifact_dir: str
     request_timeout_seconds: int
 
@@ -107,6 +116,15 @@ def get_settings() -> Settings:
         ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
         ollama_model=os.getenv("OLLAMA_MODEL", "qwen2.5:7b"),
         embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-v4"),
+        deep_agent_enabled=_bool_env("DEEP_AGENT_ENABLED"),
+        deep_agent_mode=os.getenv("DEEP_AGENT_MODE", "advisor"),
+        deep_agent_allow_write=_bool_env("DEEP_AGENT_ALLOW_WRITE"),
+        langsmith_tracing=_bool_env("LANGSMITH_TRACING"),
+        langsmith_api_key=os.getenv("LANGSMITH_API_KEY", ""),
+        langsmith_project=os.getenv("LANGSMITH_PROJECT", "novel-agent-local"),
+        langsmith_endpoint=os.getenv("LANGSMITH_ENDPOINT", ""),
+        langsmith_privacy_mode=os.getenv("LANGSMITH_PRIVACY_MODE", "metadata_only"),
+        langsmith_prompt_sync=os.getenv("LANGSMITH_PROMPT_SYNC", "manual"),
         job_artifact_dir=os.getenv("JOB_ARTIFACT_DIR", "artifacts/runs"),
         request_timeout_seconds=_int_env("REQUEST_TIMEOUT_SECONDS", "120"),
     )

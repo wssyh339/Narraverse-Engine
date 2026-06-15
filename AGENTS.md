@@ -27,8 +27,11 @@
 | Web 框架 | FastAPI | 0.136.3 |
 | Agent 编排 | langgraph | 1.2.4 |
 | Swarm 编排 | langgraph-swarm | 0.1.0 |
-| LangChain | langchain | 1.3.4 |
+| Deep Agent | deepagents | 0.6.10 |
+| LangChain | langchain | 1.3.9 |
+| LangChain Core | langchain-core | 1.4.7 |
 | LangChain OpenAI | langchain-openai | 1.2.2 |
+| LangSmith | langsmith | 0.8.15 |
 | LLM SDK | openai | 2.40.0 |
 | ORM | SQLAlchemy | 2.0.50 |
 | 数据校验 | pydantic | 2.13.4 |
@@ -103,9 +106,13 @@ API Key 只能来自环境变量。缺少 API Key 时，工作流允许本地降
 12. `style_profiles`
 13. `prompt_templates`
 14. `agent_model_configs`
-15. `version_snapshots`
-16. `export_jobs`
-17. `user_feedback`
+15. `runtime_settings`
+16. `deep_agent_sessions`
+17. `deep_agent_tool_calls`
+18. `langsmith_trace_links`
+19. `version_snapshots`
+20. `export_jobs`
+21. `user_feedback`
 
 MVP 阶段已有表继续保留；1.0 通过运行时 SQLite 轻量迁移补齐旧库缺失列。
 
@@ -121,6 +128,8 @@ MVP 阶段已有表继续保留；1.0 通过运行时 SQLite 轻量迁移补齐�
 - 章节：`POST /api/projects/{id}/chapters/plan`，`GET /api/projects/{id}/chapters`，`GET/PUT /api/projects/{id}/chapters/{chapter_id}`，`POST draft/rewrite/partial-rewrite`，`POST /api/projects/{id}/chapters/{chapter_id}/chat/stream`
 - Agent：`GET /api/agents`，`GET /api/agents/{agent_name}`，`PUT /api/agents/{agent_name}/prompt`，`/api/agents/templates`
 - LLM 模型：`GET /api/llm/models`，`GET/PUT /api/agent-model-configs`，`DELETE /api/agent-model-configs/{workflow_id}/{agent_name}`
+- Deep Agent：`GET/PUT /api/deep-agent/config`，`POST/GET /api/projects/{id}/deep-agent/sessions`，`GET /api/projects/{id}/deep-agent/sessions/{session_id}`，`POST /api/projects/{id}/deep-agent/sessions/{session_id}/chat/stream`，`POST /api/projects/{id}/deep-agent/tool-calls/{tool_call_id}/approve`，`POST /api/projects/{id}/deep-agent/tool-calls/{tool_call_id}/reject`
+- LangSmith：`GET /api/langsmith/status`，`GET /api/langsmith/runs/{job_id}`，`POST /api/langsmith/prompts/push`，`POST /api/langsmith/prompts/pull-preview`，`POST /api/langsmith/evals/run`
 - 任务：`POST /api/write/generate`，`POST /api/write/batch-generate`，`POST pause/resume/cancel`，`GET /api/jobs/{job_id}`，`GET /api/jobs/{job_id}/agent-runs`
 - 版本：`GET /api/versions`，`POST /api/versions/compare`，`POST rollback/branch`
 - 图谱/设定集：`GET/POST /api/projects/{id}/characters`，`GET/PUT/DELETE /api/projects/{id}/characters/{character_id}`，`GET/POST /api/projects/{id}/entities`，`PUT/DELETE /api/projects/{id}/entities/{entity_id}`，`GET/POST /api/projects/{id}/world-facts`，`PUT/DELETE /api/projects/{id}/world-facts/{fact_id}`，`GET /api/projects/{id}/graph`，`GET /api/projects/{id}/canon/context`
@@ -186,9 +195,12 @@ MVP 阶段已有表继续保留；1.0 通过运行时 SQLite 轻量迁移补齐�
 
 用户已确认将粘贴的长篇小说生产提示词拆分为 `backend/app/prompts/00_*.md` 到 `31_*.md`，并作为 1.0 Agent 重构的正式提示词库。
 
+2026-06-15 补充：创作 Star 世界观抽卡从总提示词中拆出为 `backend/app/prompts/32_creation_worldview_draw_prompt.md`，`prompt_id=creation_worldview_draw`。主角人设抽卡从总提示词中拆出为 `backend/app/prompts/33_creation_protagonist_draw_prompt.md`，`prompt_id=creation_protagonist_draw`。这两个提示词只服务候选卡片生成，不属于新增正式 Agent 角色；世界观只生成 `conflict_engine_seed`（冲突发动机种子），主角只生成 `conflict_seed`（主角侧冲突种子），不得在抽卡阶段强行生成 `core_conflict_system` 或 `novel_constitution`。用户选定世界观、主角并确认立项种子后，才由 `chief_architect` 进入核心矛盾系统与小说宪法流程。
+
 重构原则：
 
-- 提示词是可复用模板，Agent 是角色职责，Workflow 决定调用顺序；不得把 32 段提示词机械扩展为 32 个独立正式 Agent。
+- 提示词是可复用模板，Agent 是角色职责，Workflow 决定调用顺序；不得把 `00`-`31` 正式提示词库或 `32`/`33` 创作 Star 专用补充提示词机械扩展为独立正式 Agent。
+- `creation_star` 不得默认绑定 `core_conflict_system` 与 `novel_constitution`；世界观抽卡必须单独调用 `creation_worldview_draw`，主角人设抽卡必须单独调用 `creation_protagonist_draw`，并记录专用 Agent 运行名，便于 Agent 栏追踪实际应用。
 - 保留 0.4 中的 11 个正式 Agent 作为对外稳定角色；新增“核心矛盾、小说宪法、章节卡、叙事账本、结构体检”等能力优先实现为 workflow node 或 prompt task。
 - 后端必须提供统一 Prompt Catalog，记录 `prompt_id`、文件名、所属工作流、默认 Agent 和标题。
 - `/api/workflows` 必须同时保留既有工作流结构，并新增“立项与小说宪法、全书与分卷规划、单章生产闭环、连载维护与体检、专项增强”五条提示词驱动工作流。
@@ -240,9 +252,12 @@ MVP 阶段已有表继续保留；1.0 通过运行时 SQLite 轻量迁移补齐�
 - `POST /api/projects/{id}/creation/sessions/{session_id}/constitution-review`
 - `POST /api/projects/{id}/creation/sessions/{session_id}/canon-preview`
 - `POST /api/projects/{id}/creation/sessions/{session_id}/commit`
+- `POST /api/projects/{id}/creation/basic-suggestions`
 
 会话式接口补充约束：
 
+- 创作 Star 基本信息页 01 基本定位与 02 读者规模的预设选项必须集成在下拉栏中，不再以独立预设按钮占用表单下方空间。
+- 创作 Star 基本信息页 03 初始想法与抽卡约束必须支持通过统一 LLM Client 生成可反复刷新的标签/灵感建议；这些建议只能作为候选应用到初始想法或额外约束输入，不得直接写入正式设定集。
 - 逐卡加载接口默认 `count=1`，前端每次点击按顺序追加本轮新增卡片；当用户点击刷新时，前端只在本批第一张请求传 `replace_existing=true`，后端必须同步清空当前步骤候选与全部下游候选、已选项、立项种子、核心矛盾、小说宪法、压力测试和正典候选，避免前后端状态漂移。
 - `canon-preview` 和 `commit` 必须执行小说宪法质量门：`constitution_review.status` 只能在 `passed` 或 `passed_with_notes` 时继续；`needs_revision` 或 `blocked` 不得预览正典或写入正式设定集。
 - `commit` 请求必须支持 `approved_canon_sections`，新版前端提交时必须显式携带 `project`、`story_bible`、`characters`、`entities`、`world_facts`、`graph` 六个审批项；后端对缺失审批项返回校验错误。旧客户端未传该字段时暂按全量审批兼容。
@@ -267,7 +282,155 @@ MVP 阶段已有表继续保留；1.0 通过运行时 SQLite 轻量迁移补齐�
 - 推演图必须优先读取 `outline_topology.nodes` 与 `outline_topology.edges`；缺少时才回退到旧 `inferenceSteps`。
 - 拓扑图节点和边必须表示 Agent 交接、依赖、产物、审查、阻塞或修订关系，不得引入无语义动画、装饰性粒子或伪 3D。
 
-文档版本：2026-06-11
+### 0.13 结构拆分与三线架构合并约束（2026-06-14）
+
+本节合并旧规范文档中仍然有效的结构约束。若本节与 0.10、0.11、0.12 的新版流程冲突，以更新日期更晚的 0.10-0.12 为准；本节主要约束兼容入口、文件归属和防止功能继续堆叠。
+
+后端 API 路由按领域放在 `backend/app/api/v1/endpoints/`：
+
+- `backend/app/api/v1/endpoints/project_studio.py`：项目、状态、故事圣经、章节读写和项目工作室入口。
+- `backend/app/api/v1/endpoints/agents.py`：Agent、创作 Star、提示词模板和工作流图。
+- `backend/app/api/v1/endpoints/knowledge.py`：角色、实体、世界观事实和图谱。
+- `backend/app/api/v1/endpoints/foreshadowing.py`：伏笔预埋、编辑、删除和回收。
+- `backend/app/api/v1/endpoints/writing.py`：写作任务、批量任务、暂停恢复取消和 Agent 轨迹。
+- `backend/app/api/v1/endpoints/versions.py`：版本列表、diff、回滚和分支。
+- `backend/app/api/v1/endpoints/canon.py`：正典补全、canon context、final_outline 与 canon_store 的旧兼容入口。
+- `backend/app/api/v1/endpoints/tools.py`：摘要、事实核查、一致性检查、风格学习和知识查询。
+- `backend/app/api/v1/endpoints/exporting.py`：导出和导出模板。
+- `backend/app/api/v1/endpoints/websockets.py`：WebSocket 进度和任务连接。
+
+`backend/app/api/v1/router.py` 只负责挂载路由，不写业务分支。`backend/app/api/v1/endpoints/studio.py` 仅作为 legacy compatibility facade 保留；新增 API 不得继续添加到该文件。
+
+前端大纲工作台必须保持薄页面编排：
+
+- `frontend/src/pages/OutlineStudioPage.tsx` 只负责 URL 参数、React Query、选择状态、mutation 编排和子组件组合。
+- `frontend/src/pages/outline/OutlineDirectory.tsx` 负责大纲目录、卷章层级、删除和批量删除。
+- `frontend/src/pages/outline/OutlineEditorPanel.tsx` 负责总纲、卷纲、章节、章纲编辑区。
+- `frontend/src/pages/outline/OutlineGenerationModal.tsx` 负责长篇大纲/卷纲/章纲生成参数弹窗。
+- `frontend/src/pages/outline/OutlineInferenceGraph.tsx` 负责实时推演过程和拓扑图。
+- 正典补全如果保留前端入口，必须作为独立小组件或独立工作区，不得重新堆回 `OutlineStudioPage.tsx`。
+
+结构拆分原则：功能入口增加时优先新增小组件或领域 endpoint；只有共享状态和跨组件编排可以留在页面级文件。若单文件超过约 450 行，继续开发前必须先评估拆分。
+
+`backend/app/agents` 必须按三条独立产品线组织：
+
+- `backend/app/agents/creation_star/`：抽卡式立项，只生成候选设定，用户确认后写入正式项目；抽卡与提交编排由 `creation_star/service.py` 承担。
+- `backend/app/agents/outline_swarm/`：大纲生成与世界构建，使用 `langgraph-swarm` 做动态 handoff 和有限循环；每个 Swarm 节点必须通过 `OutlineSwarmAgentRunner` 加载提示词并调用统一 `llm_client`，无 API Key 时使用同 schema 的本地降级结果。
+- `backend/app/agents/chapter_writing/`：章节正文生成，使用稳定 LangGraph StateGraph 和质量门修订循环；真实 `AgentWorkflow` 必须归属本目录。
+
+共享能力放入 `backend/app/agents/shared/`，包括 canon context、trace、prompt loader 和 lane contract。`backend/app/agents/workflow.py` 仅作为 `chapter_writing.workflow` 的旧导入兼容转发；`outline_workflow.py`、`canon_workflow.py` 暂时作为 legacy compatibility 入口保留；新增 Agent 能力不得继续堆入这些旧文件。
+
+大纲生成线必须消除示例故事硬编码。世界观、势力、物品、地点、秘密、角色和规则必须来自用户输入、项目正典、数据库上下文或 LLM 结构化输出，不得在代码中写死类似“龙骨能源”“最后真龙封印”“帝国能源署”等样例内容。
+
+项目内新大纲工作台必须走两段式接口：`outline/book/generate` 只生成“总纲 + 卷纲”候选，不创建章节；`outline/book/commit` 才写入 Story Bible 与 Volumes。章纲必须通过 `outline/chapters/batch-generate` 独立生成，读取已确认总纲、卷纲和正典上下文；`outline/chapters/commit` 才写入 Chapters。`POST /api/projects/{id}/chapters/plan` 仅作为旧兼容接口保留，兼容请求可接收 `target_words`、`volume_count`、`chapters_per_volume` 和 `chapter_word_target` 等长篇规划参数。
+
+卷纲生成不得固定套用 5 Phase 或 50 章模板。每卷必须先选择 `rhythm_model`，可在三幕推进、五段升级、单元案串联、多线群像、战役推进、地图探索、规则试炼、权谋拉扯、情感递进、真相逐层揭示等模型中动态选择，并说明 `why_this_model`、`phase_count` 和 `chapter_distribution`。五段升级只是可选模型之一。
+
+### 0.14 旧 13-Agent 与正典补全兼容边界（2026-06-14）
+
+旧规范文档中的 13-Agent 长篇大纲推演和正典补全系统作为兼容能力保留，但不得覆盖 0.10 的提示词库驱动架构和 0.12 的拓扑推演约束。实现上优先映射为 `outline_swarm`、Prompt Catalog 节点、workflow node 或兼容 CLI/API，而不是新增对外稳定 Agent 角色。
+
+旧 13-Agent 大纲推演的兼容输出可包含：
+
+1. 故事核心
+2. 类型卖点定位
+3. 世界圣经
+4. 主角成长线
+5. 人物树
+6. 势力冲突表
+7. 金手指升级体系
+8. 全书总纲
+9. 逐卷大纲
+10. 章节节拍表
+11. 伏笔账本
+12. 逻辑审计报告
+13. 最终修订版纲要
+
+旧正典补全能力的核心规则仍然有效：
+
+- 多问为什么：关键设定、行动、冲突、危机、高潮必须说明为什么现在发生、为什么必须由此人经历、为什么不能逃避、为什么会增加代价、为什么读者在意、为什么推动主线、为什么不破坏已有设定。
+- 不确定不硬编：无法确认的设定、规则、动机、因果或时间线必须创建不确定项或待确认候选。
+- 重要实体必须补全：新增角色、事件、物品、势力、地点、规则、秘密、资源、制度等实体必须判断是否入正典库。
+- S/A 级实体未补全，不允许进入正式大纲；若只能降级生成，必须在输出中标明缺失字段和风险。
+- 剧情节点必须带戏剧功能：说明改变了什么、增加了什么压力、制造了什么新问题、如何逼近危机和高潮。
+
+### 0.15 Deep Agent 与 LangSmith 管理修订（2026-06-14）
+
+Deep Agent 是工作室总管层，不替代 0.4 的 11 个正式 Agent，也不得绕过 0.5 的质量门和人工确认流程。Deep Agent 只负责理解用户长期目标、拆解任务、调用现有工作流工具、生成建议、创建待审批工具调用和候选变更。
+
+权限边界：
+
+- 默认 `DEEP_AGENT_ENABLED=false`，此时仅运行本地 advisory 模式，不调用 deepagents 远程或长程执行 harness。
+- `DEEP_AGENT_ALLOW_WRITE=false` 时，所有工具调用必须进入 `deep_agent_tool_calls.status=pending_approval`，用户审批前不得写入正文、设定集、章节、伏笔或版本。
+- 即使 `DEEP_AGENT_ALLOW_WRITE=true`，AI 编辑和设定更新仍必须遵循“提案/候选 → 用户确认 → 快照 → 写入”的既有流程。
+- Deep Agent 工具白名单限定为读取项目上下文、读取 canon context、列章节、启动既有工作流、创建编辑提案、创建候选正典、创建版本快照和查询任务状态；不得开放任意 SQL、文件系统写入、shell 执行或前端直连 API Key。
+
+LangSmith 是可选观测与 Prompt/Eval 管理层：
+
+- 默认 `LANGSMITH_TRACING=false`，未配置 `LANGSMITH_API_KEY` 时不得尝试远程写入。
+- 隐私模式必须支持 `off`、`metadata_only`、`redacted`、`full`，默认 `metadata_only`；`metadata_only` 不得上传小说正文、提示词全文、用户私密设定或章节草稿。
+- 本地 `generation_jobs` 与 `agent_runs` 可保存 `langsmith_run_id`、`langsmith_url`、`trace_mode`，但不得把 LangSmith 作为唯一运行轨迹来源。
+- Prompt 管理以本地 `backend/app/prompts` 与 `prompt_templates` 为主，LangSmith Prompt Hub 只做手动 push/pull-preview；pull 结果必须预览并由用户确认后才能覆盖本地提示词。
+- Eval 先提供本地评测报告，包含 schema 合法性、提示词占位符残留、工作流状态和用户评分占位；远程 LangSmith dataset 写入只在用户配置并显式触发时进行。
+
+新增 Deep Agent 子代理职责：
+
+1. `deep_story_director`：总管，决定下一步调用哪条既有工作流。
+2. `continuity_investigator`：连续性审计，只输出问题和证据。
+3. `structure_doctor`：大纲/十章/单卷结构体检。
+4. `prompt_engineer`：提示词修改建议，只生成待确认方案。
+5. `canon_curator_advisor`：把发现转为候选正典，不直接入库。
+
+前端 Agent 配置中心必须展示：
+
+- Deep Agent 当前模式、是否允许写入、会话列表、待审批工具调用。
+- LangSmith 配置状态、隐私模式、Prompt 同步策略和 job trace 链接。
+- 任意会上传正文或完整提示词的操作必须显示隐私模式，并且只能由后端执行。
+
+文档版本：2026-06-14
+- 严格区分危机、高潮、结果：危机是不可逆选择，高潮是执行选择，结果是承担后果。
+- 每次 Agent 输出后必须经过实体抽取、正典候选、正典合并和连续性检查；不得直接覆盖已完成正典。
+
+旧本地 JSON 正典库、`final_outline.md` 导出和 `canon_store.json` 下载只作为兼容路径保留。新版持久化应优先写入 SQLite 表、版本快照、Agent 轨迹和候选正典审批流。
+
+文档版本：2026-06-14
+
+### 0.16 统一正典文件树完整闭环修订（2026-06-14）
+
+设定工作台必须从“只读聚合页面”升级为可维护的统一正典文件系统，包含：
+
+- 自定义文件夹创建、节点移动、排序和归档；前端支持拖拽移动，后端持久化到 `canon_nodes.parent_id`、`sort_order` 和 `metadata_json`。
+- 字段锁定：每个正式设定要素可锁定字段列表，存储在 `canon_nodes.metadata_json.locked_fields`；非人工显式审批的 Agent 写入不得覆盖锁定字段，只能创建候选变更。
+- 影响范围分析：任何角色、实体、世界事实或伏笔都能查询关联章节、版本、候选、图谱关系、伏笔和引用设定。
+- 重复项队列：后端可扫描同名/近似名/同类型重复项，生成 `operation=merge` 的 `canon_change_proposals`；用户审批后合并目标项、归档来源项，并分别创建版本记录。
+- 候选变更审批支持 `create/update/archive/merge`；审批通过时必须记录版本、同步 `canon_nodes` 与图谱，驳回时保留审计记录。
+- 正典包导出：按文件树导出 JSON 和 Markdown，内容必须包含作品资料、故事圣经、角色、实体、世界事实、伏笔、关系图谱、版本索引、候选审计与健康度。
+
+新增或补充 API：
+
+- `POST /api/projects/{id}/settings/folders`
+- `PATCH /api/projects/{id}/settings/nodes/{node_id}/move`
+- `PUT /api/projects/{id}/settings/{ref_type}/{ref_id}/locks`
+- `GET /api/projects/{id}/settings/{ref_type}/{ref_id}/impact`
+- `POST /api/projects/{id}/settings/duplicates/scan`
+- `POST /api/projects/{id}/settings/proposals/{proposal_id}/approve` 支持 create/update/archive/merge
+- `GET /api/projects/{id}/settings/export?format=json|markdown`
+
+文档版本：2026-06-14
+
+### 0.17 启动配置收口修订（2026-06-15）
+
+本地开发和 Docker Compose 必须以项目根目录 `.env` 作为启动配置的单一来源。新增或修改启动参数时，必须同时更新 `.env.example`、README 和本节环境变量清单。
+
+- 本地后端官方启动入口为 `scripts/dev-backend.sh`，脚本读取 `.env` 后按 `BACKEND_HOST`、`BACKEND_PORT` 启动 `uvicorn --app-dir backend app.main:app`。
+- 本地前端官方启动入口为 `scripts/dev-frontend.sh`，脚本读取 `.env` 后启动 `pnpm dev`，前端 Vite 配置必须从根目录 `.env` 读取 `FRONTEND_HOST`、`FRONTEND_PORT` 和 `VITE_API_BASE_URL`。
+- 默认本地 SQLite 路径统一为 `DATABASE_URL=sqlite:///./data/novel_agent.db`；`backend/data/` 仅保留历史测试库和手动指定路径，不再作为 README 默认启动路径。
+- 默认任务产物目录统一为 `JOB_ARTIFACT_DIR=artifacts/runs`。
+- 前端默认 API 地址统一为 `VITE_API_BASE_URL=http://localhost:8000/api`；不得在文档或脚本中重新默认到 `/api/v1`。
+- Docker Compose 可以映射宿主机端口，但不得无条件覆盖 `.env` 中的 `DATABASE_URL`、`JOB_ARTIFACT_DIR`、`FRONTEND_ORIGIN` 或 `VITE_API_BASE_URL`。
+- `VITE_*` 变量属于前端构建期配置；Docker 模式下修改后必须重新 build。
+
+文档版本：2026-06-15
 
 ## 1. 项目概述
 
@@ -313,8 +476,8 @@ MVP 阶段已有表继续保留；1.0 通过运行时 SQLite 轻量迁移补齐�
 | LLM SDK | openai | 2.40.0 | 使用 OpenAI 兼容协议接入通义千问与 DeepSeek |
 | Agent 编排 | langgraph | 1.2.4 | 章节生成、审稿、重试和状态流 |
 | Swarm 编排 | langgraph-swarm | 0.1.0 | 大纲生成线的动态 Agent handoff 与有限循环 |
-| Agent 基础框架 | langchain | 1.3.4 | langgraph-swarm 运行依赖 |
-| Agent 基础库 | langchain-core | 1.4.0 | 消息、工具、提示模板基础类型 |
+| Agent 基础框架 | langchain | 1.3.9 | deepagents 与 langgraph-swarm 运行依赖 |
+| Agent 基础库 | langchain-core | 1.4.7 | 消息、工具、提示模板基础类型 |
 | 配置加载 | python-dotenv | 1.2.2 | 本地 `.env` |
 | 关系数据库 | SQLite | 3.51.2 | MVP 阶段唯一关系数据库 |
 | 向量数据库 | Qdrant | v1.18.1 | 记忆检索 |
@@ -328,7 +491,7 @@ MVP 阶段已有表继续保留；1.0 通过运行时 SQLite 轻量迁移补齐�
 
 ```text
 .
-├── Codex.md
+├── AGENTS.md
 ├── README.md
 ├── .env.example
 ├── docker-compose.yml
@@ -1188,11 +1351,7 @@ docker compose up qdrant
 ```bash
 cd /Users/mac/Documents/长篇小说撰写agent
 /opt/miniconda3/bin/python3.13 -m pip install -r backend/requirements.txt
-
-DATABASE_URL=sqlite:///./backend/data/novel_agent.db \
-JOB_ARTIFACT_DIR=backend/artifacts/runs \
-FRONTEND_ORIGIN=http://localhost:5173 \
-/opt/miniconda3/bin/python3.13 -m uvicorn --app-dir backend app.main:app --reload --host 0.0.0.0 --port 8000
+PYTHON_BIN=/opt/miniconda3/bin/python3.13 ./scripts/dev-backend.sh
 ```
 
 如果从 `backend/` 目录启动，可以使用 `uvicorn app.main:app`；如果从项目根目录启动，必须使用 `--app-dir backend` 或设置 `PYTHONPATH=backend`。
@@ -1204,7 +1363,8 @@ cd frontend
 corepack enable
 corepack prepare pnpm@11.5.1 --activate
 pnpm install --frozen-lockfile
-pnpm dev --host 0.0.0.0 --port 5173
+cd ..
+./scripts/dev-frontend.sh
 ```
 
 预览已构建前端：
@@ -1224,7 +1384,7 @@ docker compose up --build
 访问地址：
 
 - 前端：`http://localhost:5173`
-- 后端 API：`http://localhost:8000/api/v1`
+- 后端 API：`http://localhost:8000/api`
 - 后端 OpenAPI 文档：`http://localhost:8000/docs`
 - Qdrant：`http://localhost:6333`
 
@@ -1235,7 +1395,11 @@ docker compose up --build
 | APP_ENV | 是 | `development` | 运行环境：`development`、`test`、`production` |
 | LOG_LEVEL | 是 | `info` | 日志级别 |
 | FRONTEND_ORIGIN | 是 | `http://localhost:5173` | CORS 允许的前端源 |
-| VITE_API_BASE_URL | 是 | `http://localhost:8000/api/v1` | 前端访问后端的基础地址 |
+| VITE_API_BASE_URL | 是 | `http://localhost:8000/api` | 前端访问后端的基础地址 |
+| BACKEND_HOST | 是 | `0.0.0.0` | 本地后端监听地址，由 `scripts/dev-backend.sh` 读取 |
+| BACKEND_PORT | 是 | `8000` | 本地后端监听端口，由 `scripts/dev-backend.sh` 读取 |
+| FRONTEND_HOST | 是 | `0.0.0.0` | 本地前端监听地址，由 Vite 配置读取 |
+| FRONTEND_PORT | 是 | `5173` | 本地前端监听端口，由 Vite 配置读取 |
 | DATABASE_URL | 是 | `sqlite:///./data/novel_agent.db` | SQLite 数据库地址 |
 | SQL_ECHO | 否 | `false` | 是否输出 SQL 日志 |
 | QDRANT_URL | 是 | `http://localhost:6333` | Qdrant 服务地址 |
@@ -1274,7 +1438,16 @@ docker compose up --build
 | MEMORY_TOP_K | 否 | `8` | 单次语义检索返回数量 |
 | MEMORY_LEXICAL_FALLBACK | 否 | `true` | Qdrant 不可用时是否启用关键词检索 |
 | PROMPT_REGISTRY_VERSION | 否 | `v1` | Prompt 模板版本 |
-| JOB_ARTIFACT_DIR | 是 | `backend/artifacts/runs` | 任务日志、prompt、原始响应与解析结果目录 |
+| DEEP_AGENT_ENABLED | 否 | `false` | 是否启用 deepagents 长程执行 harness；关闭时仅提供本地 advisory 会话 |
+| DEEP_AGENT_MODE | 否 | `advisor` | Deep Agent 运行模式，当前支持 `advisor`、`orchestrator` |
+| DEEP_AGENT_ALLOW_WRITE | 否 | `false` | 是否允许 Deep Agent 在工具审批后执行写入类工具；默认所有工具调用只生成待审批记录 |
+| LANGSMITH_TRACING | 否 | `false` | 是否开启 LangSmith tracing |
+| LANGSMITH_API_KEY | 否 | 空 | LangSmith API Key，仅后端读取 |
+| LANGSMITH_PROJECT | 否 | `novel-agent-local` | LangSmith project 名称 |
+| LANGSMITH_ENDPOINT | 否 | 空 | 自定义 LangSmith endpoint，空则使用 SDK 默认 |
+| LANGSMITH_PRIVACY_MODE | 否 | `metadata_only` | LangSmith 数据上传隐私模式：`off`、`metadata_only`、`redacted`、`full` |
+| LANGSMITH_PROMPT_SYNC | 否 | `manual` | Prompt Hub 同步策略，1.0 仅允许 `manual` |
+| JOB_ARTIFACT_DIR | 是 | `artifacts/runs` | 任务日志、prompt、原始响应与解析结果目录 |
 | JOB_POLL_INTERVAL_SECONDS | 否 | `2` | 前端查询任务状态的默认间隔 |
 | JOB_MAX_RETRY | 否 | `1` | AI 生成任务失败后的最大重试次数 |
 | JOB_CANCEL_CHECK_INTERVAL_SECONDS | 否 | `1` | worker 检查取消标志的间隔 |

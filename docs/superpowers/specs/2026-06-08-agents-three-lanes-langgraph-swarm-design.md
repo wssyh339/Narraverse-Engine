@@ -320,7 +320,7 @@ langgraph-swarm
 - 如果使用官方 `langchain.agents.create_agent` 示例，需要补 `langchain`。
 - 如果直接用 LangGraph/自定义 agent runnable 适配 Swarm，先不引入完整 `langchain`。
 
-推荐第一阶段只新增 `langgraph-swarm`，保守接入；若实际 API 需要，再补 `langchain` 并更新 `Codex.md`。
+推荐第一阶段只新增 `langgraph-swarm`，保守接入；若实际 API 需要，再补 `langchain` 并更新 `AGENTS.md`。
 
 ## 10. 测试策略
 

@@ -98,12 +98,27 @@ class CreationStarAgentService:
             raise _bad_request("不支持的创作 Star 步骤", {"step": request.step})
         payload["draw_id"] = draw_id
         payload["prompt_snapshot"] = prompt_snapshot
+        if request.step == "worldview":
+            agent_name = studio._creation_worldview_agent_name()
+            role = "世界观抽卡 Agent"
+            system_prompt = studio._creation_worldview_system_prompt()
+            task = "执行创作 Star 世界观抽卡，只输出候选世界观和冲突发动机种子；不要生成核心矛盾系统或小说宪法。"
+        elif request.step == "protagonist":
+            agent_name = studio._creation_protagonist_agent_name()
+            role = "主角人设抽卡 Agent"
+            system_prompt = studio._creation_protagonist_system_prompt()
+            task = "执行创作 Star 主角人设抽卡，只输出候选主角和主角侧 conflict_seed；不要生成核心矛盾系统或小说宪法。"
+        else:
+            agent_name = "creation_star"
+            role = AGENT_SPECS_BY_NAME["creation_star"].role
+            system_prompt = AGENT_SPECS_BY_NAME["creation_star"].prompt
+            task = f"执行创作 Star 的 {request.step} 抽卡/生成步骤，输出可供用户选择或确认的结构化候选。"
         payload, llm_meta = call_agent_json(
             llm_client=llm_client_instance or llm_client,
-            agent_name="creation_star",
-            role=AGENT_SPECS_BY_NAME["creation_star"].role,
-            system_prompt=AGENT_SPECS_BY_NAME["creation_star"].prompt,
-            task=f"执行创作 Star 的 {request.step} 抽卡/生成步骤，输出可供用户选择或确认的结构化候选。",
+            agent_name=agent_name,
+            role=role,
+            system_prompt=system_prompt,
+            task=task,
             context={
                 "project": serialize_project(project),
                 "request": request.model_dump(),
@@ -114,13 +129,17 @@ class CreationStarAgentService:
             fallback=payload,
             model=model,
         )
+        if request.step == "worldview":
+            payload["cards"] = studio._normalize_creation_worldview_cards(payload.get("cards") if isinstance(payload.get("cards"), list) else [])
+        if request.step == "protagonist":
+            payload["cards"] = studio._normalize_creation_protagonist_cards(payload.get("cards") if isinstance(payload.get("cards"), list) else [])
         payload["draw_id"] = payload.get("draw_id") or draw_id
         payload["prompt_snapshot"] = payload.get("prompt_snapshot") or prompt_snapshot
         payload["_llm"] = llm_meta
         studio._record_agent_run(
             db,
             job,
-            "creation_star",
+            agent_name,
             payload,
             {"project": serialize_project(project), "request": request.model_dump(), "prompt_snapshot": prompt_snapshot},
         )

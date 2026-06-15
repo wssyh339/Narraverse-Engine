@@ -19,14 +19,14 @@ from app.agents.shared.prompt_node_contracts import get_prompt_node_contract
 from app.services.studio_service import studio_service
 
 
-def test_long_novel_catalog_covers_all_32_prompt_files() -> None:
+def test_long_novel_catalog_covers_all_prompt_files() -> None:
     entries = list_long_novel_prompt_entries()
 
-    assert len(entries) == 32
+    assert len(entries) == 34
     assert LONG_NOVEL_PROMPT_IDS[0] == "general_control"
-    assert LONG_NOVEL_PROMPT_IDS[-1] == "single_round_generation_combo"
+    assert LONG_NOVEL_PROMPT_IDS[-1] == "creation_protagonist_draw"
     assert entries[0].filename == "00_general_control_prompt.md"
-    assert entries[-1].filename == "31_single_round_generation_combo_prompt.md"
+    assert entries[-1].filename == "33_creation_protagonist_draw_prompt.md"
 
 
 def test_catalog_loads_prompt_text_and_metadata() -> None:
@@ -46,6 +46,40 @@ def test_agent_bindings_route_new_prompt_library_to_existing_agents() -> None:
     assert "scene_outline" in AGENT_PROMPT_BINDINGS["plot_narrator"]
     assert "draft_self_check" in AGENT_PROMPT_BINDINGS["reviewer"]
     assert "narrative_ledger_update" in AGENT_PROMPT_BINDINGS["canon_curator"]
+    assert "core_conflict_system" not in AGENT_PROMPT_BINDINGS["creation_star"]
+    assert "novel_constitution" not in AGENT_PROMPT_BINDINGS["creation_star"]
+
+
+def test_worldview_draw_prompt_is_dedicated_to_conflict_engine_seed() -> None:
+    entry = get_prompt_entry("creation_worldview_draw")
+    text = load_catalog_prompt("creation_worldview_draw")
+
+    assert entry.index == 32
+    assert entry.workflow == "creation_star"
+    assert entry.default_agent == "creation_star"
+    assert "长篇小说世界观抽卡 Agent" in text
+    assert "冲突发动机种子" in text
+    assert "不要生成核心矛盾系统" in text
+    assert "不要生成小说宪法" in text
+    assert "核心矛盾系统如下" not in text
+    assert "生成一份“长篇小说宪法”" not in text
+
+
+def test_protagonist_draw_prompt_is_dedicated_to_character_cards() -> None:
+    entry = get_prompt_entry("creation_protagonist_draw")
+    text = load_catalog_prompt("creation_protagonist_draw")
+
+    assert entry.index == 33
+    assert entry.workflow == "creation_star"
+    assert entry.default_agent == "creation_star"
+    assert "长篇小说主角人设抽卡 Agent" in text
+    assert "world_rule_connection" in text
+    assert "conflict_seed" in text
+    assert "ability_cost" in text
+    assert "不要生成核心矛盾系统" in text
+    assert "不要生成小说宪法" in text
+    assert "核心矛盾系统如下" not in text
+    assert "生成一份“长篇小说宪法”" not in text
 
 
 def test_agent_spec_prompt_bodies_live_in_markdown_files() -> None:

@@ -98,6 +98,8 @@ class CreateCharacterRequest(APIModel):
     related_entity_ids: list[str] = Field(default_factory=list)
     related_character_ids: list[str] = Field(default_factory=list)
     updated_reason: str = "manual"
+    source_chapter_id: str | None = None
+    source_agent: str = "manual"
 
 
 class UpdateCharacterRequest(APIModel):
@@ -119,6 +121,8 @@ class UpdateCharacterRequest(APIModel):
     related_entity_ids: list[str] | None = None
     related_character_ids: list[str] | None = None
     updated_reason: str | None = None
+    source_chapter_id: str | None = None
+    source_agent: str | None = None
 
 
 class CreateEntityRequest(APIModel):
@@ -129,6 +133,8 @@ class CreateEntityRequest(APIModel):
     description: str = ""
     current_status: str = "active"
     source: str = "manual"
+    source_chapter_id: str | None = None
+    source_agent: str = "manual"
 
 
 class UpdateEntityRequest(APIModel):
@@ -139,6 +145,8 @@ class UpdateEntityRequest(APIModel):
     description: str | None = None
     current_status: str | None = None
     source: str | None = None
+    source_chapter_id: str | None = None
+    source_agent: str | None = None
 
 
 class CreateWorldFactRequest(APIModel):
@@ -149,6 +157,8 @@ class CreateWorldFactRequest(APIModel):
     importance_score: int = Field(default=50, ge=0, le=100)
     confidence: float = Field(default=0.8, ge=0, le=1)
     related_entity_ids: list[str] = Field(default_factory=list)
+    source_chapter_id: str | None = None
+    source_agent: str = "manual"
 
 
 class UpdateWorldFactRequest(APIModel):
@@ -159,6 +169,8 @@ class UpdateWorldFactRequest(APIModel):
     importance_score: int | None = Field(default=None, ge=0, le=100)
     confidence: float | None = Field(default=None, ge=0, le=1)
     related_entity_ids: list[str] | None = None
+    source_chapter_id: str | None = None
+    source_agent: str | None = None
 
 
 class GenerateSettingRequest(APIModel):
@@ -167,6 +179,46 @@ class GenerateSettingRequest(APIModel):
     count: int = Field(default=3, ge=1, le=12)
     preview_only: bool = False
     model: str | None = None
+
+
+class CanonRollbackRequest(APIModel):
+    user_note: str = Field(default="", max_length=1000)
+
+
+class CanonProposalDecisionRequest(APIModel):
+    user_note: str = Field(default="", max_length=1000)
+
+
+class CanonBulkArchiveRequest(APIModel):
+    ref_type: str = Field(min_length=1, max_length=80)
+    ref_ids: list[str] = Field(min_length=1)
+    reason: str = Field(default="", max_length=1000)
+
+
+class CanonFolderRequest(APIModel):
+    title: str = Field(min_length=1, max_length=120)
+    parent_id: str | None = Field(default=None, max_length=160)
+    sort_order: int = Field(default=0, ge=0)
+
+
+class CanonNodeMoveRequest(APIModel):
+    parent_id: str | None = Field(default=None, max_length=160)
+    sort_order: int = Field(default=0, ge=0)
+
+
+class CanonLockFieldsRequest(APIModel):
+    locked_fields: list[str] = Field(default_factory=list)
+    reason: str = Field(default="", max_length=1000)
+
+
+class CanonDuplicateScanRequest(APIModel):
+    ref_types: list[str] = Field(default_factory=lambda: ["character", "entity", "world_fact", "foreshadowing"])
+    threshold: float = Field(default=0.72, ge=0, le=1)
+    create_proposals: bool = True
+
+
+class CanonExportRequest(APIModel):
+    format: Literal["json", "markdown"] = "json"
 
 
 CreationStarStep = Literal["worldview", "protagonist", "project_bible", "world_rules", "title"]
@@ -192,6 +244,14 @@ class CreationStarCommitRequest(APIModel):
     project_bible: dict[str, Any] = Field(default_factory=dict)
     world_rules: dict[str, Any] = Field(default_factory=dict)
     user_note: str = Field(default="", max_length=2000)
+    model: str | None = None
+
+
+class CreationBasicSuggestionsRequest(APIModel):
+    basic_info: dict[str, Any] = Field(default_factory=dict)
+    manual_input: str = Field(default="", max_length=6000)
+    previous_suggestions: list[dict[str, Any]] = Field(default_factory=list)
+    count: int = Field(default=6, ge=2, le=12)
     model: str | None = None
 
 

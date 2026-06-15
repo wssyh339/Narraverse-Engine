@@ -6,8 +6,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Alert, App as AntApp, Button, Card, Descriptions, Empty, Input, Modal, Select, Space, Tag, Typography } from "antd";
 import { RotateCcw, Save } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useParams } from "react-router-dom";
 import { studioApi, type AgentConfig } from "../api/studio";
-import type { LLMModelOption, WorkflowDefinition, WorkflowNode } from "../types/api";
+import type { DeepAgentToolCall, LLMModelOption, WorkflowDefinition, WorkflowNode } from "../types/api";
 
 const controlConfigKey = "novel-agent-workflow-control-configs";
 
@@ -134,16 +135,35 @@ function schemaSummary(schema: WorkflowNode["input_schema"]) {
   return `${schema.title ?? "Schema"}${preview ? `：${preview}${suffix}` : ""}`;
 }
 
+function pendingToolCallsFromSessions(
+  sessions: Array<{ state?: { tool_calls?: DeepAgentToolCall[] }; id: string }>,
+) {
+  return sessions.flatMap((session) =>
+    (session.state?.tool_calls ?? [])
+      .filter((toolCall) => toolCall.status === "pending_approval")
+      .map((toolCall) => ({ ...toolCall, session_id: toolCall.session_id || session.id })),
+  );
+}
+
 export function AgentsPage() {
   const { message } = AntApp.useApp();
+  const { projectId = "" } = useParams();
   const queryClient = useQueryClient();
   const chartRef = useRef<HTMLDivElement | null>(null);
   const agentsQuery = useQuery({ queryKey: ["agents"], queryFn: studioApi.listAgents });
   const workflowsQuery = useQuery({ queryKey: ["workflows"], queryFn: studioApi.listWorkflows });
   const llmModelsQuery = useQuery({ queryKey: ["llm-models"], queryFn: studioApi.listLlmModels });
+  const deepAgentConfigQuery = useQuery({ queryKey: ["deep-agent-config"], queryFn: studioApi.getDeepAgentConfig });
+  const langSmithStatusQuery = useQuery({ queryKey: ["langsmith-status"], queryFn: studioApi.getLangSmithStatus });
+  const deepAgentSessionsQuery = useQuery({
+    queryKey: ["deep-agent-sessions", projectId],
+    queryFn: () => studioApi.listDeepAgentSessions(projectId),
+    enabled: Boolean(projectId),
+  });
   const [workflowId, setWorkflowId] = useState("chapter_closed_loop_lifecycle");
   const [selectedNode, setSelectedNode] = useState<WorkflowNode | null>(null);
   const [prompt, setPrompt] = useState("");
+  const [deepAgentObjective, setDeepAgentObjective] = useState("检查当前项目的大纲、正典和下一步写作风险。");
   const [selectedProvider, setSelectedProvider] = useState<string | undefined>();
   const [selectedModel, setSelectedModel] = useState<string | undefined>();
   const [controlDescription, setControlDescription] = useState("");
@@ -176,6 +196,10 @@ export function AgentsPage() {
       .filter((model) => !selectedProvider || model.provider === selectedProvider)
       .map((model) => ({ value: model.id, label: selectOptionLabel(modelLabel(model)), title: modelLabel(model) }));
   }, [allModels, selectedProvider]);
+  const pendingToolCalls = useMemo(
+    () => pendingToolCallsFromSessions(deepAgentSessionsQuery.data?.sessions ?? []),
+    [deepAgentSessionsQuery.data?.sessions],
+  );
 
   useEffect(() => {
     if (selectedModel && !selectedProvider) {
@@ -269,6 +293,58 @@ export function AgentsPage() {
       queryClient.invalidateQueries({ queryKey: ["workflows"] });
     },
     onError: (error) => message.error(error instanceof Error ? error.message : "恢复模型失败"),
+  });
+
+  const createDeepAgentSession = useMutation({
+    mutationFn: () => {
+      if (!projectId) {
+        throw new Error("缺少当前项目");
+      }
+      return studioApi.createDeepAgentSession(projectId, { objective: deepAgentObjective });
+    },
+    onSuccess: (data) => {
+      message.success(`Deep Agent 会话已创建：${data.session.mode}`);
+      queryClient.invalidateQueries({ queryKey: ["deep-agent-sessions", projectId] });
+    },
+    onError: (error) => message.error(error instanceof Error ? error.message : "创建 Deep Agent 会话失败"),
+  });
+
+  const approveDeepAgentToolCall = useMutation({
+    mutationFn: (toolCallId: string) => {
+      if (!projectId) {
+        throw new Error("缺少当前项目");
+      }
+      return studioApi.approveDeepAgentToolCall(projectId, toolCallId);
+    },
+    onSuccess: () => {
+      message.success("工具调用已审批");
+      queryClient.invalidateQueries({ queryKey: ["deep-agent-sessions", projectId] });
+    },
+    onError: (error) => message.error(error instanceof Error ? error.message : "审批工具调用失败"),
+  });
+
+  const rejectDeepAgentToolCall = useMutation({
+    mutationFn: (toolCallId: string) => {
+      if (!projectId) {
+        throw new Error("缺少当前项目");
+      }
+      return studioApi.rejectDeepAgentToolCall(projectId, toolCallId);
+    },
+    onSuccess: () => {
+      message.success("工具调用已拒绝");
+      queryClient.invalidateQueries({ queryKey: ["deep-agent-sessions", projectId] });
+    },
+    onError: (error) => message.error(error instanceof Error ? error.message : "拒绝工具调用失败"),
+  });
+
+  const runLangSmithEval = useMutation({
+    mutationFn: () => studioApi.runLangSmithEval({ project_id: projectId || undefined }),
+    onSuccess: (data) => {
+      const reportStatus = (data.eval_report.checks as Record<string, { status?: string }> | undefined)?.privacy_policy?.status ?? "completed";
+      message.success(`LangSmith 本地评测完成：${reportStatus}`);
+      queryClient.invalidateQueries({ queryKey: ["langsmith-status"] });
+    },
+    onError: (error) => message.error(error instanceof Error ? error.message : "运行 LangSmith 评测失败"),
   });
 
   useEffect(() => {
@@ -384,6 +460,97 @@ export function AgentsPage() {
           ))}
         </div>
       ) : null}
+
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 16 }}>
+        <Card title="Deep Agent 管理" loading={deepAgentConfigQuery.isLoading || deepAgentSessionsQuery.isLoading}>
+          <Space direction="vertical" size={12} className="full-width">
+            <Space wrap>
+              <Tag color={deepAgentConfigQuery.data?.config.deep_agent.enabled ? "green" : "default"}>
+                {deepAgentConfigQuery.data?.config.deep_agent.enabled ? "deepagents 已启用" : "本地 advisory"}
+              </Tag>
+              <Tag color={deepAgentConfigQuery.data?.config.deep_agent.allow_write ? "orange" : "blue"}>
+                {deepAgentConfigQuery.data?.config.deep_agent.tool_policy ?? "approval_required"}
+              </Tag>
+              <Tag>模式：{deepAgentConfigQuery.data?.config.deep_agent.mode ?? "advisor"}</Tag>
+            </Space>
+            <Typography.Text type="secondary">
+              Deep Agent 只作为工作室总管层，默认创建建议和待审批工具调用，不直接覆盖正文或设定。
+            </Typography.Text>
+            <Input.TextArea
+              value={deepAgentObjective}
+              onChange={(event) => setDeepAgentObjective(event.target.value)}
+              rows={3}
+              placeholder="输入 Deep Agent 会话目标"
+            />
+            <Space wrap>
+              <Button loading={createDeepAgentSession.isPending} onClick={() => createDeepAgentSession.mutate()}>
+                创建 Deep Agent 会话
+              </Button>
+              <Tag>会话：{deepAgentSessionsQuery.data?.sessions.length ?? 0}</Tag>
+              <Tag color={pendingToolCalls.length ? "gold" : "default"}>待审批工具：{pendingToolCalls.length}</Tag>
+            </Space>
+            {pendingToolCalls.length ? (
+              <Space direction="vertical" size={8} className="full-width">
+                {pendingToolCalls.map((toolCall) => (
+                  <div key={toolCall.id} className="runtime-row">
+                    <Space wrap>
+                      <Tag color="gold">{toolCall.tool_name}</Tag>
+                      <Tag>{toolCall.risk_level}</Tag>
+                      <Typography.Text type="secondary">{toolCall.status}</Typography.Text>
+                    </Space>
+                    <Space>
+                      <Button size="small" loading={approveDeepAgentToolCall.isPending} onClick={() => approveDeepAgentToolCall.mutate(toolCall.id)}>
+                        审批
+                      </Button>
+                      <Button size="small" danger loading={rejectDeepAgentToolCall.isPending} onClick={() => rejectDeepAgentToolCall.mutate(toolCall.id)}>
+                        拒绝
+                      </Button>
+                    </Space>
+                  </div>
+                ))}
+              </Space>
+            ) : (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无待审批工具" />
+            )}
+          </Space>
+        </Card>
+
+        <Card title="LangSmith 管理" loading={langSmithStatusQuery.isLoading || deepAgentConfigQuery.isLoading}>
+          <Space direction="vertical" size={12} className="full-width">
+            <Space wrap>
+              <Tag color={langSmithStatusQuery.data?.status.configured ? "green" : "default"}>
+                {langSmithStatusQuery.data?.status.configured ? "已配置" : "未配置"}
+              </Tag>
+              <Tag color={langSmithStatusQuery.data?.status.tracing ? "green" : "default"}>
+                {langSmithStatusQuery.data?.status.tracing ? "Tracing 开启" : "Tracing 关闭"}
+              </Tag>
+              <Tag color="blue">隐私模式：{langSmithStatusQuery.data?.status.privacy_mode ?? "metadata_only"}</Tag>
+              <Tag>Prompt：{langSmithStatusQuery.data?.status.prompt_sync ?? "manual"}</Tag>
+            </Space>
+            <Typography.Text type="secondary">
+              LangSmith 只由后端读取 Key。metadata_only 模式不会上传正文、完整提示词或用户私密设定。
+            </Typography.Text>
+            <Descriptions size="small" column={1}>
+              <Descriptions.Item label="Project">{langSmithStatusQuery.data?.status.project ?? "novel-agent-local"}</Descriptions.Item>
+              <Descriptions.Item label="SDK">
+                {langSmithStatusQuery.data?.status.package.installed ? langSmithStatusQuery.data.status.package.version || "installed" : "未安装"}
+              </Descriptions.Item>
+            </Descriptions>
+            <Space wrap>
+              <Button loading={runLangSmithEval.isPending} onClick={() => runLangSmithEval.mutate()}>
+                运行本地 Eval
+              </Button>
+              <Button
+                onClick={() =>
+                  queryClient.invalidateQueries({ queryKey: ["langsmith-status"] })
+                }
+              >
+                刷新状态
+              </Button>
+            </Space>
+          </Space>
+        </Card>
+      </div>
 
       <Modal
         title={selectedNode ? selectedNode.label : "节点详情"}

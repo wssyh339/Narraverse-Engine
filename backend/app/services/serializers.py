@@ -79,6 +79,9 @@ def serialize_job(job: models.GenerationJob) -> dict[str, Any]:
         "progress": loads(job.progress_json, {}),
         "current_agent": job.current_agent,
         "result": loads(job.result_json, None) if job.result_json else None,
+        "langsmith_run_id": getattr(job, "langsmith_run_id", ""),
+        "langsmith_url": getattr(job, "langsmith_url", ""),
+        "trace_mode": getattr(job, "trace_mode", "local"),
         "error": {"message": job.error_message} if job.error_message else None,
         "created_at": isoformat(job.created_at),
         "started_at": isoformat(job.started_at),
@@ -263,6 +266,65 @@ def serialize_graph_edge(edge: models.GraphEdge) -> dict[str, Any]:
     }
 
 
+def serialize_canon_node(node: models.CanonNode, content: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = {
+        "id": node.id,
+        "project_id": node.project_id,
+        "parent_id": node.parent_id,
+        "node_type": node.node_type,
+        "ref_type": node.ref_type,
+        "ref_id": node.ref_id,
+        "title": node.title,
+        "sort_order": node.sort_order,
+        "status": node.status,
+        "importance_level": node.importance_level,
+        "activity_status": node.activity_status,
+        "metadata": loads(node.metadata_json, {}),
+        "created_at": isoformat(node.created_at),
+        "updated_at": isoformat(node.updated_at),
+    }
+    if content is not None:
+        payload["content"] = content
+    return payload
+
+
+def serialize_canon_version(version: models.CanonVersion) -> dict[str, Any]:
+    return {
+        "id": version.id,
+        "project_id": version.project_id,
+        "ref_type": version.ref_type,
+        "ref_id": version.ref_id,
+        "version_no": version.version_no,
+        "content": loads(version.content_json, {}),
+        "source_chapter_id": version.source_chapter_id,
+        "source_job_id": version.source_job_id,
+        "source_agent": version.source_agent,
+        "change_reason": version.change_reason,
+        "confidence": version.confidence,
+        "created_at": isoformat(version.created_at),
+    }
+
+
+def serialize_canon_proposal(proposal: models.CanonChangeProposal) -> dict[str, Any]:
+    return {
+        "id": proposal.id,
+        "project_id": proposal.project_id,
+        "target_type": proposal.target_type,
+        "target_id": proposal.target_id,
+        "operation": proposal.operation,
+        "before": loads(proposal.before_json, {}),
+        "after": loads(proposal.after_json, {}),
+        "source_chapter_id": proposal.source_chapter_id,
+        "source_job_id": proposal.source_job_id,
+        "source_agent": proposal.source_agent,
+        "approval_status": proposal.approval_status,
+        "confidence": proposal.confidence,
+        "reason": proposal.reason,
+        "created_at": isoformat(proposal.created_at),
+        "decided_at": isoformat(proposal.decided_at),
+    }
+
+
 def serialize_agent_run(run: models.AgentRun) -> dict[str, Any]:
     return {
         "id": run.id,
@@ -275,9 +337,64 @@ def serialize_agent_run(run: models.AgentRun) -> dict[str, Any]:
         "input_payload": loads(run.input_payload_json, {}),
         "output_payload": loads(run.output_payload_json, {}),
         "error_message": run.error_message,
+        "langsmith_run_id": getattr(run, "langsmith_run_id", ""),
+        "langsmith_url": getattr(run, "langsmith_url", ""),
+        "trace_mode": getattr(run, "trace_mode", "local"),
         "started_at": isoformat(run.started_at),
         "finished_at": isoformat(run.finished_at),
         "created_at": isoformat(run.created_at),
+    }
+
+
+def serialize_deep_agent_tool_call(tool_call: models.DeepAgentToolCall) -> dict[str, Any]:
+    return {
+        "id": tool_call.id,
+        "session_id": tool_call.session_id,
+        "project_id": tool_call.project_id,
+        "tool_name": tool_call.tool_name,
+        "status": tool_call.status,
+        "risk_level": tool_call.risk_level,
+        "requires_approval": bool(tool_call.requires_approval),
+        "arguments": loads(tool_call.arguments_json, {}),
+        "result": loads(tool_call.result_json, {}),
+        "created_at": isoformat(tool_call.created_at),
+        "approved_at": isoformat(tool_call.approved_at),
+        "rejected_at": isoformat(tool_call.rejected_at),
+        "executed_at": isoformat(tool_call.executed_at),
+    }
+
+
+def serialize_deep_agent_session(session: models.DeepAgentSession, tool_calls: list[models.DeepAgentToolCall] | None = None) -> dict[str, Any]:
+    state = loads(session.state_json, {})
+    if tool_calls is not None:
+        state = {**state, "tool_calls": [serialize_deep_agent_tool_call(tool_call) for tool_call in tool_calls]}
+    return {
+        "id": session.id,
+        "project_id": session.project_id,
+        "mode": session.mode,
+        "status": session.status,
+        "objective": session.objective,
+        "privacy_mode": session.privacy_mode,
+        "summary": session.summary,
+        "state": state,
+        "created_at": isoformat(session.created_at),
+        "updated_at": isoformat(session.updated_at),
+    }
+
+
+def serialize_langsmith_trace_link(link: models.LangSmithTraceLink) -> dict[str, Any]:
+    return {
+        "id": link.id,
+        "project_id": link.project_id,
+        "job_id": link.job_id,
+        "agent_run_id": link.agent_run_id,
+        "session_id": link.session_id,
+        "trace_mode": link.trace_mode,
+        "langsmith_run_id": link.langsmith_run_id,
+        "langsmith_url": link.langsmith_url,
+        "payload_policy": link.payload_policy,
+        "metadata": loads(link.metadata_json, {}),
+        "created_at": isoformat(link.created_at),
     }
 
 

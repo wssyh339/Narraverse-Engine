@@ -50,6 +50,14 @@ SQLITE_COLUMN_DEFAULTS: dict[str, dict[str, str]] = {
     },
     "generation_jobs": {
         "current_agent": "TEXT NOT NULL DEFAULT ''",
+        "langsmith_run_id": "TEXT NOT NULL DEFAULT ''",
+        "langsmith_url": "TEXT NOT NULL DEFAULT ''",
+        "trace_mode": "TEXT NOT NULL DEFAULT 'local'",
+    },
+    "agent_runs": {
+        "langsmith_run_id": "TEXT NOT NULL DEFAULT ''",
+        "langsmith_url": "TEXT NOT NULL DEFAULT ''",
+        "trace_mode": "TEXT NOT NULL DEFAULT 'local'",
     },
     "foreshadowing_items": {
         "planted_chapter_id": "TEXT",
@@ -74,6 +82,142 @@ SQLITE_TABLE_DEFAULTS: dict[str, str] = {
             created_at DATETIME NOT NULL,
             updated_at DATETIME NOT NULL,
             CONSTRAINT uq_agent_model_workflow_agent UNIQUE (workflow_id, agent_name)
+        )
+    """,
+    "runtime_settings": """
+        CREATE TABLE runtime_settings (
+            key TEXT PRIMARY KEY,
+            value_json TEXT NOT NULL DEFAULT 'null',
+            updated_at DATETIME NOT NULL
+        )
+    """,
+    "deep_agent_sessions": """
+        CREATE TABLE deep_agent_sessions (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'advisor',
+            status TEXT NOT NULL DEFAULT 'active',
+            objective TEXT NOT NULL DEFAULT '',
+            privacy_mode TEXT NOT NULL DEFAULT 'metadata_only',
+            summary TEXT NOT NULL DEFAULT '',
+            state_json TEXT NOT NULL DEFAULT '{}',
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+    """,
+    "deep_agent_tool_calls": """
+        CREATE TABLE deep_agent_tool_calls (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            tool_name TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending_approval',
+            risk_level TEXT NOT NULL DEFAULT 'medium',
+            requires_approval INTEGER NOT NULL DEFAULT 1,
+            arguments_json TEXT NOT NULL DEFAULT '{}',
+            result_json TEXT NOT NULL DEFAULT '{}',
+            created_at DATETIME NOT NULL,
+            approved_at DATETIME,
+            rejected_at DATETIME,
+            executed_at DATETIME,
+            FOREIGN KEY(session_id) REFERENCES deep_agent_sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+    """,
+    "langsmith_trace_links": """
+        CREATE TABLE langsmith_trace_links (
+            id TEXT PRIMARY KEY,
+            project_id TEXT,
+            job_id TEXT,
+            agent_run_id TEXT,
+            session_id TEXT,
+            trace_mode TEXT NOT NULL DEFAULT 'metadata_only',
+            langsmith_run_id TEXT NOT NULL DEFAULT '',
+            langsmith_url TEXT NOT NULL DEFAULT '',
+            payload_policy TEXT NOT NULL DEFAULT 'metadata_only',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at DATETIME NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(job_id) REFERENCES generation_jobs(id) ON DELETE CASCADE,
+            FOREIGN KEY(agent_run_id) REFERENCES agent_runs(id) ON DELETE CASCADE,
+            FOREIGN KEY(session_id) REFERENCES deep_agent_sessions(id) ON DELETE SET NULL
+        )
+    """,
+    "canon_nodes": """
+        CREATE TABLE canon_nodes (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            parent_id TEXT,
+            node_type TEXT NOT NULL DEFAULT 'item',
+            ref_type TEXT NOT NULL DEFAULT 'folder',
+            ref_id TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'active',
+            importance_level TEXT NOT NULL DEFAULT 'medium',
+            activity_status TEXT NOT NULL DEFAULT 'active',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            CONSTRAINT uq_canon_node_ref UNIQUE (project_id, ref_type, ref_id),
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(parent_id) REFERENCES canon_nodes(id) ON DELETE SET NULL
+        )
+    """,
+    "canon_versions": """
+        CREATE TABLE canon_versions (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            ref_type TEXT NOT NULL,
+            ref_id TEXT NOT NULL,
+            version_no INTEGER NOT NULL,
+            content_json TEXT NOT NULL DEFAULT '{}',
+            source_chapter_id TEXT,
+            source_job_id TEXT,
+            source_agent TEXT NOT NULL DEFAULT 'manual',
+            change_reason TEXT NOT NULL DEFAULT '',
+            confidence REAL NOT NULL DEFAULT 1.0,
+            created_at DATETIME NOT NULL,
+            CONSTRAINT uq_canon_version_ref_no UNIQUE (project_id, ref_type, ref_id, version_no),
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(source_chapter_id) REFERENCES chapters(id) ON DELETE SET NULL,
+            FOREIGN KEY(source_job_id) REFERENCES generation_jobs(id) ON DELETE SET NULL
+        )
+    """,
+    "canon_change_proposals": """
+        CREATE TABLE canon_change_proposals (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            target_type TEXT NOT NULL,
+            target_id TEXT,
+            operation TEXT NOT NULL DEFAULT 'create',
+            before_json TEXT NOT NULL DEFAULT '{}',
+            after_json TEXT NOT NULL DEFAULT '{}',
+            source_chapter_id TEXT,
+            source_job_id TEXT,
+            source_agent TEXT NOT NULL DEFAULT 'agent',
+            approval_status TEXT NOT NULL DEFAULT 'pending',
+            confidence REAL NOT NULL DEFAULT 0.8,
+            reason TEXT NOT NULL DEFAULT '',
+            created_at DATETIME NOT NULL,
+            decided_at DATETIME,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(source_chapter_id) REFERENCES chapters(id) ON DELETE SET NULL,
+            FOREIGN KEY(source_job_id) REFERENCES generation_jobs(id) ON DELETE SET NULL
+        )
+    """,
+    "canon_classifications": """
+        CREATE TABLE canon_classifications (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            ref_type TEXT NOT NULL,
+            ref_id TEXT NOT NULL,
+            dimension TEXT NOT NULL,
+            value TEXT NOT NULL,
+            created_at DATETIME NOT NULL,
+            CONSTRAINT uq_canon_classification UNIQUE (project_id, ref_type, ref_id, dimension, value),
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
         )
     """,
 }

@@ -30,8 +30,12 @@ from app.api.v1.endpoints.studio import (
 )
 from app.core.responses import success_response
 from app.db.session import get_db
-from app.schemas.studio import AgentModelConfigRequest
+from app.schemas.studio import AgentModelConfigRequest, CreationBasicSuggestionsRequest
 from app.services.studio_service import studio_service
+
+
+def creation_basic_suggestions(project_id: str, request: CreationBasicSuggestionsRequest, db: Session = Depends(get_db)):
+    return success_response(studio_service.creation_basic_suggestions(db, project_id, request))
 
 
 def list_llm_models():

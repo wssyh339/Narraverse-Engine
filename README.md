@@ -149,6 +149,19 @@ PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 
 ### 方式 B：本地开发
 
+本地开发默认读取项目根目录 `.env`。端口、API 地址、数据库路径和任务产物目录都集中在 `.env` 中维护：
+
+```env
+BACKEND_HOST=0.0.0.0
+BACKEND_PORT=8000
+FRONTEND_HOST=0.0.0.0
+FRONTEND_PORT=5173
+FRONTEND_ORIGIN=http://localhost:5173
+VITE_API_BASE_URL=http://localhost:8000/api
+DATABASE_URL=sqlite:///./data/novel_agent.db
+JOB_ARTIFACT_DIR=artifacts/runs
+```
+
 后端：
 
 ```bash
@@ -157,10 +170,7 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r backend/requirements.txt
 
-DATABASE_URL=sqlite:///./backend/data/novel_agent.db \
-JOB_ARTIFACT_DIR=backend/artifacts/runs \
-FRONTEND_ORIGIN=http://localhost:5173 \
-python -m uvicorn --app-dir backend app.main:app --reload --host 0.0.0.0 --port 8000
+./scripts/dev-backend.sh
 ```
 
 前端：
@@ -171,17 +181,20 @@ corepack enable
 corepack prepare pnpm@11.5.1 --activate
 pnpm install
 
-VITE_API_BASE_URL=http://localhost:8000/api pnpm dev
+./scripts/dev-frontend.sh
 ```
 
 如果你在 Codex 桌面工作区中运行，也可以使用项目内置的 pnpm：
 
 ```bash
-cd frontend
 export PATH="/Users/mac/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:$PATH"
+cd frontend
 node ../.codex-tools/pnpm-11.5.1/bin/pnpm.cjs install
-VITE_API_BASE_URL=http://localhost:8000/api node ../.codex-tools/pnpm-11.5.1/bin/pnpm.cjs dev
+cd ..
+./scripts/dev-frontend.sh
 ```
+
+如果端口被占用，只需要调整 `.env` 中的 `BACKEND_PORT`、`FRONTEND_PORT`、`FRONTEND_ORIGIN` 和 `VITE_API_BASE_URL`。前端的 `VITE_*` 变量属于构建期配置；Docker 模式下修改后需要重新 `docker compose up --build`。
 
 ## LLM 配置
 

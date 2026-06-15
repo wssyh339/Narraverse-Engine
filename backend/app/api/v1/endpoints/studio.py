@@ -24,6 +24,14 @@ from app.schemas.studio import (
     AgentPromptUpdateRequest,
     BatchGenerateRequest,
     BranchVersionRequest,
+    CanonBulkArchiveRequest,
+    CanonDuplicateScanRequest,
+    CanonExportRequest,
+    CanonFolderRequest,
+    CanonLockFieldsRequest,
+    CanonNodeMoveRequest,
+    CanonProposalDecisionRequest,
+    CanonRollbackRequest,
     ChapterChatRequest,
     CreationSessionCardRequest,
     CreationSessionCommitRequest,
@@ -390,6 +398,62 @@ def delete_world_fact(project_id: str, fact_id: str, db: Session = Depends(get_d
 
 def generate_settings(project_id: str, request: GenerateSettingRequest, db: Session = Depends(get_db)):
     return success_response(studio_service.generate_settings(db, project_id, request))
+
+
+def list_canon_tree(project_id: str, db: Session = Depends(get_db)):
+    return success_response(studio_service.list_canon_tree(db, project_id))
+
+
+def get_canon_health(project_id: str, db: Session = Depends(get_db)):
+    return success_response(studio_service.get_canon_health(db, project_id))
+
+
+def create_canon_folder(project_id: str, request: CanonFolderRequest, db: Session = Depends(get_db)):
+    return success_response(studio_service.create_canon_folder(db, project_id, request))
+
+
+def move_canon_node(project_id: str, node_id: str, request: CanonNodeMoveRequest, db: Session = Depends(get_db)):
+    return success_response(studio_service.move_canon_node(db, project_id, node_id, request))
+
+
+def set_canon_locks(project_id: str, ref_type: str, ref_id: str, request: CanonLockFieldsRequest, db: Session = Depends(get_db)):
+    return success_response(studio_service.set_canon_locks(db, project_id, ref_type, ref_id, request))
+
+
+def get_canon_impact(project_id: str, ref_type: str, ref_id: str, db: Session = Depends(get_db)):
+    return success_response(studio_service.get_canon_impact(db, project_id, ref_type, ref_id))
+
+
+def scan_canon_duplicates(project_id: str, request: CanonDuplicateScanRequest, db: Session = Depends(get_db)):
+    return success_response(studio_service.scan_canon_duplicates(db, project_id, request))
+
+
+def export_canon_package(project_id: str, format: str = "json", db: Session = Depends(get_db)):
+    return success_response(studio_service.export_canon_package(db, project_id, CanonExportRequest(format=format)))
+
+
+def list_canon_versions(project_id: str, ref_type: str, ref_id: str, db: Session = Depends(get_db)):
+    return success_response(studio_service.list_canon_versions(db, project_id, ref_type, ref_id))
+
+
+def rollback_canon_version(project_id: str, ref_type: str, ref_id: str, version_id: str, request: CanonRollbackRequest, db: Session = Depends(get_db)):
+    return success_response(studio_service.rollback_canon_version(db, project_id, ref_type, ref_id, version_id, request))
+
+
+def list_canon_proposals(project_id: str, status: str | None = None, db: Session = Depends(get_db)):
+    return success_response(studio_service.list_canon_proposals(db, project_id, status=status))
+
+
+def approve_canon_proposal(project_id: str, proposal_id: str, request: CanonProposalDecisionRequest | None = None, db: Session = Depends(get_db)):
+    return success_response(studio_service.approve_canon_proposal(db, project_id, proposal_id, request))
+
+
+def reject_canon_proposal(project_id: str, proposal_id: str, request: CanonProposalDecisionRequest | None = None, db: Session = Depends(get_db)):
+    return success_response(studio_service.reject_canon_proposal(db, project_id, proposal_id, request))
+
+
+def archive_canon_items(project_id: str, request: CanonBulkArchiveRequest, db: Session = Depends(get_db)):
+    return success_response(studio_service.archive_canon_items(db, project_id, request))
 
 
 def get_graph(project_id: str, db: Session = Depends(get_db)):

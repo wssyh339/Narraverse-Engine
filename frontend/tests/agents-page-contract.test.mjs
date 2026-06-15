@@ -78,3 +78,30 @@ test("agents page defaults to lifecycle workflows and keeps prompt library visib
   assert.match(page, /工作流视图/);
   assert.match(page, /提示词库视图/);
 });
+
+test("agents page exposes Deep Agent and LangSmith management controls", () => {
+  const page = read("src/pages/AgentsPage.tsx");
+  const studio = read("src/api/studio.ts");
+  const types = read("src/types/api.ts");
+
+  assert.match(types, /DeepAgentConfig/);
+  assert.match(types, /DeepAgentSession/);
+  assert.match(types, /DeepAgentToolCall/);
+  assert.match(types, /LangSmithStatus/);
+  assert.match(studio, /getDeepAgentConfig/);
+  assert.match(studio, /updateDeepAgentConfig/);
+  assert.match(studio, /createDeepAgentSession/);
+  assert.match(studio, /listDeepAgentSessions/);
+  assert.match(studio, /approveDeepAgentToolCall/);
+  assert.match(studio, /rejectDeepAgentToolCall/);
+  assert.match(studio, /getLangSmithStatus/);
+  assert.match(studio, /runLangSmithEval/);
+  assert.match(studio, /\/deep-agent\/config/);
+  assert.match(studio, /\/langsmith\/status/);
+  assert.match(page, /Deep Agent 管理/);
+  assert.match(page, /LangSmith 管理/);
+  assert.match(page, /隐私模式/);
+  assert.match(page, /待审批工具/);
+  assert.match(page, /createDeepAgentSession/);
+  assert.match(page, /runLangSmithEval/);
+});

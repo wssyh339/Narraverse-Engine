@@ -216,6 +216,9 @@ class GenerationJob(Base):
     current_agent: Mapped[str] = mapped_column(Text, nullable=False, default="")
     result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     content_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    langsmith_run_id: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    langsmith_url: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    trace_mode: Mapped[str] = mapped_column(Text, nullable=False, default="local")
     cancel_requested: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cancel_reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -367,6 +370,9 @@ class AgentRun(Base):
     input_payload_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     output_payload_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     error_message: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    langsmith_run_id: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    langsmith_url: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    trace_mode: Mapped[str] = mapped_column(Text, nullable=False, default="local")
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
@@ -469,6 +475,77 @@ class GraphEdge(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)
 
 
+class CanonNode(Base):
+    __tablename__ = "canon_nodes"
+    __table_args__ = (UniqueConstraint("project_id", "ref_type", "ref_id", name="uq_canon_nodes_project_ref"),)
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    project_id: Mapped[str] = mapped_column(Text, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    parent_id: Mapped[str | None] = mapped_column(Text, ForeignKey("canon_nodes.id", ondelete="SET NULL"), nullable=True)
+    node_type: Mapped[str] = mapped_column(Text, nullable=False, default="item")
+    ref_type: Mapped[str] = mapped_column(Text, nullable=False, default="folder")
+    ref_id: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="active")
+    importance_level: Mapped[str] = mapped_column(Text, nullable=False, default="medium")
+    activity_status: Mapped[str] = mapped_column(Text, nullable=False, default="active")
+    metadata_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)
+
+
+class CanonVersion(Base):
+    __tablename__ = "canon_versions"
+    __table_args__ = (UniqueConstraint("project_id", "ref_type", "ref_id", "version_no", name="uq_canon_versions_project_ref_version"),)
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    project_id: Mapped[str] = mapped_column(Text, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    ref_type: Mapped[str] = mapped_column(Text, nullable=False)
+    ref_id: Mapped[str] = mapped_column(Text, nullable=False)
+    version_no: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    content_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    source_chapter_id: Mapped[str | None] = mapped_column(Text, ForeignKey("chapters.id", ondelete="SET NULL"), nullable=True)
+    source_job_id: Mapped[str | None] = mapped_column(Text, ForeignKey("generation_jobs.id", ondelete="SET NULL"), nullable=True)
+    source_agent: Mapped[str] = mapped_column(Text, nullable=False, default="manual")
+    change_reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
+class CanonChangeProposal(Base):
+    __tablename__ = "canon_change_proposals"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    project_id: Mapped[str] = mapped_column(Text, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    target_type: Mapped[str] = mapped_column(Text, nullable=False)
+    target_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    operation: Mapped[str] = mapped_column(Text, nullable=False, default="create")
+    before_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    after_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    source_chapter_id: Mapped[str | None] = mapped_column(Text, ForeignKey("chapters.id", ondelete="SET NULL"), nullable=True)
+    source_job_id: Mapped[str | None] = mapped_column(Text, ForeignKey("generation_jobs.id", ondelete="SET NULL"), nullable=True)
+    source_agent: Mapped[str] = mapped_column(Text, nullable=False, default="agent")
+    approval_status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.8)
+    reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CanonClassification(Base):
+    __tablename__ = "canon_classifications"
+    __table_args__ = (UniqueConstraint("project_id", "ref_type", "ref_id", "dimension", "value", name="uq_canon_classification"),)
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    project_id: Mapped[str] = mapped_column(Text, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    ref_type: Mapped[str] = mapped_column(Text, nullable=False)
+    ref_id: Mapped[str] = mapped_column(Text, nullable=False)
+    dimension: Mapped[str] = mapped_column(Text, nullable=False)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
 class ContinuityIssue(Base):
     __tablename__ = "continuity_issues"
 
@@ -546,6 +623,63 @@ class AgentModelConfig(Base):
     metadata_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)
+
+
+class RuntimeSetting(Base):
+    __tablename__ = "runtime_settings"
+
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    value_json: Mapped[str] = mapped_column(Text, nullable=False, default="null")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)
+
+
+class DeepAgentSession(Base):
+    __tablename__ = "deep_agent_sessions"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    project_id: Mapped[str] = mapped_column(Text, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    mode: Mapped[str] = mapped_column(Text, nullable=False, default="advisor")
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="active")
+    objective: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    privacy_mode: Mapped[str] = mapped_column(Text, nullable=False, default="metadata_only")
+    summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    state_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)
+
+
+class DeepAgentToolCall(Base):
+    __tablename__ = "deep_agent_tool_calls"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    session_id: Mapped[str] = mapped_column(Text, ForeignKey("deep_agent_sessions.id", ondelete="CASCADE"), nullable=False)
+    project_id: Mapped[str] = mapped_column(Text, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    tool_name: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="pending_approval")
+    risk_level: Mapped[str] = mapped_column(Text, nullable=False, default="medium")
+    requires_approval: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    arguments_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    result_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class LangSmithTraceLink(Base):
+    __tablename__ = "langsmith_trace_links"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    project_id: Mapped[str | None] = mapped_column(Text, ForeignKey("projects.id", ondelete="CASCADE"), nullable=True)
+    job_id: Mapped[str | None] = mapped_column(Text, ForeignKey("generation_jobs.id", ondelete="CASCADE"), nullable=True)
+    agent_run_id: Mapped[str | None] = mapped_column(Text, ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=True)
+    session_id: Mapped[str | None] = mapped_column(Text, ForeignKey("deep_agent_sessions.id", ondelete="SET NULL"), nullable=True)
+    trace_mode: Mapped[str] = mapped_column(Text, nullable=False, default="metadata_only")
+    langsmith_run_id: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    langsmith_url: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    payload_policy: Mapped[str] = mapped_column(Text, nullable=False, default="metadata_only")
+    metadata_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
 
 
 class VersionSnapshot(Base):

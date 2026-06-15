@@ -6,13 +6,13 @@ services:
         PYTHON_BASE_IMAGE: ${DOCKER_PYTHON_IMAGE:-python:3.13-slim}
         PIP_INDEX_URL: ${PIP_INDEX_URL:-}
     ports:
-      - "8000:8000"
+      - "${BACKEND_PORT:-8000}:8000"
     env_file:
       - .env
     environment:
-      DATABASE_URL: sqlite:///./data/novel_agent.db
-      JOB_ARTIFACT_DIR: artifacts/runs
-      FRONTEND_ORIGIN: http://localhost:5173
+      DATABASE_URL: ${DATABASE_URL:-sqlite:///./data/novel_agent.db}
+      JOB_ARTIFACT_DIR: ${JOB_ARTIFACT_DIR:-artifacts/runs}
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:5173}
     volumes:
       - backend_data:/app/data
       - backend_artifacts:/app/artifacts
@@ -23,9 +23,9 @@ services:
       args:
         NODE_BASE_IMAGE: ${DOCKER_NODE_IMAGE:-node:24-alpine}
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
-        VITE_API_BASE_URL: http://localhost:8000/api
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000/api}
     ports:
-      - "5173:5173"
+      - "${FRONTEND_PORT:-5173}:5173"
     depends_on:
       - backend
 

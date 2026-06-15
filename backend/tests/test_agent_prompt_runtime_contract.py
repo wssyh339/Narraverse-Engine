@@ -45,8 +45,12 @@ def test_agent_prompt_can_be_customized_and_restored_to_default() -> None:
     assert restored["prompt"] == original["default_prompt"]
 
 
-def test_llm_model_catalog_and_workflow_agent_model_config_are_exposed() -> None:
+def test_llm_model_catalog_and_workflow_agent_model_config_are_exposed(monkeypatch) -> None:
     reset_database()
+    monkeypatch.setenv("LLM_PROVIDER", "qwen")
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("QWEN_API_KEY", raising=False)
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
     client = TestClient(app)
 
     catalog = assert_success(client.get("/api/llm/models"))
@@ -56,6 +60,13 @@ def test_llm_model_catalog_and_workflow_agent_model_config_are_exposed() -> None
     assert {"openai", "qwen", "deepseek", "openai_compatible"}.issubset(providers)
     assert {"gpt-4.1-mini", "qwen-plus", "deepseek-v4-flash", "deepseek-v4-pro"}.issubset(model_ids)
     assert catalog["default_model"]
+    assert catalog["configured"] is False
+    assert catalog["default_provider_configured"] is False
+    assert catalog["configuration_warning"]
+    assert "LLM 未配置" in catalog["configuration_warning"]
+    qwen_provider = next(item for item in catalog["providers"] if item["id"] == "qwen")
+    assert qwen_provider["configured"] is False
+    assert qwen_provider["active"] is True
 
     saved = assert_success(
         client.put(

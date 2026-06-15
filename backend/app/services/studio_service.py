@@ -18,7 +18,7 @@ from app.agents.llm_io import call_agent_json
 from app.agents.outline_swarm.service import run_outline_swarm
 from app.agents.outline_swarm.swarm import OUTLINE_SWARM_AGENT_NAMES
 from app.agents.prompts import AGENT_PROMPT_BINDINGS, AGENT_SPECS_BY_NAME, DEFAULT_AGENT_SPECS, OUTLINE_AGENT_SEQUENCE
-from app.agents.shared.prompt_catalog import get_prompt_entry, list_prompt_lifecycle_workflows, list_prompt_workflows
+from app.agents.shared.prompt_catalog import get_prompt_entry, list_prompt_lifecycle_workflows, list_prompt_workflows, load_catalog_prompt
 from app.core.config import LLMProviderResolver, get_settings
 from app.core.ids import generate_id
 from app.core.json import dumps, loads
@@ -37,7 +37,16 @@ from app.schemas.studio import (
     AgentPromptUpdateRequest,
     BatchGenerateRequest,
     BranchVersionRequest,
+    CanonBulkArchiveRequest,
+    CanonDuplicateScanRequest,
+    CanonExportRequest,
+    CanonFolderRequest,
+    CanonLockFieldsRequest,
+    CanonNodeMoveRequest,
+    CanonProposalDecisionRequest,
+    CanonRollbackRequest,
     ChapterChatRequest,
+    CreationBasicSuggestionsRequest,
     CreationSessionCardRequest,
     CreationSessionCommitRequest,
     CreationSessionCreateRequest,
@@ -77,6 +86,9 @@ from app.services.llm_catalog import catalog_payload
 from app.services.serializers import (
     isoformat,
     serialize_agent_run,
+    serialize_canon_node,
+    serialize_canon_proposal,
+    serialize_canon_version,
     serialize_chapter,
     serialize_character,
     serialize_creation_session,
@@ -115,8 +127,8 @@ def _not_found(message: str) -> HTTPException:
     return HTTPException(status_code=404, detail={"code": "NOT_FOUND", "message": message})
 
 
-def _conflict(message: str) -> HTTPException:
-    return HTTPException(status_code=409, detail={"code": "CONFLICT", "message": message})
+def _conflict(message: str, details: dict[str, Any] | None = None) -> HTTPException:
+    return HTTPException(status_code=409, detail={"code": "CONFLICT", "message": message, "details": details or {}})
 
 
 def _bad_request(message: str, details: dict[str, Any] | None = None) -> HTTPException:
@@ -285,6 +297,62 @@ class StudioService:
     def creation_star_commit(self, db: Session, project_id: str, request: CreationStarCommitRequest) -> dict:
         return creation_star_agent_service.commit(self, db, project_id, request)
 
+    def creation_basic_suggestions(self, db: Session, project_id: str, request: CreationBasicSuggestionsRequest) -> dict:
+        project = self._project(db, project_id)
+        basic = self._normalized_creation_basic(project, request.basic_info)
+        for visible_text_field in ("target_reader", "initial_idea"):
+            if not str(request.basic_info.get(visible_text_field) or "").strip():
+                basic[visible_text_field] = ""
+        model = self._configured_model_for_agent(db, "creation_star_session", "creation_star", request.model)
+        prompt_snapshot = self._creation_basic_suggestions_prompt_snapshot(basic, request)
+        fallback = {
+            "suggestions": self._local_creation_basic_suggestions(basic, request.manual_input, request.count),
+            "prompt_snapshot": prompt_snapshot,
+        }
+        payload, llm_meta = call_agent_json(
+            llm_client=llm_client,
+            agent_name="creation_basic_suggestions",
+            role="创作 Star 基本信息灵感选项生成器",
+            system_prompt=(
+                "你是创作 Star 基本信息页的灵感选项生成器。你只生成候选标签、脑洞和抽卡约束，"
+                "不得替用户确认正式设定，不得写正文。每次刷新都要明显区别 previous_suggestions，"
+                "围绕当前频道、类型、标签、目标读者、目标字数、风格、初始想法和额外约束，"
+                "输出可直接应用到 initial_idea 或 manual_input 的短建议。"
+            ),
+            task=(
+                "为创作 Star 基本信息页 03 初始想法与抽卡约束生成一批可点击建议。"
+                "suggestions 必须同时覆盖 target=initial_idea 与 target=manual_input。"
+            ),
+            context={
+                "project": {"id": project.id, "title": project.title, "language": project.language},
+                "basic_info": basic,
+                "manual_input": request.manual_input,
+                "previous_suggestions": request.previous_suggestions[-12:],
+                "count": request.count,
+                "output_contract": {
+                    "suggestions": [
+                        {
+                            "id": "idea_or_constraint_id",
+                            "target": "initial_idea | manual_input",
+                            "title": "8-16 字按钮标题",
+                            "content": "可追加到输入框的一句话或短段落",
+                            "tags": ["标签"],
+                            "reason": "为什么适合当前立项",
+                        }
+                    ]
+                },
+            },
+            fallback=fallback,
+            model=model,
+        )
+        suggestions = self._normalize_creation_basic_suggestions(payload.get("suggestions"), fallback["suggestions"], request.count)
+        suggestions = self._dedupe_creation_basic_suggestions(suggestions, request.previous_suggestions, fallback["suggestions"], request.count)
+        return {
+            "suggestions": suggestions,
+            "prompt_snapshot": payload.get("prompt_snapshot") if isinstance(payload.get("prompt_snapshot"), dict) else prompt_snapshot,
+            "llm": llm_meta,
+        }
+
     def create_creation_session(self, db: Session, project_id: str, request: CreationSessionCreateRequest) -> dict:
         project = self._project(db, project_id)
         basic = self._normalized_creation_basic(project, request.basic_info)
@@ -361,6 +429,7 @@ class StudioService:
         if request.replace_existing:
             self._reset_creation_session_after(state, "protagonist")
         state["selected_worldview"] = worldview
+        previous_cards = state.get("protagonist_candidates") if isinstance(state.get("protagonist_candidates"), list) else []
         payload, job = self._run_creation_star_draw_step(
             db,
             project,
@@ -374,6 +443,7 @@ class StudioService:
             request.manual_input,
             self._configured_model_for_agent(db, "creation_star_session", "creation_star", request.model or state.get("model")),
             "creation_protagonist_card",
+            previous_cards=previous_cards,
         )
         cards = payload.get("cards") if isinstance(payload.get("cards"), list) else []
         state["protagonist_candidates"] = [*state.get("protagonist_candidates", []), *cards]
@@ -1363,8 +1433,38 @@ class StudioService:
         return {"job": serialize_job(job)}
 
     def list_llm_models(self) -> dict:
-        resolved = LLMProviderResolver(get_settings()).resolve()
-        return catalog_payload(default_model=resolved.model, default_provider=resolved.provider)
+        settings = get_settings()
+        resolver = LLMProviderResolver(settings)
+        resolved = resolver.resolve()
+        configured = bool(resolved.api_key)
+        payload = catalog_payload(default_model=resolved.model, default_provider=resolved.provider)
+        providers = []
+        for provider in payload["providers"]:
+            provider_config = resolver.resolve(f"{provider['id']}:{provider['default_model']}")
+            providers.append(
+                {
+                    **provider,
+                    "configured": bool(provider_config.api_key),
+                    "active": provider_config.provider == resolved.provider,
+                }
+            )
+        active_provider = next((provider for provider in providers if provider["active"]), None)
+        api_key_env = active_provider["api_key_env"] if active_provider else "LLM_API_KEY"
+        if resolved.provider == "qwen":
+            api_key_env = "QWEN_API_KEY / DASHSCOPE_API_KEY / LLM_API_KEY"
+        remote_note = "远程模型调用会失败" if settings.llm_require_remote else "将使用本地降级草案"
+        payload.update(
+            {
+                "configured": configured,
+                "default_provider_configured": configured,
+                "require_remote": settings.llm_require_remote,
+                "configuration_warning": ""
+                if configured
+                else f"LLM 未配置：当前默认 {resolved.provider}/{resolved.model} 未检测到 API Key（{api_key_env}），{remote_note}。",
+                "providers": providers,
+            }
+        )
+        return payload
 
     def _serialize_agent_model_config(self, row: models.AgentModelConfig) -> dict[str, Any]:
         return {
@@ -1890,6 +1990,628 @@ class StudioService:
     def export_prompt_templates(self, db: Session) -> dict:
         return self.list_prompt_templates(db)
 
+    def list_canon_tree(self, db: Session, project_id: str) -> dict:
+        self._project(db, project_id)
+        nodes: list[dict[str, Any]] = [
+            self._folder_node("root", None, "设定集", 0),
+            self._folder_node("folder:characters", "root", "人物", 10),
+            self._folder_node("folder:entities", "root", "剧情实体", 20),
+            self._folder_node("folder:world_facts", "root", "世界观事实", 30),
+            self._folder_node("folder:foreshadowing", "root", "伏笔", 40),
+        ]
+        group_nodes: dict[str, dict[str, Any]] = {}
+
+        def add_group(node_id: str, parent_id: str, title: str, sort_order: int) -> str:
+            if node_id not in group_nodes:
+                group_nodes[node_id] = self._folder_node(node_id, parent_id, title, sort_order)
+            return node_id
+
+        for row in db.query(models.Character).filter(models.Character.project_id == project_id).order_by(models.Character.importance_score.desc()).all():
+            content = serialize_character(row)
+            group_id = add_group(
+                f"folder:characters:{row.importance_level}:{row.current_status}",
+                "folder:characters",
+                f"{self._importance_label(row.importance_level)} · {row.current_status or 'active'}",
+                100 + self._importance_order(row.importance_level),
+            )
+            node = self._ensure_canon_node(
+                db,
+                project_id,
+                "character",
+                row.id,
+                row.name,
+                row.importance_level,
+                row.current_status or row.status,
+                {"group": group_id, "source": row.source},
+                parent_id=group_id,
+            )
+            payload = serialize_canon_node(node, content)
+            metadata = payload.get("metadata", {})
+            payload["parent_id"] = metadata.get("custom_folder_id") or metadata.get("display_parent_id") or group_id
+            nodes.append(payload)
+
+        for row in db.query(models.StoryEntity).filter(models.StoryEntity.project_id == project_id).order_by(models.StoryEntity.importance_score.desc()).all():
+            content = serialize_story_entity(row)
+            group_id = add_group(
+                f"folder:entities:{row.entity_type}",
+                "folder:entities",
+                self._entity_type_label(row.entity_type),
+                200 + self._text_order(row.entity_type),
+            )
+            node = self._ensure_canon_node(
+                db,
+                project_id,
+                "entity",
+                row.id,
+                row.name,
+                row.importance_level,
+                row.current_status,
+                {"group": group_id, "entity_type": row.entity_type, "source": row.source},
+                parent_id=group_id,
+            )
+            payload = serialize_canon_node(node, content)
+            metadata = payload.get("metadata", {})
+            payload["parent_id"] = metadata.get("custom_folder_id") or metadata.get("display_parent_id") or group_id
+            nodes.append(payload)
+
+        for row in db.query(models.WorldFact).filter(models.WorldFact.project_id == project_id).order_by(models.WorldFact.importance_score.desc()).all():
+            content = serialize_world_fact(row)
+            group_id = add_group(
+                f"folder:world_facts:{row.category}",
+                "folder:world_facts",
+                self._world_fact_category_label(row.category),
+                300 + self._text_order(row.category),
+            )
+            node = self._ensure_canon_node(
+                db,
+                project_id,
+                "world_fact",
+                row.id,
+                row.title,
+                row.importance_level,
+                "active",
+                {"group": group_id, "category": row.category, "confidence": row.confidence},
+                parent_id=group_id,
+            )
+            payload = serialize_canon_node(node, content)
+            metadata = payload.get("metadata", {})
+            payload["parent_id"] = metadata.get("custom_folder_id") or metadata.get("display_parent_id") or group_id
+            nodes.append(payload)
+
+        for row in db.query(models.ForeshadowingItem).filter(models.ForeshadowingItem.project_id == project_id).order_by(models.ForeshadowingItem.importance_score.desc()).all():
+            content = serialize_foreshadowing_item(row)
+            group_id = add_group(
+                f"folder:foreshadowing:{row.payoff_status}",
+                "folder:foreshadowing",
+                self._foreshadowing_status_label(row.payoff_status),
+                400 + self._text_order(row.payoff_status),
+            )
+            node = self._ensure_canon_node(
+                db,
+                project_id,
+                "foreshadowing",
+                row.id,
+                row.content[:48] or "未命名伏笔",
+                row.importance_level,
+                row.payoff_status,
+                {"group": group_id, "source": row.source},
+                parent_id=group_id,
+            )
+            payload = serialize_canon_node(node, content)
+            metadata = payload.get("metadata", {})
+            payload["parent_id"] = metadata.get("custom_folder_id") or metadata.get("display_parent_id") or group_id
+            nodes.append(payload)
+
+        db.commit()
+        custom_folders = []
+        for folder in (
+            db.query(models.CanonNode)
+            .filter(models.CanonNode.project_id == project_id, models.CanonNode.node_type == "folder")
+            .order_by(models.CanonNode.sort_order.asc(), models.CanonNode.created_at.asc())
+            .all()
+        ):
+            payload = serialize_canon_node(folder)
+            metadata = payload.get("metadata", {})
+            payload["parent_id"] = metadata.get("display_parent_id") or folder.parent_id or "root"
+            custom_folders.append(payload)
+        return {"nodes": [*nodes[:5], *group_nodes.values(), *custom_folders, *nodes[5:]], "health": self._canon_health(db, project_id)}
+
+    def get_canon_health(self, db: Session, project_id: str) -> dict:
+        self._project(db, project_id)
+        return {"health": self._canon_health(db, project_id)}
+
+    def create_canon_folder(self, db: Session, project_id: str, request: CanonFolderRequest) -> dict:
+        self._project(db, project_id)
+        folder = models.CanonNode(
+            id=generate_id("cnd"),
+            project_id=project_id,
+            parent_id=request.parent_id if request.parent_id and not request.parent_id.startswith("folder:") else None,
+            node_type="folder",
+            ref_type="folder",
+            ref_id=generate_id("fld"),
+            title=request.title,
+            sort_order=request.sort_order,
+            status="active",
+            importance_level="medium",
+            activity_status="active",
+            metadata_json=dumps({"custom_folder": True, "display_parent_id": request.parent_id or "root"}),
+        )
+        db.add(folder)
+        db.commit()
+        db.refresh(folder)
+        payload = serialize_canon_node(folder)
+        payload["parent_id"] = payload.get("metadata", {}).get("display_parent_id") or folder.parent_id or "root"
+        return {"node": payload}
+
+    def move_canon_node(self, db: Session, project_id: str, node_id: str, request: CanonNodeMoveRequest) -> dict:
+        self._project(db, project_id)
+        node = db.get(models.CanonNode, node_id)
+        if node is None or node.project_id != project_id:
+            raise _not_found("设定树节点不存在")
+        metadata = loads(node.metadata_json, {})
+        parent_id = request.parent_id or "root"
+        if parent_id == node.id:
+            raise _bad_request("不能把节点移动到自身之下")
+        real_parent = db.get(models.CanonNode, parent_id) if parent_id and not parent_id.startswith("folder:") else None
+        node.parent_id = real_parent.id if real_parent and real_parent.project_id == project_id else None
+        node.sort_order = request.sort_order
+        metadata["display_parent_id"] = parent_id
+        if node.node_type == "item":
+            metadata["custom_folder_id"] = parent_id
+            db.query(models.CanonClassification).filter(
+                models.CanonClassification.project_id == project_id,
+                models.CanonClassification.ref_type == node.ref_type,
+                models.CanonClassification.ref_id == node.ref_id,
+                models.CanonClassification.dimension == "custom_folder",
+            ).delete()
+            db.add(
+                models.CanonClassification(
+                    id=generate_id("ccl"),
+                    project_id=project_id,
+                    ref_type=node.ref_type,
+                    ref_id=node.ref_id,
+                    dimension="custom_folder",
+                    value=parent_id,
+                )
+            )
+        node.metadata_json = dumps(metadata)
+        node.updated_at = utcnow()
+        db.commit()
+        db.refresh(node)
+        payload = serialize_canon_node(node)
+        payload["parent_id"] = metadata.get("display_parent_id") or node.parent_id or "root"
+        return {"node": payload}
+
+    def set_canon_locks(self, db: Session, project_id: str, ref_type: str, ref_id: str, request: CanonLockFieldsRequest) -> dict:
+        ref_type = self._normalize_canon_ref_type(ref_type)
+        row = self._canon_ref_row(db, project_id, ref_type, ref_id)
+        content = self._canon_ref_content(ref_type, row)
+        node = self._ensure_canon_node(
+            db,
+            project_id,
+            ref_type,
+            ref_id,
+            self._canon_ref_title(ref_type, content),
+            str(content.get("importance_level") or "medium"),
+            str(content.get("current_status") or content.get("payoff_status") or "active"),
+            {},
+        )
+        metadata = loads(node.metadata_json, {})
+        metadata["locked_fields"] = sorted({field for field in request.locked_fields if field})
+        if request.reason:
+            metadata["lock_reason"] = request.reason
+        node.metadata_json = dumps(metadata)
+        node.updated_at = utcnow()
+        db.commit()
+        db.refresh(node)
+        return {"node": serialize_canon_node(node, content)}
+
+    def get_canon_impact(self, db: Session, project_id: str, ref_type: str, ref_id: str) -> dict:
+        ref_type = self._normalize_canon_ref_type(ref_type)
+        row = self._canon_ref_row(db, project_id, ref_type, ref_id)
+        content = self._canon_ref_content(ref_type, row)
+        title = self._canon_ref_title(ref_type, content)
+        terms = [term for term in {title, str(content.get("name") or ""), str(content.get("title") or "")} if term]
+        chapters = []
+        for chapter in db.query(models.Chapter).filter(models.Chapter.project_id == project_id).order_by(models.Chapter.chapter_no.asc()).all():
+            haystack = "\n".join([chapter.title, chapter.outline, chapter.core_event, chapter.conflict, chapter.summary, chapter.draft_text, chapter.final_text])
+            if any(term and term in haystack for term in terms):
+                chapters.append(
+                    {
+                        "id": chapter.id,
+                        "chapter_no": chapter.chapter_no,
+                        "title": chapter.title,
+                        "match_reason": "文本引用",
+                        "status": chapter.status,
+                    }
+                )
+        graph_node_types = [ref_type]
+        if ref_type == "foreshadowing":
+            graph_node_types = ["clue"]
+        graph_node = (
+            db.query(models.GraphNode)
+            .filter(models.GraphNode.project_id == project_id, models.GraphNode.ref_id == ref_id, models.GraphNode.node_type.in_(graph_node_types))
+            .first()
+        )
+        graph_edges: list[dict[str, Any]] = []
+        related_nodes: list[dict[str, Any]] = []
+        if graph_node:
+            edges = (
+                db.query(models.GraphEdge)
+                .filter(or_(models.GraphEdge.source_node_id == graph_node.id, models.GraphEdge.target_node_id == graph_node.id))
+                .order_by(models.GraphEdge.importance_score.desc())
+                .all()
+            )
+            graph_edges = [serialize_graph_edge(edge) for edge in edges]
+            related_ids = {edge.source_node_id for edge in edges} | {edge.target_node_id for edge in edges}
+            related_ids.discard(graph_node.id)
+            if related_ids:
+                related_nodes = [serialize_graph_node(node) for node in db.query(models.GraphNode).filter(models.GraphNode.id.in_(related_ids)).all()]
+        versions = self.list_canon_versions(db, project_id, ref_type, ref_id)["versions"]
+        proposals = [
+            serialize_canon_proposal(proposal)
+            for proposal in db.query(models.CanonChangeProposal)
+            .filter(models.CanonChangeProposal.project_id == project_id, models.CanonChangeProposal.target_type == ref_type)
+            .filter((models.CanonChangeProposal.target_id == ref_id) | (models.CanonChangeProposal.after_json.contains(ref_id)) | (models.CanonChangeProposal.before_json.contains(ref_id)))
+            .order_by(models.CanonChangeProposal.created_at.desc())
+            .limit(20)
+            .all()
+        ]
+        foreshadowing_refs = []
+        if ref_type in {"character", "entity"}:
+            column = models.ForeshadowingItem.related_character_ids_json if ref_type == "character" else models.ForeshadowingItem.related_entity_ids_json
+            foreshadowing_refs = [
+                serialize_foreshadowing_item(item)
+                for item in db.query(models.ForeshadowingItem).filter(models.ForeshadowingItem.project_id == project_id, column.contains(ref_id)).limit(20).all()
+            ]
+        return {
+            "ref": {"ref_type": ref_type, "ref_id": ref_id, "title": title, "content": content},
+            "chapters": chapters,
+            "graph": {"node": serialize_graph_node(graph_node) if graph_node else None, "edges": graph_edges, "related_nodes": related_nodes},
+            "versions": versions,
+            "proposals": proposals,
+            "foreshadowing": foreshadowing_refs,
+            "summary": {
+                "chapter_count": len(chapters),
+                "relation_count": len(graph_edges),
+                "version_count": len(versions),
+                "proposal_count": len(proposals),
+                "foreshadowing_count": len(foreshadowing_refs),
+            },
+        }
+
+    def scan_canon_duplicates(self, db: Session, project_id: str, request: CanonDuplicateScanRequest) -> dict:
+        self._project(db, project_id)
+        refs: list[dict[str, Any]] = []
+        for ref_type in request.ref_types:
+            normalized = self._normalize_canon_ref_type(ref_type)
+            rows = self._canon_rows_for_type(db, project_id, normalized)
+            for row in rows:
+                content = self._canon_ref_content(normalized, row)
+                refs.append({"ref_type": normalized, "ref_id": row.id, "title": self._canon_ref_title(normalized, content), "content": content})
+        candidates: list[dict[str, Any]] = []
+        proposals: list[dict[str, Any]] = []
+        for index, left in enumerate(refs):
+            for right in refs[index + 1 :]:
+                if left["ref_type"] != right["ref_type"]:
+                    continue
+                score = self._similarity_score(left["title"], right["title"])
+                if score < request.threshold:
+                    continue
+                source, target = (right, left) if len(right["title"]) < len(left["title"]) else (left, right)
+                candidate = {"source": source, "target": target, "score": round(score, 3), "reason": "名称近似或同名"}
+                candidates.append(candidate)
+                if not request.create_proposals:
+                    continue
+                exists = (
+                    db.query(models.CanonChangeProposal)
+                    .filter(
+                        models.CanonChangeProposal.project_id == project_id,
+                        models.CanonChangeProposal.operation == "merge",
+                        models.CanonChangeProposal.approval_status == "pending",
+                        models.CanonChangeProposal.target_type == target["ref_type"],
+                        models.CanonChangeProposal.target_id == target["ref_id"],
+                        models.CanonChangeProposal.after_json.contains(source["ref_id"]),
+                    )
+                    .first()
+                )
+                if exists:
+                    proposals.append(serialize_canon_proposal(exists))
+                    continue
+                merged = self._merge_canon_content(target["content"], source["content"], target["ref_type"])
+                proposal = self._create_canon_proposal(
+                    db,
+                    project_id,
+                    target["ref_type"],
+                    {"source_ref_type": source["ref_type"], "source_ref_id": source["ref_id"], "target_ref_type": target["ref_type"], "target_ref_id": target["ref_id"], "merged_content": merged},
+                    target_id=target["ref_id"],
+                    operation="merge",
+                    before={"source": source["content"], "target": target["content"]},
+                    source_agent="duplicate_scanner",
+                    confidence=min(0.98, max(0.55, score)),
+                    reason=f"可能重复：{source['title']} → {target['title']}",
+                )
+                proposals.append(serialize_canon_proposal(proposal))
+        db.commit()
+        return {"candidates": candidates, "proposals": proposals}
+
+    def export_canon_package(self, db: Session, project_id: str, request: CanonExportRequest) -> dict:
+        project = self._project(db, project_id)
+        story_bible = db.query(models.StoryBible).filter(models.StoryBible.project_id == project_id).first()
+        tree = self.list_canon_tree(db, project_id)
+        package = {
+            "project": serialize_project(project),
+            "story_bible": serialize_story_bible(story_bible) if story_bible else None,
+            "tree": tree["nodes"],
+            "health": tree["health"],
+            "characters": self.list_characters(db, project_id)["characters"],
+            "entities": self.list_entities(db, project_id)["entities"],
+            "world_facts": self.list_world_facts(db, project_id)["world_facts"],
+            "foreshadowing": self.list_foreshadowing(db, project_id)["foreshadowing_items"],
+            "graph": self.get_graph(db, project_id)["graph"],
+            "versions": [
+                serialize_canon_version(row)
+                for row in db.query(models.CanonVersion).filter(models.CanonVersion.project_id == project_id).order_by(models.CanonVersion.created_at.desc()).all()
+            ],
+            "proposals": self.list_canon_proposals(db, project_id)["proposals"],
+            "exported_at": isoformat(utcnow()),
+        }
+        if request.format == "markdown":
+            content = self._render_canon_markdown(package)
+        else:
+            content = json.dumps(package, ensure_ascii=False, indent=2)
+        return {"filename": f"{project.title}-canon.{ 'md' if request.format == 'markdown' else 'json' }", "format": request.format, "content": content, "package": package if request.format == "json" else None}
+
+    def list_canon_versions(self, db: Session, project_id: str, ref_type: str, ref_id: str) -> dict:
+        ref_type = self._normalize_canon_ref_type(ref_type)
+        self._project(db, project_id)
+        versions = (
+            db.query(models.CanonVersion)
+            .filter(models.CanonVersion.project_id == project_id, models.CanonVersion.ref_type == ref_type, models.CanonVersion.ref_id == ref_id)
+            .order_by(models.CanonVersion.version_no.asc())
+            .all()
+        )
+        return {"versions": [serialize_canon_version(row) for row in versions]}
+
+    def rollback_canon_version(self, db: Session, project_id: str, ref_type: str, ref_id: str, version_id: str, request: CanonRollbackRequest) -> dict:
+        ref_type = self._normalize_canon_ref_type(ref_type)
+        version = db.get(models.CanonVersion, version_id)
+        if version is None or version.project_id != project_id or version.ref_type != ref_type or version.ref_id != ref_id:
+            raise _not_found("设定版本不存在")
+        row = self._canon_ref_row(db, project_id, ref_type, ref_id)
+        content = loads(version.content_json, {})
+        self._apply_canon_content(row, ref_type, content)
+        db.flush()
+        current = self._canon_ref_content(ref_type, row)
+        rollback_version = self._record_canon_version(
+            db,
+            project_id,
+            ref_type,
+            ref_id,
+            current,
+            source_chapter_id=version.source_chapter_id,
+            source_job_id=version.source_job_id,
+            source_agent="rollback",
+            change_reason=request.user_note or f"回滚到版本 {version.version_no}",
+            confidence=version.confidence,
+        )
+        self._ensure_canon_node(
+            db,
+            project_id,
+            ref_type,
+            ref_id,
+            self._canon_ref_title(ref_type, current),
+            str(current.get("importance_level") or "medium"),
+            str(current.get("current_status") or current.get("payoff_status") or "active"),
+            {"rollback_from_version": version.version_no},
+        )
+        db.commit()
+        db.refresh(row)
+        payload_key = {"character": "character", "entity": "entity", "world_fact": "world_fact", "foreshadowing": "foreshadowing"}.get(ref_type, "item")
+        return {
+            "rolled_back": True,
+            payload_key: self._canon_ref_content(ref_type, row),
+            "item": self._canon_ref_content(ref_type, row),
+            "version": serialize_canon_version(rollback_version),
+        }
+
+    def list_canon_proposals(self, db: Session, project_id: str, status: str | None = None) -> dict:
+        self._project(db, project_id)
+        query = db.query(models.CanonChangeProposal).filter(models.CanonChangeProposal.project_id == project_id)
+        if status:
+            query = query.filter(models.CanonChangeProposal.approval_status == status)
+        rows = query.order_by(models.CanonChangeProposal.created_at.desc()).all()
+        return {"proposals": [serialize_canon_proposal(row) for row in rows]}
+
+    def approve_canon_proposal(self, db: Session, project_id: str, proposal_id: str, request: CanonProposalDecisionRequest | None = None) -> dict:
+        proposal = db.get(models.CanonChangeProposal, proposal_id)
+        if proposal is None or proposal.project_id != project_id:
+            raise _not_found("设定候选不存在")
+        if proposal.approval_status != "pending":
+            raise _bad_request("设定候选已处理")
+        target_type = self._normalize_canon_ref_type(proposal.target_type)
+        payload = loads(proposal.after_json, {})
+        applied: dict[str, Any]
+        if proposal.operation == "update":
+            if not proposal.target_id:
+                raise _bad_request("更新类候选缺少目标设定")
+            row = self._canon_ref_row(db, project_id, target_type, proposal.target_id)
+            self._apply_canon_content(row, target_type, payload)
+            db.flush()
+            current = self._canon_ref_content(target_type, row)
+            version = self._record_canon_version(
+                db,
+                project_id,
+                target_type,
+                proposal.target_id,
+                current,
+                source_chapter_id=proposal.source_chapter_id,
+                source_job_id=proposal.source_job_id,
+                source_agent=proposal.source_agent,
+                change_reason=request.user_note if request and request.user_note else proposal.reason,
+                confidence=proposal.confidence,
+            )
+            self._ensure_canon_node(
+                db,
+                project_id,
+                target_type,
+                proposal.target_id,
+                self._canon_ref_title(target_type, current),
+                str(current.get("importance_level") or "medium"),
+                str(current.get("current_status") or current.get("payoff_status") or "active"),
+                {"last_proposal_id": proposal.id},
+            )
+            applied = {"ref_type": target_type, "ref_id": proposal.target_id, "item": current, "version": serialize_canon_version(version)}
+        elif proposal.operation == "archive":
+            if not proposal.target_id:
+                raise _bad_request("归档类候选缺少目标设定")
+            result = self.archive_canon_items(db, project_id, CanonBulkArchiveRequest(ref_type=target_type, ref_ids=[proposal.target_id], reason=request.user_note if request and request.user_note else proposal.reason))
+            applied = {"ref_type": target_type, "ref_id": proposal.target_id, "item": result["archived"][0]}
+        elif proposal.operation == "merge":
+            source_ref_type = self._normalize_canon_ref_type(str(payload.get("source_ref_type") or target_type))
+            source_ref_id = str(payload.get("source_ref_id") or "")
+            target_ref_type = self._normalize_canon_ref_type(str(payload.get("target_ref_type") or target_type))
+            target_ref_id = str(payload.get("target_ref_id") or proposal.target_id or "")
+            if not source_ref_id or not target_ref_id:
+                raise _bad_request("合并类候选缺少来源或目标设定")
+            target_row = self._canon_ref_row(db, project_id, target_ref_type, target_ref_id)
+            source_row = self._canon_ref_row(db, project_id, source_ref_type, source_ref_id)
+            merged = payload.get("merged_content") if isinstance(payload.get("merged_content"), dict) else self._merge_canon_content(self._canon_ref_content(target_ref_type, target_row), self._canon_ref_content(source_ref_type, source_row), target_ref_type)
+            self._apply_canon_content(target_row, target_ref_type, merged)
+            if hasattr(source_row, "status"):
+                source_row.status = "archived"
+            if hasattr(source_row, "current_status"):
+                source_row.current_status = "archived"
+            if hasattr(source_row, "payoff_status"):
+                source_row.payoff_status = "abandoned"
+            db.flush()
+            target_content = self._canon_ref_content(target_ref_type, target_row)
+            source_content = self._canon_ref_content(source_ref_type, source_row)
+            target_version = self._record_canon_version(db, project_id, target_ref_type, target_ref_id, target_content, source_agent="merge", change_reason=request.user_note if request and request.user_note else proposal.reason, confidence=proposal.confidence)
+            source_version = self._record_canon_version(db, project_id, source_ref_type, source_ref_id, source_content, source_agent="merge", change_reason=f"合并归档到 {target_ref_id}", confidence=proposal.confidence)
+            self._ensure_canon_node(db, project_id, target_ref_type, target_ref_id, self._canon_ref_title(target_ref_type, target_content), str(target_content.get("importance_level") or "medium"), str(target_content.get("current_status") or target_content.get("payoff_status") or "active"), {"merged_from": source_ref_id})
+            source_node = self._ensure_canon_node(db, project_id, source_ref_type, source_ref_id, self._canon_ref_title(source_ref_type, source_content), str(source_content.get("importance_level") or "medium"), "archived", {"merged_into": target_ref_id})
+            source_node.status = "archived"
+            applied = {
+                "ref_type": target_ref_type,
+                "ref_id": target_ref_id,
+                "item": target_content,
+                "source_ref": {"ref_type": source_ref_type, "ref_id": source_ref_id, "version": serialize_canon_version(source_version)},
+                "version": serialize_canon_version(target_version),
+            }
+        elif proposal.operation != "create":
+            raise _bad_request("不支持的设定候选操作", {"operation": proposal.operation})
+        elif target_type == "character":
+            result = self.create_character(
+                db,
+                project_id,
+                CreateCharacterRequest(
+                    name=str(payload.get("name") or "未命名角色"),
+                    aliases=list(payload.get("aliases") or []),
+                    role_type=payload.get("role_type") or payload.get("role") or "supporting",
+                    importance_level=payload.get("importance_level") or "medium",
+                    importance_score=int(payload.get("importance_score") or 50),
+                    summary=str(payload.get("summary") or payload.get("profile") or ""),
+                    appearance=str(payload.get("appearance") or ""),
+                    personality=str(payload.get("personality") or ""),
+                    goals=list(payload.get("goals") or []),
+                    motivations=list(payload.get("motivations") or []),
+                    secrets=list(payload.get("secrets") or []),
+                    abilities=list(payload.get("abilities") or []),
+                    weaknesses=list(payload.get("weaknesses") or []),
+                    character_arc=str(payload.get("character_arc") or payload.get("arc") or ""),
+                    current_status=str(payload.get("current_status") or "active"),
+                    related_entity_ids=list(payload.get("related_entity_ids") or []),
+                    related_character_ids=list(payload.get("related_character_ids") or []),
+                    updated_reason=request.user_note if request and request.user_note else proposal.reason,
+                    source_chapter_id=proposal.source_chapter_id or payload.get("source_chapter_id"),
+                    source_agent=proposal.source_agent,
+                ),
+            )
+            applied = {"ref_type": "character", "ref_id": result["character"]["id"], "item": result["character"]}
+        elif target_type == "entity":
+            result = self.create_entity(
+                db,
+                project_id,
+                CreateEntityRequest(
+                    entity_type=payload.get("entity_type") or "item",
+                    name=str(payload.get("name") or "未命名实体"),
+                    importance_level=payload.get("importance_level") or "medium",
+                    importance_score=int(payload.get("importance_score") or 50),
+                    description=str(payload.get("description") or ""),
+                    current_status=str(payload.get("current_status") or "active"),
+                    source=str(payload.get("source") or proposal.source_agent),
+                    source_chapter_id=proposal.source_chapter_id or payload.get("source_chapter_id"),
+                    source_agent=proposal.source_agent,
+                ),
+            )
+            applied = {"ref_type": "entity", "ref_id": result["entity"]["id"], "item": result["entity"]}
+        elif target_type == "world_fact":
+            result = self.create_world_fact(
+                db,
+                project_id,
+                CreateWorldFactRequest(
+                    category=payload.get("category") or "timeline",
+                    title=str(payload.get("title") or "未命名世界观事实"),
+                    content=str(payload.get("content") or ""),
+                    importance_level=payload.get("importance_level") or "medium",
+                    importance_score=int(payload.get("importance_score") or 50),
+                    confidence=float(payload.get("confidence") or proposal.confidence or 0.8),
+                    related_entity_ids=list(payload.get("related_entity_ids") or []),
+                    source_chapter_id=proposal.source_chapter_id or payload.get("source_chapter_id"),
+                    source_agent=proposal.source_agent,
+                ),
+            )
+            applied = {"ref_type": "world_fact", "ref_id": result["world_fact"]["id"], "item": result["world_fact"]}
+        else:
+            raise _bad_request("不支持的设定候选类型", {"target_type": proposal.target_type})
+        proposal.approval_status = "approved"
+        proposal.target_id = applied["ref_id"]
+        proposal.decided_at = utcnow()
+        db.commit()
+        db.refresh(proposal)
+        return {"proposal": serialize_canon_proposal(proposal), "applied_ref": applied}
+
+    def reject_canon_proposal(self, db: Session, project_id: str, proposal_id: str, request: CanonProposalDecisionRequest | None = None) -> dict:
+        proposal = db.get(models.CanonChangeProposal, proposal_id)
+        if proposal is None or proposal.project_id != project_id:
+            raise _not_found("设定候选不存在")
+        if proposal.approval_status != "pending":
+            raise _bad_request("设定候选已处理")
+        note = request.user_note if request else ""
+        proposal.approval_status = "rejected"
+        proposal.reason = f"{proposal.reason}\n拒绝原因：{note}".strip()
+        proposal.decided_at = utcnow()
+        db.commit()
+        db.refresh(proposal)
+        return {"proposal": serialize_canon_proposal(proposal)}
+
+    def archive_canon_items(self, db: Session, project_id: str, request: CanonBulkArchiveRequest) -> dict:
+        ref_type = self._normalize_canon_ref_type(request.ref_type)
+        archived: list[dict[str, Any]] = []
+        for ref_id in request.ref_ids:
+            row = self._canon_ref_row(db, project_id, ref_type, ref_id)
+            if hasattr(row, "status"):
+                row.status = "archived"
+            if hasattr(row, "current_status"):
+                row.current_status = "archived"
+            node = self._ensure_canon_node(
+                db,
+                project_id,
+                ref_type,
+                ref_id,
+                self._canon_ref_title(ref_type, self._canon_ref_content(ref_type, row)),
+                getattr(row, "importance_level", "medium"),
+                "archived",
+                {"archive_reason": request.reason},
+            )
+            node.status = "archived"
+            content = self._canon_ref_content(ref_type, row)
+            version = self._record_canon_version(db, project_id, ref_type, ref_id, content, source_agent="manual", change_reason=request.reason or "批量归档")
+            archived.append({"ref_type": ref_type, "ref_id": ref_id, "version": serialize_canon_version(version)})
+        db.commit()
+        return {"archived": archived}
+
     def list_characters(self, db: Session, project_id: str) -> dict:
         self._project(db, project_id)
         rows = db.query(models.Character).filter(models.Character.project_id == project_id).order_by(models.Character.importance_score.desc()).all()
@@ -1923,10 +2645,21 @@ class StudioService:
             related_character_ids_json=dumps(request.related_character_ids),
             updated_reason=request.updated_reason,
             source="manual",
+            first_appearance_chapter_id=request.source_chapter_id,
+            last_seen_chapter_id=request.source_chapter_id,
         )
         db.add(row)
         db.flush()
         self._ensure_graph_node(db, project_id, "character", row.id, row.name, row.importance_level, row.importance_score)
+        self._sync_canon_ref(
+            db,
+            project_id,
+            "character",
+            row,
+            source_chapter_id=request.source_chapter_id,
+            source_agent=request.source_agent,
+            change_reason=request.updated_reason,
+        )
         db.commit()
         db.refresh(row)
         return {"character": serialize_character(row)}
@@ -1942,6 +2675,14 @@ class StudioService:
         if row is None or row.project_id != project_id:
             raise _not_found("角色不存在")
         updates = request.model_dump(exclude_unset=True)
+        source_chapter_id = updates.pop("source_chapter_id", None)
+        source_agent = updates.pop("source_agent", None) or "manual"
+        before_content = self._canon_ref_content("character", row)
+        proposed_content = dict(before_content)
+        for field, value in updates.items():
+            if value is not None:
+                proposed_content[field] = value
+        self._guard_locked_fields_or_propose(db, project_id, "character", character_id, source_agent, before_content, proposed_content, source_chapter_id=source_chapter_id)
         for field, value in updates.items():
             if value is None:
                 continue
@@ -1951,7 +2692,20 @@ class StudioService:
                 setattr(row, field, value)
         if "role_type" in updates and row.role_type:
             row.role = row.role_type
+        if source_chapter_id:
+            if not row.first_appearance_chapter_id:
+                row.first_appearance_chapter_id = source_chapter_id
+            row.last_seen_chapter_id = source_chapter_id
         self._ensure_graph_node(db, project_id, "character", row.id, row.name, row.importance_level, row.importance_score)
+        self._sync_canon_ref(
+            db,
+            project_id,
+            "character",
+            row,
+            source_chapter_id=source_chapter_id,
+            source_agent=source_agent,
+            change_reason=row.updated_reason,
+        )
         db.commit()
         db.refresh(row)
         return {"character": serialize_character(row)}
@@ -1989,10 +2743,21 @@ class StudioService:
             description=request.description,
             current_status=request.current_status,
             source=request.source,
+            first_appearance_chapter_id=request.source_chapter_id,
+            last_seen_chapter_id=request.source_chapter_id,
         )
         db.add(row)
         db.flush()
         self._ensure_graph_node(db, project_id, "entity", row.id, row.name, row.importance_level, row.importance_score)
+        self._sync_canon_ref(
+            db,
+            project_id,
+            "entity",
+            row,
+            source_chapter_id=request.source_chapter_id,
+            source_agent=request.source_agent,
+            change_reason=f"{request.source} 创建实体",
+        )
         db.commit()
         db.refresh(row)
         return {"entity": serialize_story_entity(row)}
@@ -2001,10 +2766,32 @@ class StudioService:
         row = db.get(models.StoryEntity, entity_id)
         if row is None or row.project_id != project_id:
             raise _not_found("剧情实体不存在")
-        for field, value in request.model_dump(exclude_unset=True).items():
+        updates = request.model_dump(exclude_unset=True)
+        source_chapter_id = updates.pop("source_chapter_id", None)
+        source_agent = updates.pop("source_agent", None) or "manual"
+        before_content = self._canon_ref_content("entity", row)
+        proposed_content = dict(before_content)
+        for field, value in updates.items():
+            if value is not None:
+                proposed_content[field] = value
+        self._guard_locked_fields_or_propose(db, project_id, "entity", entity_id, source_agent, before_content, proposed_content, source_chapter_id=source_chapter_id)
+        for field, value in updates.items():
             if value is not None and hasattr(row, field):
                 setattr(row, field, value)
+        if source_chapter_id:
+            if not row.first_appearance_chapter_id:
+                row.first_appearance_chapter_id = source_chapter_id
+            row.last_seen_chapter_id = source_chapter_id
         self._ensure_graph_node(db, project_id, "entity", row.id, row.name, row.importance_level, row.importance_score)
+        self._sync_canon_ref(
+            db,
+            project_id,
+            "entity",
+            row,
+            source_chapter_id=source_chapter_id,
+            source_agent=source_agent,
+            change_reason="更新剧情实体",
+        )
         db.commit()
         db.refresh(row)
         return {"entity": serialize_story_entity(row)}
@@ -2037,11 +2824,22 @@ class StudioService:
             importance_level=request.importance_level,
             importance_score=request.importance_score,
             confidence=request.confidence,
+            source_chapter_id=request.source_chapter_id,
             related_entity_ids_json=dumps(request.related_entity_ids),
         )
         db.add(row)
         db.flush()
         self._ensure_graph_node(db, project_id, "world_fact", row.id, row.title, row.importance_level, row.importance_score)
+        self._sync_canon_ref(
+            db,
+            project_id,
+            "world_fact",
+            row,
+            source_chapter_id=request.source_chapter_id,
+            source_agent=request.source_agent,
+            change_reason="创建世界观事实",
+            confidence=request.confidence,
+        )
         db.commit()
         db.refresh(row)
         return {"world_fact": serialize_world_fact(row)}
@@ -2050,7 +2848,16 @@ class StudioService:
         row = db.get(models.WorldFact, fact_id)
         if row is None or row.project_id != project_id:
             raise _not_found("世界观事实不存在")
-        for field, value in request.model_dump(exclude_unset=True).items():
+        updates = request.model_dump(exclude_unset=True)
+        source_agent = updates.pop("source_agent", None) or "manual"
+        source_chapter_id = updates.get("source_chapter_id")
+        before_content = self._canon_ref_content("world_fact", row)
+        proposed_content = dict(before_content)
+        for field, value in updates.items():
+            if value is not None:
+                proposed_content[field] = value
+        self._guard_locked_fields_or_propose(db, project_id, "world_fact", fact_id, source_agent, before_content, proposed_content, source_chapter_id=source_chapter_id)
+        for field, value in updates.items():
             if value is None:
                 continue
             if field == "related_entity_ids":
@@ -2058,6 +2865,16 @@ class StudioService:
             elif hasattr(row, field):
                 setattr(row, field, value)
         self._ensure_graph_node(db, project_id, "world_fact", row.id, row.title, row.importance_level, row.importance_score)
+        self._sync_canon_ref(
+            db,
+            project_id,
+            "world_fact",
+            row,
+            source_chapter_id=row.source_chapter_id,
+            source_agent=source_agent,
+            change_reason="更新世界观事实",
+            confidence=row.confidence,
+        )
         db.commit()
         db.refresh(row)
         return {"world_fact": serialize_world_fact(row)}
@@ -2228,6 +3045,45 @@ class StudioService:
                 ] or fallback_world_facts
                 self._record_agent_run(db, job, "canon_curator", {"world_facts": created_world_facts, "_llm": fact_meta, "preview_only": True}, {"instruction": instruction})
 
+            proposals: list[dict[str, Any]] = []
+            for item in created_characters:
+                proposal = self._create_canon_proposal(
+                    db,
+                    project_id,
+                    "character",
+                    item,
+                    source_job_id=job.id,
+                    source_agent="chief_architect",
+                    confidence=float(item.get("confidence") or 0.8),
+                    reason=instruction,
+                )
+                proposals.append(serialize_canon_proposal(proposal))
+            for item in created_entities:
+                proposal = self._create_canon_proposal(
+                    db,
+                    project_id,
+                    "entity",
+                    item,
+                    source_job_id=job.id,
+                    source_agent="canon_curator",
+                    confidence=float(item.get("confidence") or 0.8),
+                    reason=instruction,
+                )
+                proposals.append(serialize_canon_proposal(proposal))
+            for item in created_world_facts:
+                proposal = self._create_canon_proposal(
+                    db,
+                    project_id,
+                    "world_fact",
+                    item,
+                    source_chapter_id=item.get("source_chapter_id"),
+                    source_job_id=job.id,
+                    source_agent="canon_curator",
+                    confidence=float(item.get("confidence") or 0.8),
+                    reason=instruction,
+                )
+                proposals.append(serialize_canon_proposal(proposal))
+
             self._finish_job(
                 db,
                 job,
@@ -2235,6 +3091,7 @@ class StudioService:
                     "characters": created_characters,
                     "entities": created_entities,
                     "world_facts": created_world_facts,
+                    "proposals": proposals,
                     "instruction": instruction,
                     "preview_only": True,
                 },
@@ -2245,6 +3102,7 @@ class StudioService:
                 "characters": created_characters,
                 "entities": created_entities,
                 "world_facts": created_world_facts,
+                "proposals": proposals,
                 "preview_only": True,
             }
 
@@ -2299,6 +3157,16 @@ class StudioService:
                 row.personality = str(candidate.get("personality") or row.personality)
                 row.character_arc = str(candidate.get("character_arc") or candidate.get("arc") or row.character_arc)
                 self._ensure_graph_node(db, project_id, "character", row.id, row.name, row.importance_level, row.importance_score)
+            for row in rows:
+                self._sync_canon_ref(
+                    db,
+                    project_id,
+                    "character",
+                    row,
+                    source_job_id=job.id,
+                    source_agent="chief_architect",
+                    change_reason="agent_assisted_setting_generation",
+                )
             created_characters = [serialize_character(row) for row in rows]
             self._record_agent_run(db, job, "chief_architect", {"characters": created_characters, "_llm": character_meta}, {"instruction": instruction})
 
@@ -2344,6 +3212,16 @@ class StudioService:
                 row.name = str(candidate.get("name") or row.name)[:120]
                 row.description = str(candidate.get("description") or row.description)
                 self._ensure_graph_node(db, project_id, "entity", row.id, row.name, row.importance_level, row.importance_score)
+            for row in rows:
+                self._sync_canon_ref(
+                    db,
+                    project_id,
+                    "entity",
+                    row,
+                    source_job_id=job.id,
+                    source_agent="canon_curator",
+                    change_reason="agent_assisted_setting_generation",
+                )
             created_entities = [serialize_story_entity(row) for row in rows]
             self._record_agent_run(db, job, "canon_curator", {"entities": created_entities, "_llm": entity_meta}, {"instruction": instruction})
 
@@ -2389,6 +3267,17 @@ class StudioService:
                 row.title = str(candidate.get("title") or row.title)[:160]
                 row.content = str(candidate.get("content") or row.content)
                 self._ensure_graph_node(db, project_id, "world_fact", row.id, row.title, row.importance_level, row.importance_score)
+            for row in rows:
+                self._sync_canon_ref(
+                    db,
+                    project_id,
+                    "world_fact",
+                    row,
+                    source_job_id=job.id,
+                    source_agent="canon_curator",
+                    change_reason="agent_assisted_setting_generation",
+                    confidence=row.confidence,
+                )
             created_world_facts = [serialize_world_fact(row) for row in rows]
             self._record_agent_run(db, job, "canon_curator", {"world_facts": created_world_facts, "_llm": fact_meta}, {"instruction": instruction})
 
@@ -2546,6 +3435,7 @@ class StudioService:
         db.add(row)
         db.flush()
         self._sync_foreshadowing_graph(db, row)
+        self._sync_canon_ref(db, project_id, "foreshadowing", row, source_chapter_id=row.planted_chapter_id, source_agent=row.source, change_reason="创建伏笔")
         db.commit()
         db.refresh(row)
         return {"foreshadowing_item": serialize_foreshadowing_item(row)}
@@ -2554,7 +3444,14 @@ class StudioService:
         row = db.get(models.ForeshadowingItem, item_id)
         if row is None or row.project_id != project_id:
             raise _not_found("伏笔不存在")
-        for field, value in request.model_dump(exclude_unset=True).items():
+        updates = request.model_dump(exclude_unset=True)
+        before_content = self._canon_ref_content("foreshadowing", row)
+        proposed_content = dict(before_content)
+        for field, value in updates.items():
+            if value is not None:
+                proposed_content[field] = value
+        self._guard_locked_fields_or_propose(db, project_id, "foreshadowing", item_id, str(updates.pop("source_agent", "manual") or "manual"), before_content, proposed_content)
+        for field, value in updates.items():
             if value is None:
                 continue
             if field in {"related_character_ids", "related_entity_ids"}:
@@ -2562,6 +3459,7 @@ class StudioService:
             elif hasattr(row, field):
                 setattr(row, field, value)
         self._sync_foreshadowing_graph(db, row)
+        self._sync_canon_ref(db, project_id, "foreshadowing", row, source_chapter_id=row.planted_chapter_id, source_agent="manual", change_reason="更新伏笔")
         db.commit()
         db.refresh(row)
         return {"foreshadowing_item": serialize_foreshadowing_item(row)}
@@ -2591,6 +3489,7 @@ class StudioService:
         if request.payoff_note:
             row.planned_payoff = request.payoff_note
         self._sync_foreshadowing_graph(db, row, payoff=True)
+        self._sync_canon_ref(db, project_id, "foreshadowing", row, source_chapter_id=request.actual_payoff_chapter_id, source_agent="manual", change_reason="回收伏笔")
         db.commit()
         db.refresh(row)
         return {"foreshadowing_item": serialize_foreshadowing_item(row)}
@@ -2802,6 +3701,186 @@ class StudioService:
             "initial_idea": str(basic_info.get("initial_idea") or project.initial_idea or project.premise),
         }
 
+    def _creation_basic_suggestions_prompt_snapshot(self, basic: dict[str, Any], request: CreationBasicSuggestionsRequest) -> dict[str, Any]:
+        return {
+            "agent_name": "creation_basic_suggestions",
+            "workflow_id": "creation_star_session",
+            "required_inputs": ["basic_info", "manual_input", "previous_suggestions"],
+            "context_summary": (
+                f"频道={basic.get('channel')}；类型={basic.get('genre')}；细分={self._short('、'.join(self._as_str_list(basic.get('subgenres'))), 80)}；"
+                f"标签={self._short('、'.join(self._as_str_list(basic.get('tags'))), 100)}；目标读者={self._short(basic.get('target_reader'), 100)}；"
+                f"目标字数={basic.get('target_words')}；风格={self._short(basic.get('style'), 80)}；初始想法={self._short(basic.get('initial_idea'), 160)}；"
+                f"额外约束={self._short(request.manual_input, 160)}。"
+            ),
+            "generation_settings": {
+                "count": request.count,
+                "temperature": 0.85,
+                "refresh_policy": "avoid_previous_suggestions",
+            },
+            "output_schema": {
+                "suggestions": [
+                    {
+                        "id": "idea_<index> | constraint_<index>",
+                        "target": "initial_idea | manual_input",
+                        "title": "短标题",
+                        "content": "点击后追加到对应输入框的内容",
+                        "tags": ["标签"],
+                        "reason": "适配理由",
+                    }
+                ]
+            },
+        }
+
+    def _local_creation_basic_suggestions(self, basic: dict[str, Any], manual_input: str, count: int) -> list[dict[str, Any]]:
+        genre = str(basic.get("genre") or "类型小说")
+        reader = str(basic.get("target_reader") or "类型小说读者")
+        style = str(basic.get("style") or "清晰、有悬念")
+        tags = self._as_str_list(basic.get("tags")) or [genre]
+        seed = str(basic.get("initial_idea") or "主角从一次具体危机进入高压世界")
+        idea_templates = [
+            (
+                "旧案入口",
+                f"{seed}；开局让主角接触一件被压下的旧案，旧案同时暴露世界规则和第一位强阻力。",
+                ["开局钩子", self._pick(tags, 0, genre)],
+            ),
+            (
+                "规则漏洞",
+                f"主角发现{genre}世界里一条只对底层无效的隐藏规则，并用它换来第一次胜利和更大代价。",
+                ["规则反转", self._pick(tags, 1, genre)],
+            ),
+            (
+                "关系压力",
+                f"把主角最想保护的人放进制度缝隙里，让每次升级都同时带来关系误解和外部追捕。",
+                ["人物羁绊", "代价机制"],
+            ),
+            (
+                "升级阶梯",
+                f"设计一条从个人危机到城市级、势力级、时代级的升级阶梯，每一阶段都替换新的压迫来源。",
+                ["长篇容量", "卷纲支撑"],
+            ),
+        ]
+        constraint_templates = [
+            (
+                "压迫优先",
+                f"刷新抽卡时优先生成能持续压迫主角的制度、资源或身份规则，避免只写背景说明。",
+                ["抽卡约束", "世界规则"],
+            ),
+            (
+                "爽点绑定代价",
+                f"面向{reader}，每个爽点都要绑定一个新问题或后续代价，不能只靠外挂碾压。",
+                ["读者体验", "代价"],
+            ),
+            (
+                "保留风格",
+                f"输出保持{style}，但每张卡都要给出容易翻车的风险和可修改方向。",
+                ["风格约束", "风险提示"],
+            ),
+            (
+                "避开重复",
+                f"继续刷新时避开上一批已有的世界规则、主角入口和卖点表达，额外参考：{manual_input or '暂无额外约束'}。",
+                ["去重", "刷新"],
+            ),
+        ]
+        suggestions: list[dict[str, Any]] = []
+        for index, (title, content, item_tags) in enumerate(idea_templates, start=1):
+            suggestions.append(
+                {
+                    "id": f"idea_local_{index}",
+                    "target": "initial_idea",
+                    "title": title,
+                    "content": content,
+                    "tags": item_tags,
+                    "reason": "补足可进入世界观抽卡的主角入口、规则压力或长篇容量。",
+                    "source": "local_fallback",
+                }
+            )
+        for index, (title, content, item_tags) in enumerate(constraint_templates, start=1):
+            suggestions.append(
+                {
+                    "id": f"constraint_local_{index}",
+                    "target": "manual_input",
+                    "title": title,
+                    "content": content,
+                    "tags": item_tags,
+                    "reason": "作为抽卡约束传入后续逐卡生成，不会直接写入正式设定。",
+                    "source": "local_fallback",
+                }
+            )
+        return suggestions[: max(2, count)]
+
+    def _normalize_creation_basic_suggestions(
+        self,
+        suggestions: Any,
+        fallback: list[dict[str, Any]],
+        count: int,
+    ) -> list[dict[str, Any]]:
+        raw_items = suggestions if isinstance(suggestions, list) else fallback
+        normalized: list[dict[str, Any]] = []
+        allowed_targets = {"initial_idea", "manual_input"}
+        for index, item in enumerate(raw_items, start=1):
+            if not isinstance(item, dict):
+                continue
+            target = str(item.get("target") or ("initial_idea" if index % 2 else "manual_input"))
+            if target not in allowed_targets:
+                target = "initial_idea" if len(normalized) % 2 == 0 else "manual_input"
+            title = self._short(item.get("title"), 24) or ("想法建议" if target == "initial_idea" else "约束建议")
+            content = str(item.get("content") or item.get("description") or "").strip()
+            if not content:
+                continue
+            normalized.append(
+                {
+                    "id": str(item.get("id") or f"{target}_{index}"),
+                    "target": target,
+                    "title": title,
+                    "content": content,
+                    "tags": self._as_str_list(item.get("tags"))[:5],
+                    "reason": self._short(item.get("reason"), 140),
+                    "source": str(item.get("source") or "agent"),
+                }
+            )
+        targets = {item["target"] for item in normalized}
+        if not {"initial_idea", "manual_input"}.issubset(targets):
+            existing_ids = {item["id"] for item in normalized}
+            for item in fallback:
+                if item["target"] not in targets and item["id"] not in existing_ids:
+                    normalized.append(item)
+                    targets.add(item["target"])
+        return normalized[: max(2, count)]
+
+    def _dedupe_creation_basic_suggestions(
+        self,
+        suggestions: list[dict[str, Any]],
+        previous_suggestions: list[dict[str, Any]],
+        fallback: list[dict[str, Any]],
+        count: int,
+    ) -> list[dict[str, Any]]:
+        previous_keys = {
+            self._creation_basic_suggestion_key(item)
+            for item in previous_suggestions
+            if isinstance(item, dict) and self._creation_basic_suggestion_key(item)
+        }
+        if not previous_keys:
+            return suggestions[: max(2, count)]
+        result: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in suggestions:
+            key = self._creation_basic_suggestion_key(item)
+            if not key or key in previous_keys or key in seen:
+                continue
+            result.append(item)
+            seen.add(key)
+        for item in fallback:
+            key = self._creation_basic_suggestion_key(item)
+            if key and key not in previous_keys and key not in seen:
+                result.append(item)
+                seen.add(key)
+            if len(result) >= count:
+                break
+        return (result or suggestions)[: max(2, count)]
+
+    def _creation_basic_suggestion_key(self, item: dict[str, Any]) -> str:
+        return "||".join([str(item.get("target") or "").strip(), str(item.get("title") or "").strip(), str(item.get("content") or "").strip()])
+
     def _creation_session(self, db: Session, project_id: str, session_id: str) -> models.CreationSession:
         session = db.get(models.CreationSession, session_id)
         if session is None or session.project_id != project_id:
@@ -2884,6 +3963,48 @@ class StudioService:
             raise _bad_request("正典审批项不完整", {"missing": missing, "unknown": unknown})
         return CREATION_CANON_APPROVAL_SECTIONS
 
+    def _creation_worldview_agent_name(self) -> str:
+        return "creation_worldview_draw"
+
+    def _creation_worldview_system_prompt(self) -> str:
+        return load_catalog_prompt("creation_worldview_draw")
+
+    def _creation_worldview_runtime_strategy(self) -> dict[str, Any]:
+        legacy_prompt_chars = (
+            len(AGENT_SPECS_BY_NAME["creation_star"].prompt)
+            + len(load_catalog_prompt("core_conflict_system"))
+            + len(load_catalog_prompt("novel_constitution"))
+        )
+        dedicated_prompt_chars = len(self._creation_worldview_system_prompt())
+        return {
+            "selected": "dedicated_worldview_prompt",
+            "reason": "世界观抽卡只需要候选世界规则和冲突发动机种子；核心矛盾系统和小说宪法延后到用户选定世界观后生成。",
+            "legacy_total_prompt_chars": legacy_prompt_chars,
+            "dedicated_prompt_chars": dedicated_prompt_chars,
+            "comparison_basis": "prompt_chars_before_remote_call",
+        }
+
+    def _creation_protagonist_agent_name(self) -> str:
+        return "creation_protagonist_draw"
+
+    def _creation_protagonist_system_prompt(self) -> str:
+        return load_catalog_prompt("creation_protagonist_draw")
+
+    def _creation_protagonist_runtime_strategy(self) -> dict[str, Any]:
+        legacy_prompt_chars = (
+            len(AGENT_SPECS_BY_NAME["creation_star"].prompt)
+            + len(load_catalog_prompt("core_conflict_system"))
+            + len(load_catalog_prompt("novel_constitution"))
+        )
+        dedicated_prompt_chars = len(self._creation_protagonist_system_prompt())
+        return {
+            "selected": "dedicated_protagonist_prompt",
+            "reason": "主角人设抽卡只需要候选主角、能力代价、关系钩子和主角侧 conflict_seed；核心矛盾系统和小说宪法延后到用户确认立项种子后生成。",
+            "legacy_total_prompt_chars": legacy_prompt_chars,
+            "dedicated_prompt_chars": dedicated_prompt_chars,
+            "comparison_basis": "prompt_chars_before_remote_call",
+        }
+
     def _run_creation_star_draw_step(
         self,
         db: Session,
@@ -2944,12 +4065,27 @@ class StudioService:
             raise _bad_request("不支持的创作 Star 会话步骤", {"step": step})
         fallback["draw_id"] = draw_id
         fallback["prompt_snapshot"] = prompt_snapshot
+        if step == "worldview":
+            agent_name = self._creation_worldview_agent_name()
+            role = "世界观抽卡 Agent"
+            system_prompt = self._creation_worldview_system_prompt()
+            task = f"执行创作 Star 世界观逐卡抽卡。count={count} 时只输出本轮新增世界观候选；不要生成核心矛盾系统或小说宪法。"
+        elif step == "protagonist":
+            agent_name = self._creation_protagonist_agent_name()
+            role = "主角人设抽卡 Agent"
+            system_prompt = self._creation_protagonist_system_prompt()
+            task = f"执行创作 Star 主角人设逐卡抽卡。count={count} 时只输出本轮新增主角候选；不要生成核心矛盾系统或小说宪法。"
+        else:
+            agent_name = "creation_star"
+            role = AGENT_SPECS_BY_NAME["creation_star"].role
+            system_prompt = AGENT_SPECS_BY_NAME["creation_star"].prompt
+            task = f"执行解耦创作 Star 的 {step} 单步生成。count={count} 时只输出本轮新增候选。"
         payload, llm_meta = call_agent_json(
             llm_client=llm_client,
-            agent_name="creation_star",
-            role=AGENT_SPECS_BY_NAME["creation_star"].role,
-            system_prompt=AGENT_SPECS_BY_NAME["creation_star"].prompt,
-            task=f"执行解耦创作 Star 的 {step} 单步生成。count={count} 时只输出本轮新增候选。",
+            agent_name=agent_name,
+            role=role,
+            system_prompt=system_prompt,
+            task=task,
             context={
                 "project": serialize_project(project),
                 "request": request.model_dump(),
@@ -2965,6 +4101,10 @@ class StudioService:
         cards = payload.get("cards")
         if not isinstance(cards, list) or not cards:
             payload["cards"] = fallback["cards"]
+        if step == "worldview":
+            payload["cards"] = self._normalize_creation_worldview_cards(payload["cards"])
+        if step == "protagonist":
+            payload["cards"] = self._normalize_creation_protagonist_cards(payload["cards"])
         payload["step"] = payload.get("step") or step
         payload["draw_id"] = payload.get("draw_id") or draw_id
         payload["prompt_snapshot"] = payload.get("prompt_snapshot") or prompt_snapshot
@@ -2972,7 +4112,7 @@ class StudioService:
         self._record_agent_run(
             db,
             job,
-            "creation_star",
+            agent_name,
             payload,
             {"project": serialize_project(project), "request": request.model_dump(), "prompt_snapshot": prompt_snapshot},
         )
@@ -3208,6 +4348,31 @@ class StudioService:
             "所有输出都只是候选，用户确认后才允许写入正式设定集。"
         )
 
+    def _normalize_creation_worldview_cards(self, cards: list[Any]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for index, raw_card in enumerate(cards):
+            if not isinstance(raw_card, dict):
+                continue
+            card = dict(raw_card)
+            if not card.get("id"):
+                card["id"] = f"worldview_remote_{index + 1}"
+            if not card.get("core_rule") and card.get("core_world_rule"):
+                card["core_rule"] = card.get("core_world_rule")
+            if not card.get("core_world_rule") and card.get("core_rule"):
+                card["core_world_rule"] = card.get("core_rule")
+            if not card.get("conflict_engine_seed") and card.get("conflict_hook"):
+                card["conflict_engine_seed"] = card.get("conflict_hook")
+            if not card.get("conflict_hook") and card.get("conflict_engine_seed"):
+                card["conflict_hook"] = card.get("conflict_engine_seed")
+            if not card.get("selling_point") and card.get("one_sentence_pitch"):
+                card["selling_point"] = card.get("one_sentence_pitch")
+            if not card.get("risk") and card.get("writing_risk"):
+                card["risk"] = card.get("writing_risk")
+            if not card.get("writing_risk") and card.get("risk"):
+                card["writing_risk"] = card.get("risk")
+            normalized.append(card)
+        return normalized
+
     def _creation_worldview_output_schema(self) -> dict[str, Any]:
         return {
             "cards": [
@@ -3215,20 +4380,90 @@ class StudioService:
                     "id": "worldview_<draw>_<index>",
                     "title": "8-18 字，有网文立项感的世界观卡标题",
                     "summary": "一句话概括这个世界观",
+                    "one_sentence_pitch": "一句话看出题材组合、核心规则、社会压力、主角入口和爽点来源",
                     "description": "说明世界基础设定、核心规则、社会压力和主角处境",
                     "genre_mix": ["类型组合 1", "类型组合 2"],
+                    "core_world_rule": "这个世界最核心、最能持续制造剧情的运行规则",
                     "core_rule": "这个世界最核心、最能持续制造剧情的规则",
                     "social_pressure": "这个世界如何压迫主角或普通人",
                     "power_or_resource_system": "力量、资源、身份、系统、金手指或规则机制",
-                    "main_conflict_seed": "可以发展成长篇主线的核心矛盾",
+                    "conflict_engine_seed": "冲突发动机种子：可以在选定世界观后继续发展为核心矛盾系统的原始压力",
                     "protagonist_entry": "主角从哪里切入这个世界，为什么非他不可",
                     "long_form_potential": "为什么它能支撑长篇、多卷、多阶段升级",
+                    "key_entities": ["关键组织、资源、地点、制度或禁忌"],
+                    "rules_not_to_break": ["后续写作不能随便破坏的世界边界"],
                     "reader_hooks": ["爽点 1", "爽点 2", "爽点 3"],
                     "tags": ["标签 1", "标签 2", "标签 3", "标签 4"],
                     "selling_point": "面向目标读者的核心卖点",
-                    "conflict_hook": "能驱动下一步主角行动的冲突钩子",
+                    "conflict_hook": "兼容字段，内容等同或略短于 conflict_engine_seed",
+                    "writing_risk": "这个设定写作时最容易翻车的问题",
                     "risk": "这个设定写作时最容易翻车的问题",
                     "revision_hint": "用户手动修改时最值得调整的方向",
+                    "difference_from_previous_batch": "与上一批候选在核心规则、社会压迫、主角入口或爽点机制上的差异",
+                }
+            ]
+        }
+
+    def _normalize_creation_protagonist_cards(self, cards: list[Any]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for index, raw_card in enumerate(cards):
+            if not isinstance(raw_card, dict):
+                continue
+            card = dict(raw_card)
+            if not card.get("id"):
+                card["id"] = f"protagonist_remote_{index + 1}"
+            if not card.get("long_term_goal") and card.get("long_term_desire"):
+                card["long_term_goal"] = card.get("long_term_desire")
+            if not card.get("long_term_desire") and card.get("long_term_goal"):
+                card["long_term_desire"] = card.get("long_term_goal")
+            if not card.get("character_arc") and card.get("growth_arc"):
+                card["character_arc"] = card.get("growth_arc")
+            if not card.get("growth_arc") and card.get("character_arc"):
+                card["growth_arc"] = card.get("character_arc")
+            relationship_hooks = card.get("relationship_hooks")
+            if not card.get("relationship_hook") and isinstance(relationship_hooks, list):
+                card["relationship_hook"] = "；".join(str(item) for item in relationship_hooks if item)
+            if not isinstance(relationship_hooks, list) and card.get("relationship_hook"):
+                card["relationship_hooks"] = [str(card.get("relationship_hook"))]
+            if not card.get("risk") and card.get("writing_risk"):
+                card["risk"] = card.get("writing_risk")
+            if not card.get("writing_risk") and card.get("risk"):
+                card["writing_risk"] = card.get("risk")
+            if not card.get("summary") and card.get("one_sentence_pitch"):
+                card["summary"] = card.get("one_sentence_pitch")
+            normalized.append(card)
+        return normalized
+
+    def _creation_protagonist_output_schema(self) -> dict[str, Any]:
+        return {
+            "cards": [
+                {
+                    "id": "protagonist_<draw>_<index>",
+                    "name": "主角名",
+                    "title": "人设卡标题",
+                    "one_sentence_pitch": "一句话说明这个主角为什么适合已选世界观",
+                    "identity": "开局身份",
+                    "opening_situation": "开局处境",
+                    "world_rule_connection": "主角与世界核心规则的咬合点",
+                    "long_term_desire": "长期欲望",
+                    "long_term_goal": "兼容字段，内容等同或略短于 long_term_desire",
+                    "immediate_goal": "开局可行动目标",
+                    "inner_wound": "内在伤口",
+                    "ability": "能力或优势",
+                    "ability_cost": "能力代价",
+                    "weakness": "弱点",
+                    "secret": "秘密",
+                    "growth_arc": "成长弧",
+                    "character_arc": "兼容字段，内容等同或略短于 growth_arc",
+                    "relationship_hooks": ["可制造冲突的关系钩子"],
+                    "relationship_hook": "兼容字段，内容可从 relationship_hooks 中提炼",
+                    "conflict_seed": "可进入下一阶段核心矛盾系统的主角侧种子，但不要展开成完整核心矛盾系统",
+                    "reader_satisfaction": "读者爽点来源",
+                    "long_form_potential": "长篇成长空间",
+                    "writing_risk": "写作风险",
+                    "risk": "兼容字段，内容等同或略短于 writing_risk",
+                    "revision_hint": "修改建议",
+                    "tags": ["标签 1", "标签 2", "标签 3"],
                 }
             ]
         }
@@ -3250,6 +4485,24 @@ class StudioService:
             )
         return "\n".join(pieces)
 
+    def _creation_previous_protagonists_summary(self, previous_cards: list[dict[str, Any]] | None) -> str:
+        if not previous_cards:
+            return "无上一批候选。"
+        pieces = []
+        for card in previous_cards[-6:]:
+            pieces.append(
+                " / ".join(
+                    [
+                        self._short(card.get("name") or card.get("title"), 36),
+                        f"身份={self._short(card.get('identity'), 52)}",
+                        f"欲望={self._short(card.get('long_term_desire') or card.get('long_term_goal'), 52)}",
+                        f"代价={self._short(card.get('ability_cost'), 52)}",
+                        f"关系={self._short(card.get('relationship_hook'), 52)}",
+                    ]
+                )
+            )
+        return "\n".join(pieces)
+
     def _creation_star_prompt_snapshot(
         self,
         request: CreationStarDrawRequest,
@@ -3264,9 +4517,22 @@ class StudioService:
             "world_rules": "重抽世界观规则表：必须读取基本信息、已选世界观和主角人设，只调整规则表，不破坏已确认的主线方向。",
             "title": "生成书名抽卡：必须读取基本信息、已选世界观、已选主角、项目总设定表和世界观规则表，提供多种平台感书名方向。",
         }
+        if request.step == "worldview":
+            agent_name = self._creation_worldview_agent_name()
+            prompt_id = "creation_worldview_draw"
+            system_prompt = self._creation_worldview_system_prompt()
+        elif request.step == "protagonist":
+            agent_name = self._creation_protagonist_agent_name()
+            prompt_id = "creation_protagonist_draw"
+            system_prompt = self._creation_protagonist_system_prompt()
+        else:
+            agent_name = "creation_star"
+            prompt_id = ""
+            system_prompt = AGENT_SPECS_BY_NAME["creation_star"].prompt
         snapshot = {
-            "agent_name": "creation_star",
-            "system_prompt": AGENT_SPECS_BY_NAME["creation_star"].prompt,
+            "agent_name": agent_name,
+            "prompt_id": prompt_id,
+            "system_prompt": system_prompt,
             "step_prompt": step_prompts.get(request.step, "生成创作 Star 候选卡。"),
             "context_summary": context_summary,
             "required_previous_data": {
@@ -3280,6 +4546,7 @@ class StudioService:
         if request.step == "worldview":
             snapshot["previous_cards_summary"] = self._creation_previous_worldviews_summary(previous_cards)
             snapshot["output_schema"] = self._creation_worldview_output_schema()
+            snapshot["runtime_strategy"] = self._creation_worldview_runtime_strategy()
             snapshot["generation_settings"] = {
                 "temperature": 0.9,
                 "top_p": 0.95,
@@ -3293,6 +4560,25 @@ class StudioService:
                 "不能使用与上一批相同的社会压迫机制",
                 "不能使用与上一批相同的主角切入方式",
                 "不能只替换名词或地名",
+            ]
+        if request.step == "protagonist":
+            snapshot["previous_cards_summary"] = self._creation_previous_protagonists_summary(previous_cards)
+            snapshot["output_schema"] = self._creation_protagonist_output_schema()
+            snapshot["runtime_strategy"] = self._creation_protagonist_runtime_strategy()
+            snapshot["generation_settings"] = {
+                "temperature": 0.88,
+                "top_p": 0.95,
+                "max_tokens": 3000,
+                "count": request.count,
+                "presence_penalty": 0.35,
+                "frequency_penalty": 0.25,
+            }
+            snapshot["dedupe_rules"] = [
+                "不能使用与上一批相同的开局身份",
+                "不能使用与上一批相同的长期欲望",
+                "不能使用与上一批相同的能力代价",
+                "不能使用与上一批相同的关系钩子",
+                "不能只替换姓名或职业",
             ]
         return snapshot
 
@@ -3401,21 +4687,26 @@ class StudioService:
             long_form_potential = self._pick(self._random_cycle(long_form_engines, count, rng), index, "规则逐卷升级")
             core_rule = f"{pressure}不是背景，而是会惩罚越界者的硬规则；主角必须找到规则漏洞才能上升。"
             social_pressure = f"{pressure}把普通人的升学、工作、资源和亲密关系绑定在同一套评价体系里。"
-            main_conflict_seed = f"主角想夺回选择权，但维护{pressure}的组织会不断升级封锁与污名。"
+            conflict_engine_seed = f"主角想夺回选择权，但维护{pressure}的组织会不断升级封锁与污名。"
             idea_hint = self._short(basic.get("initial_idea"), 42)
+            one_sentence_pitch = f"{genre}/{subgenre}混合{tone}，以{pressure}作为硬规则，主角从规则漏洞切入并持续制造{tag_a}爽点。"
             cards.append(
                 {
                     "id": f"worldview_{draw_key}_{index + 1}",
                     "title": title if not manual_input else f"{title}：{manual_input[:18]}",
                     "summary": f"{genre}/{subgenre}框架下，{pressure}变成可见规则，主角用非常规路径撬动旧秩序。",
+                    "one_sentence_pitch": one_sentence_pitch,
                     "description": f"{description} 类型基底：{basic.get('channel')}/{genre}/{subgenre}；核心爽点围绕“{tag_a}”展开，主要社会压力是{pressure}。{('初始脑洞：' + idea_hint + '。') if idea_hint else ''}",
                     "genre_mix": list(dict.fromkeys([genre, subgenre, tag_a, tone]))[:4],
+                    "core_world_rule": core_rule,
                     "core_rule": core_rule,
                     "social_pressure": social_pressure,
                     "power_or_resource_system": resource_system,
-                    "main_conflict_seed": main_conflict_seed,
+                    "conflict_engine_seed": conflict_engine_seed,
                     "protagonist_entry": protagonist_entry,
                     "long_form_potential": long_form_potential,
+                    "key_entities": [f"{pressure}监管者", f"{subgenre}资源", "主角入口组织"],
+                    "rules_not_to_break": ["胜利必须有代价", f"{pressure}必须能持续影响资源分配", "新规则必须能追溯到世界基础设定"],
                     "reader_hooks": [
                         f"{tag_a}带来的即时反馈",
                         f"主角钻破{pressure}规则的反差爽点",
@@ -3423,9 +4714,11 @@ class StudioService:
                     ],
                     "tags": list(dict.fromkeys([tag_a, tag_b, genre, subgenre]))[:5],
                     "selling_point": f"把{genre}的熟悉期待、{tone}的阅读节奏和{tag_a}的持续反馈绑定到可升级的社会规则里。",
-                    "conflict_hook": f"主角越接近上层资源，越会发现{pressure}本身就是阻碍。",
+                    "conflict_hook": conflict_engine_seed,
+                    "writing_risk": f"需要尽早明确{tag_a}的代价和边界，避免只靠设定名词堆砌。",
                     "risk": f"需要尽早明确{tag_a}的代价和边界，避免只靠设定名词堆砌。",
                     "revision_hint": f"可重点调整{pressure}的表现形式、主角切入身份，或把{tag_b}强化成第一卷主钩子。",
+                    "difference_from_previous_batch": f"本卡以{pressure}作为压迫核心，并以{protagonist_entry[:24]}作为主角入口。",
                     "draw_id": draw_id,
                     "source": "agent",
                 }
@@ -3474,19 +4767,40 @@ class StudioService:
             relationship_hook = self._pick(self._random_cycle(relationship_angles, count, rng), index, relationship_angles[0])
             if manual_input:
                 identity = f"{identity}，同时背负“{manual_input[:18]}”"
+            opening_situation = f"开局被“{worldview_title}”的核心规则卡住，必须用一次不可回头的行动证明自己仍有资格。"
+            world_rule_connection = f"{name}的身份、能力或秘密与“{worldview_hook[:48]}”直接相连，越行动越暴露世界规则的漏洞。"
+            ability_cost = "每次使用优势都会增加身份暴露、关系误解或资源债务。"
+            conflict_seed = f"{name}想完成“{goal}”，但“{worldview_hook[:44]}”会持续把他推向更高代价。"
+            reader_satisfaction = f"爽点来自{name}用“{tag}”反向拆解世界规则，而不是单纯变强碾压。"
+            long_form_potential = "能力代价、身份升级、秘密揭露和关系重组可以按卷推进。"
             cards.append(
                 {
                     "id": f"protagonist_{draw_key}_{index + 1}",
                     "name": name,
+                    "title": identity,
+                    "one_sentence_pitch": f"{name}是被“{worldview_title}”筛到边缘的人，却拥有反向理解规则的入口。",
                     "identity": identity,
+                    "opening_situation": opening_situation,
+                    "world_rule_connection": world_rule_connection,
+                    "long_term_desire": f"{goal}，并正面撞上“{worldview_hook[:36]}”。",
                     "summary": f"{name}生在“{worldview_title}”的夹缝中，开局资源不足但能看见旧秩序的破绽；人物卖点要回应“{tag}”。",
                     "long_term_goal": f"{goal}，并正面撞上“{worldview_hook[:36]}”。",
+                    "immediate_goal": "先夺回一个被世界规则剥夺的资格、亲密关系或公开解释权。",
                     "inner_wound": wound,
                     "ability": ability + "。",
+                    "ability_cost": ability_cost,
                     "weakness": "不愿求助，容易把所有代价压到自己身上。",
                     "secret": "与世界观核心旧案存在未公开关联。",
+                    "growth_arc": f"从被“{worldview_title}”筛掉的人，成长为重新定义规则的人。",
                     "character_arc": f"从被“{worldview_title}”筛掉的人，成长为重新定义规则的人。",
+                    "relationship_hooks": [relationship_hook + "。"],
                     "relationship_hook": relationship_hook + "。",
+                    "conflict_seed": conflict_seed,
+                    "reader_satisfaction": reader_satisfaction,
+                    "long_form_potential": long_form_potential,
+                    "writing_risk": "需要让人物欲望先于设定展示，避免主角沦为解释世界规则的工具。",
+                    "risk": "需要让人物欲望先于设定展示，避免主角沦为解释世界规则的工具。",
+                    "revision_hint": "可重点调整私人欲望、能力代价或关键关系，让主角更像人而不是设定入口。",
                     "tags": list(dict.fromkeys([*basic.get("tags", [])[:3], "成长", "反转"])),
                     "source_worldview_id": worldview.get("id"),
                     "draw_id": draw_id,
@@ -5738,6 +7052,447 @@ class StudioService:
             row.character_arc = item.get("character_arc", row.character_arc)
             row.updated_reason = f"Agent workflow {job_id}"
             self._ensure_graph_node(db, project_id, "character", row.id, row.name, row.importance_level, row.importance_score)
+            db.flush()
+            self._sync_canon_ref(
+                db,
+                project_id,
+                "character",
+                row,
+                source_agent="chapter_writing",
+                source_job_id=job_id,
+                change_reason=row.updated_reason,
+            )
+
+    def _folder_node(self, node_id: str, parent_id: str | None, title: str, sort_order: int) -> dict[str, Any]:
+        return {
+            "id": node_id,
+            "project_id": "",
+            "parent_id": parent_id,
+            "node_type": "folder",
+            "ref_type": "folder",
+            "ref_id": node_id.removeprefix("folder:"),
+            "title": title,
+            "sort_order": sort_order,
+            "status": "active",
+            "importance_level": "medium",
+            "activity_status": "active",
+            "metadata": {},
+            "content": None,
+            "created_at": None,
+            "updated_at": None,
+        }
+
+    def _normalize_canon_ref_type(self, ref_type: str) -> str:
+        normalized = ref_type.strip().replace("-", "_").lower()
+        mapping = {
+            "characters": "character",
+            "story_character": "character",
+            "entities": "entity",
+            "story_entity": "entity",
+            "world_facts": "world_fact",
+            "world_fact": "world_fact",
+            "foreshadowing_items": "foreshadowing",
+            "foreshadowing": "foreshadowing",
+        }
+        normalized = mapping.get(normalized, normalized)
+        if normalized not in {"character", "entity", "world_fact", "foreshadowing"}:
+            raise _bad_request("不支持的设定类型", {"ref_type": ref_type})
+        return normalized
+
+    def _importance_order(self, value: str) -> int:
+        return {"core": 0, "major": 1, "medium": 2, "minor": 3}.get(value, 9)
+
+    def _text_order(self, value: str) -> int:
+        return sum(ord(char) for char in value[:8]) % 100
+
+    def _importance_label(self, value: str) -> str:
+        return {"core": "核心", "major": "重要", "medium": "中等", "minor": "次要"}.get(value, value or "中等")
+
+    def _entity_type_label(self, value: str) -> str:
+        labels = {
+            "location": "地点",
+            "organization": "组织",
+            "item": "物品",
+            "event": "事件",
+            "concept": "概念",
+            "rule": "规则",
+            "clue": "线索",
+            "timeline_event": "时间线事件",
+        }
+        return labels.get(value, value or "实体")
+
+    def _world_fact_category_label(self, value: str) -> str:
+        labels = {
+            "geography": "地理",
+            "history": "历史",
+            "magic_rule": "能力/规则",
+            "technology": "技术",
+            "politics": "政治",
+            "culture": "文化",
+            "economy": "经济",
+            "religion": "宗教",
+            "organization": "组织",
+            "timeline": "时间线",
+            "taboo": "禁忌",
+        }
+        return labels.get(value, value or "事实")
+
+    def _foreshadowing_status_label(self, value: str) -> str:
+        labels = {"planned": "计划中", "planted": "已埋设", "paid_off": "已回收", "abandoned": "已废弃", "candidate": "候选"}
+        return labels.get(value, value or "伏笔")
+
+    def _canon_rows_for_type(self, db: Session, project_id: str, ref_type: str) -> list[Any]:
+        ref_type = self._normalize_canon_ref_type(ref_type)
+        if ref_type == "character":
+            return db.query(models.Character).filter(models.Character.project_id == project_id, models.Character.status != "archived").all()
+        if ref_type == "entity":
+            return db.query(models.StoryEntity).filter(models.StoryEntity.project_id == project_id, models.StoryEntity.current_status != "archived").all()
+        if ref_type == "world_fact":
+            return db.query(models.WorldFact).filter(models.WorldFact.project_id == project_id).all()
+        if ref_type == "foreshadowing":
+            return db.query(models.ForeshadowingItem).filter(models.ForeshadowingItem.project_id == project_id, models.ForeshadowingItem.payoff_status != "abandoned").all()
+        return []
+
+    def _similarity_score(self, left: str, right: str) -> float:
+        left_norm = "".join(str(left or "").lower().split())
+        right_norm = "".join(str(right or "").lower().split())
+        if not left_norm or not right_norm:
+            return 0.0
+        if left_norm == right_norm:
+            return 1.0
+        if left_norm in right_norm or right_norm in left_norm:
+            return 0.86
+        return difflib.SequenceMatcher(None, left_norm, right_norm).ratio()
+
+    def _merge_canon_content(self, target: dict[str, Any], source: dict[str, Any], ref_type: str) -> dict[str, Any]:
+        merged = dict(target)
+        for key, value in source.items():
+            if key in {"id", "project_id", "created_at", "updated_at"}:
+                continue
+            current = merged.get(key)
+            if isinstance(current, list) or isinstance(value, list):
+                merged[key] = list(dict.fromkeys([*(current if isinstance(current, list) else ([] if current in (None, "") else [current])), *(value if isinstance(value, list) else ([] if value in (None, "") else [value]))]))
+            elif current in (None, "") and value not in (None, ""):
+                merged[key] = value
+            elif key in {"summary", "description", "content", "planned_payoff"} and value and value != current:
+                merged[key] = f"{current}\n\n合并补充：{value}".strip()
+            elif key in {"importance_score"}:
+                merged[key] = max(int(current or 0), int(value or 0))
+            elif key in {"confidence"}:
+                merged[key] = max(float(current or 0), float(value or 0))
+        merged["updated_reason"] = "重复项合并" if ref_type == "character" else merged.get("updated_reason", "重复项合并")
+        return merged
+
+    def _render_canon_markdown(self, package: dict[str, Any]) -> str:
+        project = package["project"]
+        lines = [f"# {project['title']} 正典包", "", f"- 题材：{project.get('genre', '')}", f"- 目标读者：{project.get('target_reader', '')}", f"- 导出时间：{package.get('exported_at')}", ""]
+        if package.get("story_bible"):
+            bible = package["story_bible"]
+            lines.extend(["## 故事圣经", "", bible.get("world_setting", ""), "", f"主线冲突：{bible.get('main_conflict', '')}", ""])
+        sections = [
+            ("人物", "characters", "name", "summary"),
+            ("实体", "entities", "name", "description"),
+            ("世界事实", "world_facts", "title", "content"),
+            ("伏笔", "foreshadowing", "content", "planned_payoff"),
+        ]
+        for title, key, name_field, body_field in sections:
+            lines.extend([f"## {title}", ""])
+            for item in package.get(key, []):
+                lines.extend([f"### {item.get(name_field, '未命名')}", "", str(item.get(body_field, "")), ""])
+        lines.extend(["## 版本索引", ""])
+        for version in package.get("versions", []):
+            lines.append(f"- {version['ref_type']}:{version['ref_id']} v{version['version_no']} · {version.get('source_agent', '')} · {version.get('change_reason', '')}")
+        lines.extend(["", "## 候选审计", ""])
+        for proposal in package.get("proposals", []):
+            lines.append(f"- {proposal['operation']} {proposal['target_type']} · {proposal['approval_status']} · {proposal.get('reason', '')}")
+        return "\n".join(lines).strip() + "\n"
+
+    def _locked_fields_for_ref(self, db: Session, project_id: str, ref_type: str, ref_id: str) -> list[str]:
+        node = db.query(models.CanonNode).filter(models.CanonNode.project_id == project_id, models.CanonNode.ref_type == ref_type, models.CanonNode.ref_id == ref_id).first()
+        if not node:
+            return []
+        return list(loads(node.metadata_json, {}).get("locked_fields") or [])
+
+    def _locked_field_changes(self, locked_fields: list[str], before: dict[str, Any], after: dict[str, Any]) -> list[str]:
+        changed = []
+        for field in locked_fields:
+            if field in after and json.dumps(before.get(field), ensure_ascii=False, sort_keys=True) != json.dumps(after.get(field), ensure_ascii=False, sort_keys=True):
+                changed.append(field)
+        return changed
+
+    def _guard_locked_fields_or_propose(
+        self,
+        db: Session,
+        project_id: str,
+        ref_type: str,
+        ref_id: str,
+        source_agent: str,
+        before: dict[str, Any],
+        after: dict[str, Any],
+        *,
+        source_chapter_id: str | None = None,
+        reason: str = "锁定字段保护",
+    ) -> None:
+        if source_agent in {"manual", "user", "rollback"}:
+            return
+        locked = self._locked_fields_for_ref(db, project_id, ref_type, ref_id)
+        changed = self._locked_field_changes(locked, before, after)
+        if not changed:
+            return
+        proposal = self._create_canon_proposal(
+            db,
+            project_id,
+            ref_type,
+            after,
+            target_id=ref_id,
+            operation="update",
+            before=before,
+            source_chapter_id=source_chapter_id,
+            source_agent=source_agent,
+            confidence=0.8,
+            reason=f"{reason}：{', '.join(changed)}",
+        )
+        db.commit()
+        raise _conflict("设定字段已锁定，Agent 更新已转入候选变更池", {"locked_fields": changed, "proposal_id": proposal.id})
+
+    def _canon_ref_content(self, ref_type: str, row: Any) -> dict[str, Any]:
+        if ref_type == "character":
+            return serialize_character(row)
+        if ref_type == "entity":
+            return serialize_story_entity(row)
+        if ref_type == "world_fact":
+            return serialize_world_fact(row)
+        if ref_type == "foreshadowing":
+            return serialize_foreshadowing_item(row)
+        raise _bad_request("不支持的设定类型", {"ref_type": ref_type})
+
+    def _canon_ref_title(self, ref_type: str, content: dict[str, Any]) -> str:
+        if ref_type == "world_fact":
+            return str(content.get("title") or "未命名世界观事实")
+        if ref_type == "foreshadowing":
+            return str(content.get("content") or "未命名伏笔")[:48]
+        return str(content.get("name") or content.get("title") or "未命名设定")
+
+    def _canon_ref_row(self, db: Session, project_id: str, ref_type: str, ref_id: str) -> Any:
+        model_by_type = {
+            "character": models.Character,
+            "entity": models.StoryEntity,
+            "world_fact": models.WorldFact,
+            "foreshadowing": models.ForeshadowingItem,
+        }
+        model = model_by_type[ref_type]
+        row = db.get(model, ref_id)
+        if row is None or row.project_id != project_id:
+            raise _not_found("设定不存在")
+        return row
+
+    def _apply_canon_content(self, row: Any, ref_type: str, content: dict[str, Any]) -> None:
+        if ref_type == "character":
+            for field in ("name", "role", "role_type", "importance_level", "importance_score", "summary", "appearance", "personality", "character_arc", "current_status", "updated_reason", "status", "source"):
+                if field in content and hasattr(row, field):
+                    setattr(row, field, content[field])
+            for field in ("aliases", "goals", "motivations", "secrets", "abilities", "weaknesses", "related_entity_ids", "related_character_ids", "relations"):
+                if field in content:
+                    setattr(row, f"{field}_json", dumps(content[field] or []))
+            return
+        if ref_type == "entity":
+            for field in ("entity_type", "name", "importance_level", "importance_score", "description", "current_status", "source"):
+                if field in content and hasattr(row, field):
+                    setattr(row, field, content[field])
+            return
+        if ref_type == "world_fact":
+            for field in ("category", "title", "content", "importance_level", "importance_score", "confidence", "source_chapter_id"):
+                if field in content and hasattr(row, field):
+                    setattr(row, field, content[field])
+            if "related_entity_ids" in content:
+                row.related_entity_ids_json = dumps(content.get("related_entity_ids") or [])
+            return
+        if ref_type == "foreshadowing":
+            for field in ("content", "planted_chapter_id", "planned_payoff_chapter_id", "actual_payoff_chapter_id", "planned_payoff", "payoff_status", "importance_level", "importance_score", "source"):
+                if field in content and hasattr(row, field):
+                    setattr(row, field, content[field])
+            if "related_character_ids" in content:
+                row.related_character_ids_json = dumps(content.get("related_character_ids") or [])
+            if "related_entity_ids" in content:
+                row.related_entity_ids_json = dumps(content.get("related_entity_ids") or [])
+
+    def _ensure_canon_node(
+        self,
+        db: Session,
+        project_id: str,
+        ref_type: str,
+        ref_id: str,
+        title: str,
+        importance_level: str,
+        activity_status: str,
+        metadata: dict[str, Any] | None = None,
+        *,
+        parent_id: str | None = None,
+    ) -> models.CanonNode:
+        row = db.query(models.CanonNode).filter(models.CanonNode.project_id == project_id, models.CanonNode.ref_type == ref_type, models.CanonNode.ref_id == ref_id).first()
+        if row is None:
+            row = models.CanonNode(id=generate_id("cnd"), project_id=project_id, ref_type=ref_type, ref_id=ref_id, title=title)
+            db.add(row)
+        existing_metadata = loads(row.metadata_json, {})
+        if parent_id and not parent_id.startswith("folder:"):
+            row.parent_id = parent_id
+        elif parent_id:
+            existing_metadata["display_parent_id"] = parent_id
+        row.node_type = "item"
+        row.title = title
+        row.importance_level = importance_level or "medium"
+        row.activity_status = activity_status or "active"
+        merged_metadata = {**existing_metadata, **(metadata or {})}
+        row.metadata_json = dumps(merged_metadata)
+        row.updated_at = utcnow()
+        return row
+
+    def _next_canon_version_no(self, db: Session, project_id: str, ref_type: str, ref_id: str) -> int:
+        current = (
+            db.query(func.max(models.CanonVersion.version_no))
+            .filter(models.CanonVersion.project_id == project_id, models.CanonVersion.ref_type == ref_type, models.CanonVersion.ref_id == ref_id)
+            .scalar()
+        )
+        return int(current or 0) + 1
+
+    def _record_canon_version(
+        self,
+        db: Session,
+        project_id: str,
+        ref_type: str,
+        ref_id: str,
+        content: dict[str, Any],
+        *,
+        source_chapter_id: str | None = None,
+        source_job_id: str | None = None,
+        source_agent: str = "manual",
+        change_reason: str = "",
+        confidence: float = 1.0,
+    ) -> models.CanonVersion:
+        version = models.CanonVersion(
+            id=generate_id("cvn"),
+            project_id=project_id,
+            ref_type=ref_type,
+            ref_id=ref_id,
+            version_no=self._next_canon_version_no(db, project_id, ref_type, ref_id),
+            content_json=dumps(content),
+            source_chapter_id=source_chapter_id,
+            source_job_id=source_job_id,
+            source_agent=source_agent,
+            change_reason=change_reason,
+            confidence=float(confidence),
+        )
+        db.add(version)
+        db.flush()
+        return version
+
+    def _sync_canon_ref(
+        self,
+        db: Session,
+        project_id: str,
+        ref_type: str,
+        row: Any,
+        *,
+        source_chapter_id: str | None = None,
+        source_job_id: str | None = None,
+        source_agent: str = "manual",
+        change_reason: str = "",
+        confidence: float | None = None,
+    ) -> models.CanonVersion:
+        content = self._canon_ref_content(ref_type, row)
+        self._ensure_canon_node(
+            db,
+            project_id,
+            ref_type,
+            row.id,
+            self._canon_ref_title(ref_type, content),
+            str(content.get("importance_level") or "medium"),
+            str(content.get("current_status") or content.get("payoff_status") or "active"),
+            {"source_agent": source_agent, "source_chapter_id": source_chapter_id},
+        )
+        return self._record_canon_version(
+            db,
+            project_id,
+            ref_type,
+            row.id,
+            content,
+            source_chapter_id=source_chapter_id,
+            source_job_id=source_job_id,
+            source_agent=source_agent,
+            change_reason=change_reason,
+            confidence=float(confidence if confidence is not None else content.get("confidence") or 1.0),
+        )
+
+    def _create_canon_proposal(
+        self,
+        db: Session,
+        project_id: str,
+        target_type: str,
+        after: dict[str, Any],
+        *,
+        target_id: str | None = None,
+        operation: str = "create",
+        before: dict[str, Any] | None = None,
+        source_chapter_id: str | None = None,
+        source_job_id: str | None = None,
+        source_agent: str = "agent",
+        confidence: float = 0.8,
+        reason: str = "",
+    ) -> models.CanonChangeProposal:
+        proposal = models.CanonChangeProposal(
+            id=generate_id("cpr"),
+            project_id=project_id,
+            target_type=self._normalize_canon_ref_type(target_type),
+            target_id=target_id,
+            operation=operation,
+            before_json=dumps(before or {}),
+            after_json=dumps(after),
+            source_chapter_id=source_chapter_id,
+            source_job_id=source_job_id,
+            source_agent=source_agent,
+            confidence=float(confidence),
+            reason=reason,
+        )
+        db.add(proposal)
+        db.flush()
+        return proposal
+
+    def _canon_health(self, db: Session, project_id: str) -> dict[str, Any]:
+        characters = db.query(models.Character).filter(models.Character.project_id == project_id, models.Character.status != "archived").count()
+        entities = db.query(models.StoryEntity).filter(models.StoryEntity.project_id == project_id, models.StoryEntity.current_status != "archived").count()
+        world_facts = db.query(models.WorldFact).filter(models.WorldFact.project_id == project_id).count()
+        foreshadowing = db.query(models.ForeshadowingItem).filter(models.ForeshadowingItem.project_id == project_id, models.ForeshadowingItem.payoff_status != "abandoned").count()
+        versioned_refs = {
+            (row.ref_type, row.ref_id)
+            for row in db.query(models.CanonVersion.ref_type, models.CanonVersion.ref_id).filter(models.CanonVersion.project_id == project_id).all()
+        }
+        official_refs: set[tuple[str, str]] = set()
+        official_refs.update(("character", row.id) for row in db.query(models.Character.id).filter(models.Character.project_id == project_id, models.Character.status != "archived").all())
+        official_refs.update(("entity", row.id) for row in db.query(models.StoryEntity.id).filter(models.StoryEntity.project_id == project_id, models.StoryEntity.current_status != "archived").all())
+        official_refs.update(("world_fact", row.id) for row in db.query(models.WorldFact.id).filter(models.WorldFact.project_id == project_id).all())
+        official_refs.update(("foreshadowing", row.id) for row in db.query(models.ForeshadowingItem.id).filter(models.ForeshadowingItem.project_id == project_id, models.ForeshadowingItem.payoff_status != "abandoned").all())
+        pending = db.query(models.CanonChangeProposal).filter(models.CanonChangeProposal.project_id == project_id, models.CanonChangeProposal.approval_status == "pending").count()
+        low_confidence_facts = db.query(models.WorldFact).filter(models.WorldFact.project_id == project_id, models.WorldFact.confidence < 0.7).count()
+        low_confidence_proposals = db.query(models.CanonChangeProposal).filter(models.CanonChangeProposal.project_id == project_id, models.CanonChangeProposal.approval_status == "pending", models.CanonChangeProposal.confidence < 0.7).count()
+        return {
+            "official_count": len(official_refs),
+            "versioned_count": len(official_refs.intersection(versioned_refs)),
+            "unversioned_count": len(official_refs.difference(versioned_refs)),
+            "pending_proposal_count": pending,
+            "low_confidence_count": low_confidence_facts + low_confidence_proposals,
+            "conflict_count": 0,
+            "by_type": {
+                "characters": characters,
+                "entities": entities,
+                "world_facts": world_facts,
+                "foreshadowing": foreshadowing,
+            },
+            "recommendations": [
+                "优先审批候选设定，避免正文生成读取到未确认事实。",
+                "低置信度设定建议补充来源章节或标记为待确认。",
+                "核心人物和世界规则建议锁定后再进入批量正文生成。",
+            ],
+        }
 
     def _persist_canon_updates(self, db: Session, project_id: str, chapter_id: str | None, updates: dict[str, Any]) -> None:
         for item in updates.get("character_updates", []):
@@ -5746,12 +7501,40 @@ class StudioService:
             if row:
                 row.updated_reason = item.get("updated_reason", row.updated_reason)
                 row.last_seen_chapter_id = chapter_id
+                self._sync_canon_ref(
+                    db,
+                    project_id,
+                    "character",
+                    row,
+                    source_chapter_id=chapter_id,
+                    source_agent="canon_curator",
+                    change_reason=row.updated_reason,
+                )
         for item in updates.get("entity_updates", []):
             entity = self._upsert_entity(db, project_id, item.get("entity_type", "event"), item.get("name", "未命名实体"), item.get("importance_score", 50), chapter_id)
             self._ensure_graph_node(db, project_id, "entity", entity.id, entity.name, entity.importance_level, entity.importance_score)
+            self._sync_canon_ref(
+                db,
+                project_id,
+                "entity",
+                entity,
+                source_chapter_id=chapter_id,
+                source_agent="canon_curator",
+                change_reason="章后设定整理",
+            )
         for item in updates.get("world_fact_updates", []):
             fact = self._upsert_world_fact(db, project_id, item.get("category", "timeline"), item.get("title", "新世界观事实"), item.get("content", ""), "medium", item.get("importance_score", 55), item.get("confidence", 0.75), chapter_id)
             self._ensure_graph_node(db, project_id, "world_fact", fact.id, fact.title, fact.importance_level, fact.importance_score)
+            self._sync_canon_ref(
+                db,
+                project_id,
+                "world_fact",
+                fact,
+                source_chapter_id=chapter_id,
+                source_agent="canon_curator",
+                change_reason="章后设定整理",
+                confidence=fact.confidence,
+            )
 
     def _upsert_entity(self, db: Session, project_id: str, entity_type: str, name: str, importance_score: int, chapter_id: str | None) -> models.StoryEntity:
         row = db.query(models.StoryEntity).filter(models.StoryEntity.project_id == project_id, models.StoryEntity.entity_type == entity_type, models.StoryEntity.name == name).first()

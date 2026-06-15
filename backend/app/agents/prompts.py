@@ -57,7 +57,7 @@ AGENT_PROMPT_BINDINGS: dict[str, tuple[str, ...]] = {'beat_control': ('rolling_c
                      'novel_constitution',
                      'constitution_stress_test',
                      'antagonist_design'),
- 'creation_star': ('core_conflict_system', 'novel_constitution'),
+ 'creation_star': (),
  'dialogue_writer': ('draft_generation',),
  'editor_orchestrator': ('general_control', 'recommended_workflow_order'),
  'environment_writer': ('scene_outline', 'draft_generation'),

@@ -1,7 +1,7 @@
-import { BookOpen, FileText, GitBranch, Network, Sparkles, Users } from "lucide-react";
+import { BookOpen, FileText, GitBranch, ListTree, Network, Sparkles, Users } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
 
-type SettingsSection = "profile" | "characters" | "world" | "graph" | "foreshadowing";
+type SettingsSection = "tree" | "profile" | "characters" | "world" | "graph" | "foreshadowing";
 
 interface SettingsSectionNavProps {
   active: SettingsSection;
@@ -13,6 +13,7 @@ const sections: Array<{
   description: string;
   icon: typeof Users;
 }> = [
+  { key: "tree", title: "设定文件树", description: "按目录管理正典、版本、候选和来源章节", icon: ListTree },
   { key: "profile", title: "作品资料", description: "书名、卖点、读者画像和故事圣经", icon: FileText },
   { key: "characters", title: "角色卡", description: "人物目标、关系、弧光和重要度", icon: Users },
   { key: "world", title: "世界与实体", description: "规则、地点、组织、物件和线索", icon: BookOpen },

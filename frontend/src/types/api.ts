@@ -73,6 +73,9 @@ export interface GenerationJob {
   progress: JobProgress;
   current_agent?: string;
   result: unknown;
+  langsmith_run_id?: string;
+  langsmith_url?: string;
+  trace_mode?: string;
   error: { message: string } | null;
   created_at: string;
   started_at: string | null;
@@ -169,9 +172,13 @@ export interface Character {
   weaknesses: string[];
   character_arc: string;
   current_status: string;
+  first_appearance_chapter_id?: string | null;
+  last_seen_chapter_id?: string | null;
   related_entity_ids: string[];
   related_character_ids: string[];
   updated_reason: string;
+  status?: string;
+  source?: string;
   created_at: string;
   updated_at: string;
 }
@@ -185,6 +192,8 @@ export interface StoryEntity {
   importance_score: number;
   description: string;
   current_status: string;
+  first_appearance_chapter_id?: string | null;
+  last_seen_chapter_id?: string | null;
   source: string;
 }
 
@@ -218,6 +227,112 @@ export interface ForeshadowingItem {
   source: "manual" | "agent";
   created_at: string;
   updated_at: string;
+}
+
+export type CanonRefType = "character" | "entity" | "world_fact" | "foreshadowing" | "folder";
+
+export interface CanonHealth {
+  official_count: number;
+  versioned_count: number;
+  unversioned_count: number;
+  pending_proposal_count: number;
+  low_confidence_count: number;
+  conflict_count: number;
+  by_type: {
+    characters: number;
+    entities: number;
+    world_facts: number;
+    foreshadowing: number;
+  };
+  recommendations: string[];
+}
+
+export interface CanonNode {
+  id: string;
+  project_id: string;
+  parent_id: string | null;
+  node_type: "folder" | "item";
+  ref_type: CanonRefType;
+  ref_id: string;
+  title: string;
+  sort_order: number;
+  status: string;
+  importance_level: string;
+  activity_status: string;
+  metadata: Record<string, unknown>;
+  content?: Record<string, unknown> | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface CanonVersion {
+  id: string;
+  project_id: string;
+  ref_type: Exclude<CanonRefType, "folder">;
+  ref_id: string;
+  version_no: number;
+  content: Record<string, unknown>;
+  source_chapter_id: string | null;
+  source_job_id: string | null;
+  source_agent: string;
+  change_reason: string;
+  confidence: number;
+  created_at: string;
+}
+
+export interface CanonChangeProposal {
+  id: string;
+  project_id: string;
+  target_type: Exclude<CanonRefType, "folder">;
+  target_id: string | null;
+  operation: string;
+  before: Record<string, unknown>;
+  after: Record<string, unknown>;
+  source_chapter_id: string | null;
+  source_job_id: string | null;
+  source_agent: string;
+  approval_status: "pending" | "approved" | "rejected" | string;
+  confidence: number;
+  reason: string;
+  created_at: string;
+  decided_at: string | null;
+}
+
+export interface CanonImpact {
+  ref: { ref_type: string; ref_id: string; title: string; content: Record<string, unknown> };
+  chapters: Array<{ id: string; chapter_no: number; title: string; match_reason: string; status: string }>;
+  graph: {
+    node: GraphNode | null;
+    edges: GraphEdge[];
+    related_nodes: GraphNode[];
+  };
+  versions: CanonVersion[];
+  proposals: CanonChangeProposal[];
+  foreshadowing: ForeshadowingItem[];
+  summary: {
+    chapter_count: number;
+    relation_count: number;
+    version_count: number;
+    proposal_count: number;
+    foreshadowing_count: number;
+  };
+}
+
+export interface CanonDuplicateScan {
+  candidates: Array<{
+    source: { ref_type: string; ref_id: string; title: string; content: Record<string, unknown> };
+    target: { ref_type: string; ref_id: string; title: string; content: Record<string, unknown> };
+    score: number;
+    reason: string;
+  }>;
+  proposals: CanonChangeProposal[];
+}
+
+export interface CanonExportPackage {
+  filename: string;
+  format: "json" | "markdown";
+  content: string;
+  package: Record<string, unknown> | null;
 }
 
 export interface GraphNode {
@@ -255,8 +370,76 @@ export interface AgentRun {
   input_payload: Record<string, unknown>;
   output_payload: Record<string, unknown>;
   error_message: string;
+  langsmith_run_id?: string;
+  langsmith_url?: string;
+  trace_mode?: string;
   started_at: string | null;
   finished_at: string | null;
+}
+
+export interface DeepAgentConfig {
+  deep_agent: {
+    enabled: boolean;
+    mode: "advisor" | "orchestrator" | string;
+    allow_write: boolean;
+    tool_policy: string;
+    subagents: string[];
+    package: { installed: boolean; version: string };
+  };
+  langsmith: {
+    configured: boolean;
+    tracing: boolean;
+    project: string;
+    endpoint_configured: boolean;
+    privacy_mode: "off" | "metadata_only" | "redacted" | "full" | string;
+    prompt_sync: "manual" | string;
+    package: { installed: boolean; version: string };
+  };
+}
+
+export interface DeepAgentToolCall {
+  id: string;
+  session_id: string;
+  project_id: string;
+  tool_name: string;
+  status: "pending_approval" | "approved" | "rejected" | string;
+  risk_level: string;
+  requires_approval: boolean;
+  arguments: Record<string, unknown>;
+  result: Record<string, unknown>;
+  created_at: string;
+  approved_at: string | null;
+  rejected_at: string | null;
+  executed_at: string | null;
+}
+
+export interface DeepAgentSession {
+  id: string;
+  project_id: string;
+  mode: string;
+  status: string;
+  objective: string;
+  privacy_mode: string;
+  summary: string;
+  state: {
+    messages?: Array<Record<string, unknown>>;
+    tool_calls?: DeepAgentToolCall[];
+    subagents?: string[];
+    engine?: string;
+    [key: string]: unknown;
+  };
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LangSmithStatus {
+  configured: boolean;
+  tracing: boolean;
+  project: string;
+  endpoint_configured: boolean;
+  privacy_mode: string;
+  prompt_sync: string;
+  package: { installed: boolean; version: string };
 }
 
 export interface LLMProviderOption {
@@ -266,6 +449,8 @@ export interface LLMProviderOption {
   api_key_env: string;
   default_model: string;
   notes: string;
+  configured?: boolean;
+  active?: boolean;
 }
 
 export interface LLMModelOption {
@@ -388,27 +573,42 @@ export interface CreationStarCard {
   description?: string;
   tags?: string[];
   genre_mix?: string[];
+  one_sentence_pitch?: string;
+  core_world_rule?: string;
   core_rule?: string;
   social_pressure?: string;
   power_or_resource_system?: string;
-  main_conflict_seed?: string;
+  conflict_engine_seed?: string;
+  key_entities?: string[];
+  rules_not_to_break?: string[];
   protagonist_entry?: string;
   long_form_potential?: string;
   reader_hooks?: string[];
   selling_point?: string;
   conflict_hook?: string;
+  writing_risk?: string;
   risk?: string;
   revision_hint?: string;
+  difference_from_previous_batch?: string;
   name?: string;
   identity?: string;
   summary?: string;
+  opening_situation?: string;
+  world_rule_connection?: string;
+  long_term_desire?: string;
   long_term_goal?: string;
+  immediate_goal?: string;
   inner_wound?: string;
   ability?: string;
+  ability_cost?: string;
   weakness?: string;
   secret?: string;
+  growth_arc?: string;
   character_arc?: string;
+  relationship_hooks?: string[];
   relationship_hook?: string;
+  conflict_seed?: string;
+  reader_satisfaction?: string;
 }
 
 export interface CreationStarBasicInfo {
@@ -421,6 +621,16 @@ export interface CreationStarBasicInfo {
   target_words?: number;
   style?: string;
   initial_idea?: string;
+}
+
+export interface CreationBasicSuggestion {
+  id: string;
+  target: "initial_idea" | "manual_input";
+  title: string;
+  content: string;
+  tags?: string[];
+  reason?: string;
+  source?: string;
 }
 
 export interface CreationSession {

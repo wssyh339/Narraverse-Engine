@@ -72,6 +72,8 @@ LONG_NOVEL_PROMPT_ENTRIES: tuple[PromptCatalogEntry, ...] = (
     PromptCatalogEntry("recommended_workflow_order", 29, "最推荐的实际使用顺序", "29_recommended_workflow_order.md", "serial_maintenance", "chief_architect"),
     PromptCatalogEntry("minimal_work_template", 30, "极简工作模板", "30_minimal_work_template.md", "chapter_production", "chapter_planner"),
     PromptCatalogEntry("single_round_generation_combo", 31, "单轮生成组合提示词", "31_single_round_generation_combo_prompt.md", "chapter_production", "integrator"),
+    PromptCatalogEntry("creation_worldview_draw", 32, "创作 Star 世界观抽卡", "32_creation_worldview_draw_prompt.md", "creation_star", "creation_star"),
+    PromptCatalogEntry("creation_protagonist_draw", 33, "创作 Star 主角人设抽卡", "33_creation_protagonist_draw_prompt.md", "creation_star", "creation_star"),
 )
 
 LONG_NOVEL_PROMPT_IDS: tuple[str, ...] = tuple(entry.prompt_id for entry in LONG_NOVEL_PROMPT_ENTRIES)
@@ -79,6 +81,12 @@ LONG_NOVEL_PROMPT_IDS: tuple[str, ...] = tuple(entry.prompt_id for entry in LONG
 _ENTRY_BY_ID = {entry.prompt_id: entry for entry in LONG_NOVEL_PROMPT_ENTRIES}
 
 PROMPT_WORKFLOWS: tuple[PromptWorkflowDefinition, ...] = (
+    PromptWorkflowDefinition(
+        key="creation_star",
+        label="创作 Star 抽卡",
+        description="世界观和主角抽卡只生成候选卡片与后续种子；核心矛盾和小说宪法在用户选定后进入后续流程。",
+        prompt_ids=("creation_worldview_draw", "creation_protagonist_draw"),
+    ),
     PromptWorkflowDefinition(
         key="conception",
         label="立项与小说宪法",

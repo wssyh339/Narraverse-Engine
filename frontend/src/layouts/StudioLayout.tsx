@@ -15,7 +15,7 @@ import {
   Upload,
   Users,
 } from "lucide-react";
-import { Button, Layout, Menu, Space, Tag, Typography, theme } from "antd";
+import { Alert, Button, Layout, Menu, Space, Tag, Typography, theme } from "antd";
 import type { MenuProps } from "antd";
 import { lazy, Suspense, useEffect, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
@@ -52,6 +52,13 @@ export function StudioLayout() {
     queryFn: () => studioApi.getProject(projectId!),
     enabled: Boolean(projectId && isProjectStudio),
   });
+  const llmModelsQuery = useQuery({
+    queryKey: ["llm-models"],
+    queryFn: studioApi.listLlmModels,
+    enabled: isProjectStudio,
+    staleTime: 60_000,
+  });
+  const llmConfigurationWarning = llmModelsQuery.data?.configuration_warning ?? "";
 
   const primaryItems: MenuProps["items"] = [
     { key: "creation-star", icon: <Star size={16} />, label: "创作 Star" },
@@ -76,7 +83,7 @@ export function StudioLayout() {
       return;
     }
     if (key === "settings") {
-      navigate(projectPath("/settings/profile"));
+      navigate(projectPath("/settings/tree"));
       return;
     }
     navigate(key);
@@ -147,6 +154,21 @@ export function StudioLayout() {
             </Button>
           </Space>
         </Header>
+        {!focusMode && llmConfigurationWarning ? (
+          <Alert
+            className="llm-config-warning"
+            type="warning"
+            showIcon
+            message="LLM 未配置"
+            description={
+              <Space wrap>
+                <Typography.Text>{llmConfigurationWarning}</Typography.Text>
+                <Tag>Provider: {llmModelsQuery.data?.default_provider ?? "未配置"}</Tag>
+                <Tag>Model: {llmModelsQuery.data?.default_model ?? "未配置"}</Tag>
+              </Space>
+            }
+          />
+        ) : null}
         {!focusMode && isWorkspacePath ? (
           <div className="project-tool-strip">
             <Menu mode="horizontal" selectedKeys={[location.pathname]} items={toolItems} onClick={({ key }) => navigate(key)} />

@@ -366,11 +366,11 @@ def test_creation_session_decoupled_steps_and_single_card_loading() -> None:
 def test_creation_star_draw_calls_llm_client(monkeypatch) -> None:
     class FakeLLMClient:
         def __init__(self) -> None:
-            self.calls: list[tuple[str, str | None]] = []
+            self.calls: list[tuple[str, str | None, str, dict]] = []
 
         def generate(self, system_prompt: str, user_prompt: str, model: str | None = None):
             payload = json.loads(user_prompt)
-            self.calls.append((payload["agent_name"], model))
+            self.calls.append((payload["agent_name"], model, system_prompt, payload["context"]))
             return SimpleNamespace(
                 content=json.dumps(
                     {
@@ -382,6 +382,7 @@ def test_creation_star_draw_calls_llm_client(monkeypatch) -> None:
                                 "description": "由真实 Agent 调用路径返回的世界观。",
                                 "tags": ["远程"],
                                 "selling_point": "验证创作 Star 接入统一 LLM Client。",
+                                "conflict_engine_seed": "只提供冲突发动机种子，不生成核心矛盾系统。",
                                 "conflict_hook": "远程冲突钩子。",
                                 "risk": "测试风险。",
                                 "source": "agent",
@@ -413,9 +414,432 @@ def test_creation_star_draw_calls_llm_client(monkeypatch) -> None:
         )
     )
 
-    assert fake_llm.calls == [("creation_star", "unit-star-model")]
+    assert fake_llm.calls[0][0] == "creation_worldview_draw"
+    assert fake_llm.calls[0][1] == "unit-star-model"
+    assert "长篇小说世界观抽卡 Agent" in fake_llm.calls[0][2]
+    assert "请帮我设计一部长篇小说的核心矛盾系统" not in fake_llm.calls[0][2]
+    assert "生成一份“长篇小说宪法”" not in fake_llm.calls[0][2]
+    assert fake_llm.calls[0][3]["prompt_snapshot"]["prompt_id"] == "creation_worldview_draw"
     assert payload["cards"][0]["title"] == "远程 API 世界观"
+    assert payload["cards"][0]["conflict_engine_seed"] == "只提供冲突发动机种子，不生成核心矛盾系统。"
+    assert payload["job"]["current_agent"] == "creation_worldview_draw"
     runs = assert_success(client.get(f"/api/jobs/{payload['job']['id']}/agent-runs"))["agent_runs"]
-    assert runs[0]["agent_name"] == "creation_star"
+    assert runs[0]["agent_name"] == "creation_worldview_draw"
     assert runs[0]["output_payload"]["_llm"]["used_remote_model"] is True
     assert runs[0]["output_payload"]["_llm"]["provider"] == "fake-provider"
+
+
+def test_creation_session_worldview_uses_dedicated_prompt(monkeypatch) -> None:
+    class FakeLLMClient:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def generate(self, system_prompt: str, user_prompt: str, model: str | None = None):
+            payload = json.loads(user_prompt)
+            self.calls.append({"system_prompt": system_prompt, "payload": payload, "model": model})
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "step": "worldview",
+                        "cards": [
+                            {
+                                "id": "session_world_1",
+                                "title": "榜单回应世界",
+                                "description": "榜单会把所有资源分配变成公开惩罚。",
+                                "tags": ["榜单", "规则"],
+                                "core_world_rule": "所有资格都由可审计榜单即时改写。",
+                                "social_pressure": "普通人被排名绑定亲密关系和上升通道。",
+                                "conflict_engine_seed": "主角发现榜单规则被某个阶层持续喂养，越纠错越会暴露自己。",
+                                "protagonist_entry": "主角从被错误降档的候选者切入。",
+                                "long_form_potential": "每卷揭开一层榜单权力来源。",
+                                "reader_hooks": ["纠错爽点", "榜单破防"],
+                                "selling_point": "用榜单压迫包装长线升级。",
+                                "risk": "需要避免榜单机制只停留在说明。",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                provider="fake-provider",
+                model=model or "fake-worldview-model",
+                used_remote_model=True,
+            )
+
+    reset_database()
+    fake_llm = FakeLLMClient()
+    monkeypatch.setattr(studio_service_module, "llm_client", fake_llm)
+    client = TestClient(app)
+    project_id = create_project(client)
+    session_id = assert_success(
+        client.post(
+            f"/api/projects/{project_id}/creation/sessions",
+            json={"basic_info": {"genre": "都市", "target_reader": "喜欢规则流的读者", "initial_idea": "榜单会回应主角批注。"}},
+        )
+    )["session"]["id"]
+
+    payload = assert_success(
+        client.post(
+            f"/api/projects/{project_id}/creation/sessions/{session_id}/worldviews",
+            json={"count": 1, "model": "unit-worldview-model"},
+        )
+    )
+
+    assert fake_llm.calls[0]["payload"]["agent_name"] == "creation_worldview_draw"
+    assert fake_llm.calls[0]["model"] == "unit-worldview-model"
+    assert "长篇小说世界观抽卡 Agent" in fake_llm.calls[0]["system_prompt"]
+    assert "请帮我设计一部长篇小说的核心矛盾系统" not in fake_llm.calls[0]["system_prompt"]
+    assert "生成一份“长篇小说宪法”" not in fake_llm.calls[0]["system_prompt"]
+    assert fake_llm.calls[0]["payload"]["context"]["prompt_snapshot"]["prompt_id"] == "creation_worldview_draw"
+    assert fake_llm.calls[0]["payload"]["context"]["prompt_snapshot"]["runtime_strategy"]["selected"] == "dedicated_worldview_prompt"
+    assert payload["cards"][0]["core_rule"] == "所有资格都由可审计榜单即时改写。"
+    assert payload["cards"][0]["conflict_engine_seed"].startswith("主角发现榜单规则")
+    assert payload["job"]["current_agent"] == "creation_worldview_draw"
+
+
+def test_creation_star_protagonist_draw_calls_dedicated_llm_client(monkeypatch) -> None:
+    class FakeLLMClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str | None, str, dict]] = []
+
+        def generate(self, system_prompt: str, user_prompt: str, model: str | None = None):
+            payload = json.loads(user_prompt)
+            self.calls.append((payload["agent_name"], model, system_prompt, payload["context"]))
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "step": "protagonist",
+                        "cards": [
+                            {
+                                "id": "remote_protagonist_1",
+                                "name": "闻照夜",
+                                "title": "被榜单误删的人",
+                                "identity": "被规则榜单降档的候选者",
+                                "opening_situation": "开局被取消资格，只能用违规申诉进入世界裂缝。",
+                                "world_rule_connection": "他能看见榜单每次改写背后的资源流向。",
+                                "long_term_desire": "夺回解释自己命运的权利。",
+                                "immediate_goal": "查清榜单为何删除他的资格。",
+                                "inner_wound": "害怕自己只是规则错误的副产品。",
+                                "ability": "能把榜单异常转成短暂战术优势。",
+                                "ability_cost": "每次纠错都会暴露一个亲近者的隐私。",
+                                "weakness": "不愿让别人分担代价。",
+                                "secret": "他的名字曾出现在旧榜单的隐藏冠军位。",
+                                "growth_arc": "从被榜单定义，到重新定义榜单。",
+                                "relationship_hooks": ["与榜单维护者之女互相利用", "被导师当成申诉样本"],
+                                "conflict_seed": "主角每次纠错都会让榜单维护阶层更主动地清除他。",
+                                "reader_satisfaction": "爽点来自用规则漏洞反打规则。",
+                                "long_form_potential": "资格、名誉、亲密关系和城市权限都能逐卷升级。",
+                                "writing_risk": "需要避免主角只像设定工具人。",
+                                "revision_hint": "可以强化他的私人欲望，而不是只写反制度。",
+                                "tags": ["规则流", "底层逆袭"],
+                                "source": "agent",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                provider="fake-provider",
+                model=model or "fake-protagonist-model",
+                used_remote_model=True,
+            )
+
+    reset_database()
+    fake_llm = FakeLLMClient()
+    monkeypatch.setattr(studio_service_module, "llm_client", fake_llm)
+    client = TestClient(app)
+    project_id = create_project(client)
+    worldview = {
+        "id": "world_1",
+        "title": "榜单回应世界",
+        "core_rule": "所有资格都由可审计榜单即时改写。",
+        "social_pressure": "普通人被排名绑定亲密关系和上升通道。",
+        "power_or_resource_system": "资格榜单、申诉积分和城市权限。",
+        "protagonist_entry": "主角从被错误降档的候选者切入。",
+        "conflict_engine_seed": "榜单规则被维护阶层持续喂养。",
+        "reader_hooks": ["纠错爽点", "规则反噬"],
+    }
+
+    payload = assert_success(
+        client.post(
+            f"/api/projects/{project_id}/creation-star/draw",
+            json={
+                "step": "protagonist",
+                "basic_info": {"genre": "都市", "target_reader": "喜欢规则流的读者", "initial_idea": "榜单会回应主角批注。"},
+                "selected_worldview": worldview,
+                "count": 3,
+                "model": "unit-protagonist-model",
+            },
+        )
+    )
+
+    assert fake_llm.calls[0][0] == "creation_protagonist_draw"
+    assert fake_llm.calls[0][1] == "unit-protagonist-model"
+    assert "长篇小说主角人设抽卡 Agent" in fake_llm.calls[0][2]
+    assert "请帮我设计一部长篇小说的核心矛盾系统" not in fake_llm.calls[0][2]
+    assert "生成一份“长篇小说宪法”" not in fake_llm.calls[0][2]
+    assert fake_llm.calls[0][3]["prompt_snapshot"]["prompt_id"] == "creation_protagonist_draw"
+    assert payload["cards"][0]["world_rule_connection"] == "他能看见榜单每次改写背后的资源流向。"
+    assert payload["cards"][0]["conflict_seed"].startswith("主角每次纠错")
+    assert payload["cards"][0]["long_term_goal"] == "夺回解释自己命运的权利。"
+    assert payload["job"]["current_agent"] == "creation_protagonist_draw"
+
+
+def test_creation_session_protagonist_uses_dedicated_prompt(monkeypatch) -> None:
+    class FakeLLMClient:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def generate(self, system_prompt: str, user_prompt: str, model: str | None = None):
+            payload = json.loads(user_prompt)
+            self.calls.append({"system_prompt": system_prompt, "payload": payload, "model": model})
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "step": "protagonist",
+                        "cards": [
+                            {
+                                "id": "session_protagonist_1",
+                                "name": "顾燃",
+                                "title": "申诉榜单的失格者",
+                                "identity": "被榜单标记为失格的贫民区候选者",
+                                "opening_situation": "开局为了保住家人保障名额，被迫挑战榜单漏洞。",
+                                "world_rule_connection": "他的失败记录会触发榜单隐藏审计。",
+                                "long_term_desire": "让被榜单吞掉的人重新拥有名字。",
+                                "immediate_goal": "拿回家人的保障资格。",
+                                "inner_wound": "一直认为自己拖累了家人。",
+                                "ability": "能从失败记录反推出规则漏洞。",
+                                "ability_cost": "每次推演都会损失一段真实记忆。",
+                                "weakness": "容易把自责当成行动燃料。",
+                                "secret": "他是旧榜单清洗计划的幸存样本。",
+                                "growth_arc": "从替家人申诉，到替无名者改写榜单。",
+                                "relationship_hooks": ["妹妹的保障名额被当成筹码", "旧榜单调查员想利用他"],
+                                "conflict_seed": "他越证明榜单错误，榜单越要证明他不存在。",
+                                "reader_satisfaction": "失败记录反杀权威的反差爽点。",
+                                "long_form_potential": "每卷升级一个榜单层级和一段记忆真相。",
+                                "writing_risk": "记忆代价要和剧情选择绑定。",
+                                "revision_hint": "可把家人线改成师徒线或同伴线。",
+                                "tags": ["规则流", "申诉", "成长"],
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                provider="fake-provider",
+                model=model or "fake-protagonist-model",
+                used_remote_model=True,
+            )
+
+    reset_database()
+    fake_llm = FakeLLMClient()
+    monkeypatch.setattr(studio_service_module, "llm_client", fake_llm)
+    client = TestClient(app)
+    project_id = create_project(client)
+    session_id = assert_success(
+        client.post(
+            f"/api/projects/{project_id}/creation/sessions",
+            json={"basic_info": {"genre": "都市", "target_reader": "喜欢规则流的读者", "initial_idea": "榜单会回应主角批注。"}},
+        )
+    )["session"]["id"]
+    worldview = {
+        "id": "world_1",
+        "title": "榜单回应世界",
+        "core_rule": "所有资格都由可审计榜单即时改写。",
+        "social_pressure": "普通人被排名绑定亲密关系和上升通道。",
+        "power_or_resource_system": "资格榜单、申诉积分和城市权限。",
+        "protagonist_entry": "主角从被错误降档的候选者切入。",
+        "conflict_engine_seed": "榜单规则被维护阶层持续喂养。",
+        "reader_hooks": ["纠错爽点", "规则反噬"],
+    }
+    patch_creation_session_state(session_id, {"selected_worldview": worldview, "worldview_candidates": [worldview]})
+
+    payload = assert_success(
+        client.post(
+            f"/api/projects/{project_id}/creation/sessions/{session_id}/protagonists",
+            json={"count": 1, "model": "unit-protagonist-model"},
+        )
+    )
+
+    assert fake_llm.calls[0]["payload"]["agent_name"] == "creation_protagonist_draw"
+    assert fake_llm.calls[0]["model"] == "unit-protagonist-model"
+    assert "长篇小说主角人设抽卡 Agent" in fake_llm.calls[0]["system_prompt"]
+    assert "请帮我设计一部长篇小说的核心矛盾系统" not in fake_llm.calls[0]["system_prompt"]
+    assert "生成一份“长篇小说宪法”" not in fake_llm.calls[0]["system_prompt"]
+    snapshot = fake_llm.calls[0]["payload"]["context"]["prompt_snapshot"]
+    assert snapshot["prompt_id"] == "creation_protagonist_draw"
+    assert snapshot["runtime_strategy"]["selected"] == "dedicated_protagonist_prompt"
+    assert "榜单回应世界" in snapshot["context_summary"]
+    assert payload["cards"][0]["world_rule_connection"] == "他的失败记录会触发榜单隐藏审计。"
+    assert payload["cards"][0]["ability_cost"] == "每次推演都会损失一段真实记忆。"
+    assert payload["job"]["current_agent"] == "creation_protagonist_draw"
+
+
+def test_creation_basic_suggestions_call_llm_client(monkeypatch) -> None:
+    class FakeLLMClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str | None, dict]] = []
+
+        def generate(self, system_prompt: str, user_prompt: str, model: str | None = None):
+            payload = json.loads(user_prompt)
+            self.calls.append((payload["agent_name"], model, payload["context"]))
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "suggestions": [
+                            {
+                                "id": "idea_remote_1",
+                                "target": "initial_idea",
+                                "title": "旧案开局",
+                                "content": "主角在武考前夜收到一份被官方抹除的旧案卷宗。",
+                                "tags": ["旧案", "开局钩子"],
+                                "reason": "能把主角入口、世界压迫和主线谜团合并在同一个事件里。",
+                            },
+                            {
+                                "id": "constraint_remote_1",
+                                "target": "manual_input",
+                                "title": "避开外挂碾压",
+                                "content": "刷新世界观时避免纯外挂碾压，所有爽点必须绑定制度漏洞和代价。",
+                                "tags": ["约束", "代价机制"],
+                                "reason": "帮助后续抽卡持续生成可升级的规则压力。",
+                            },
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                provider="fake-provider",
+                model=model or "fake-suggestion-model",
+                used_remote_model=True,
+            )
+
+    reset_database()
+    fake_llm = FakeLLMClient()
+    monkeypatch.setattr(studio_service_module, "llm_client", fake_llm)
+    client = TestClient(app)
+    project_id = create_project(client)
+
+    payload = assert_success(
+        client.post(
+            f"/api/projects/{project_id}/creation/basic-suggestions",
+            json={
+                "basic_info": {
+                    "channel": "男频",
+                    "genre": "都市",
+                    "tags": ["学院流"],
+                    "target_reader": "喜欢高武升级和旧案悬疑的读者",
+                    "initial_idea": "宗门变成教育集团。",
+                },
+                "manual_input": "想保留现代都市质感",
+                "previous_suggestions": [{"title": "上一批建议"}],
+                "count": 4,
+                "model": "unit-basic-suggestion-model",
+            },
+        )
+    )
+
+    assert fake_llm.calls[0][0] == "creation_basic_suggestions"
+    assert fake_llm.calls[0][1] == "unit-basic-suggestion-model"
+    assert fake_llm.calls[0][2]["manual_input"] == "想保留现代都市质感"
+    assert fake_llm.calls[0][2]["previous_suggestions"][0]["title"] == "上一批建议"
+    assert payload["suggestions"][0]["target"] == "initial_idea"
+    assert payload["suggestions"][1]["target"] == "manual_input"
+    assert payload["prompt_snapshot"]["agent_name"] == "creation_basic_suggestions"
+    assert payload["llm"]["used_remote_model"] is True
+
+    refreshed = assert_success(
+        client.post(
+            f"/api/projects/{project_id}/creation/basic-suggestions",
+            json={
+                "basic_info": {
+                    "channel": "男频",
+                    "genre": "都市",
+                    "tags": ["学院流"],
+                    "target_reader": "喜欢高武升级和旧案悬疑的读者",
+                    "initial_idea": "宗门变成教育集团。",
+                },
+                "manual_input": "想保留现代都市质感",
+                "previous_suggestions": payload["suggestions"],
+                "count": 4,
+                "model": "unit-basic-suggestion-model",
+            },
+        )
+    )
+    previous_keys = {(item["target"], item["title"], item["content"]) for item in payload["suggestions"]}
+    refreshed_keys = {(item["target"], item["title"], item["content"]) for item in refreshed["suggestions"]}
+    assert not previous_keys.intersection(refreshed_keys)
+
+
+def test_creation_basic_suggestions_do_not_use_hidden_project_premise(monkeypatch) -> None:
+    class FakeLLMClient:
+        def __init__(self) -> None:
+            self.context: dict = {}
+
+        def generate(self, system_prompt: str, user_prompt: str, model: str | None = None):
+            payload = json.loads(user_prompt)
+            self.context = payload["context"]
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "suggestions": [
+                            {
+                                "id": "idea_visible_1",
+                                "target": "initial_idea",
+                                "title": "可见表单脑洞",
+                                "content": "围绕当前页面已填字段生成，不继承旧项目 premise。",
+                                "tags": ["可见输入"],
+                                "reason": "避免隐藏项目资料污染创作 Star 基本信息页。",
+                            },
+                            {
+                                "id": "constraint_visible_1",
+                                "target": "manual_input",
+                                "title": "可见约束",
+                                "content": "只参考额外约束输入框。",
+                                "tags": ["约束"],
+                                "reason": "保持刷新建议可解释。",
+                            },
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                provider="fake-provider",
+                model=model or "fake-suggestion-model",
+                used_remote_model=True,
+            )
+
+    reset_database()
+    fake_llm = FakeLLMClient()
+    monkeypatch.setattr(studio_service_module, "llm_client", fake_llm)
+    client = TestClient(app)
+    project_id = assert_success(
+        client.post(
+            "/api/projects",
+            json={
+                "title": "旧项目",
+                "genre": "悬疑",
+                "target_reader": "喜欢编辑器怪谈的读者",
+                "premise": "一名编辑发现自己修改的小说会改变现实。",
+                "style_guide": "冷峻。",
+                "language": "zh-CN",
+                "planned_chapter_count": 60,
+                "chapter_word_target": 2200,
+            },
+        )
+    )["project"]["id"]
+
+    assert_success(
+        client.post(
+            f"/api/projects/{project_id}/creation/basic-suggestions",
+            json={
+                "basic_info": {
+                    "channel": "男频",
+                    "genre": "玄幻",
+                    "target_words": 1000000,
+                    "style": "热血爽快",
+                },
+                "manual_input": "",
+                "count": 4,
+            },
+        )
+    )
+
+    assert fake_llm.context["basic_info"]["initial_idea"] == ""
+    assert fake_llm.context["basic_info"]["target_reader"] == ""
+    assert "premise" not in fake_llm.context["project"]
+    assert "initial_idea" not in fake_llm.context["project"]

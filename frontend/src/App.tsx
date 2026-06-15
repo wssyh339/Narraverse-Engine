@@ -13,6 +13,7 @@ const OutlineStudioPage = lazy(() => import("./pages/OutlineStudioPage").then((m
 const NotesStudioPage = lazy(() => import("./pages/NotesStudioPage").then((module) => ({ default: module.NotesStudioPage })));
 const AgentsPage = lazy(() => import("./pages/AgentsPage").then((module) => ({ default: module.AgentsPage })));
 const VersionsPage = lazy(() => import("./pages/VersionsPage").then((module) => ({ default: module.VersionsPage })));
+const SettingsWorkbenchPage = lazy(() => import("./pages/SettingsWorkbenchPage").then((module) => ({ default: module.SettingsWorkbenchPage })));
 const CharactersPage = lazy(() => import("./pages/CharactersPage").then((module) => ({ default: module.CharactersPage })));
 const GraphPage = lazy(() => import("./pages/GraphPage").then((module) => ({ default: module.GraphPage })));
 const WorldPage = lazy(() => import("./pages/WorldPage").then((module) => ({ default: module.WorldPage })));
@@ -23,7 +24,7 @@ const JobPage = lazy(() => import("./pages/JobPage").then((module) => ({ default
 
 function ProjectSettingsRedirect() {
   const { projectId = "" } = useParams();
-  return <Navigate to={`/projects/${projectId}/settings/profile`} replace />;
+  return <Navigate to={`/projects/${projectId}/settings/tree`} replace />;
 }
 
 function ProjectSettingsSectionRedirect({ section }: { section: "profile" | "characters" | "world" | "graph" | "foreshadowing" }) {
@@ -77,6 +78,7 @@ export default function App() {
                 <Route path="/projects/:projectId/batch" element={<BatchPage />} />
                 <Route path="/projects/:projectId/export" element={<ExportPage />} />
                 <Route path="/projects/:projectId/settings" element={<ProjectSettingsRedirect />} />
+                <Route path="/projects/:projectId/settings/tree" element={<SettingsWorkbenchPage />} />
                 <Route path="/projects/:projectId/settings/profile" element={<ProjectProfilePage />} />
                 <Route path="/projects/:projectId/settings/characters" element={<CharactersPage />} />
                 <Route path="/projects/:projectId/settings/world" element={<WorldPage />} />

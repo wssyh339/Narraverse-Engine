@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
 const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
@@ -18,6 +18,7 @@ test("frontend routes match the PRD page list", () => {
     "/projects/:projectId/agents",
     "/projects/:projectId/versions",
     "/projects/:projectId/settings",
+    "/projects/:projectId/settings/tree",
     "/projects/:projectId/settings/profile",
     "/projects/:projectId/settings/characters",
     "/projects/:projectId/settings/world",
@@ -58,11 +59,14 @@ test("project studio exposes five connected creation workspaces", () => {
     assert.doesNotMatch(toolBlock, new RegExp(`label: "${label}"`));
   }
   assert.match(layout, /isWorkspacePath/);
-  assert.match(layout, /settings\/profile/);
+  assert.match(layout, /settings\/tree/);
   assert.match(app, /ProjectSettingsSectionRedirect section="profile"/);
   assert.match(layout, /CreationStarWizard/);
   assert.match(layout, /专注写作|focus/i);
   assert.match(layout, /自动保存/);
+  assert.match(layout, /listLlmModels/);
+  assert.match(layout, /LLM 未配置/);
+  assert.match(layout, /configuration_warning/);
   assert.match(agents, /activeWorkflow\.nodes\.map/);
   assert.match(agents, /打开节点配置/);
 });
@@ -78,6 +82,16 @@ test("workbench API supports directory, notes, proposals, versions, and backup",
     "/proposals",
     "/snapshot",
     "/backup",
+    "/settings/tree",
+    "/settings/health",
+    "/settings/folders",
+    "/settings/nodes",
+    "/settings/proposals",
+    "/settings/duplicates/scan",
+    "/settings/export",
+    "/locks",
+    "/impact",
+    "/settings/archive",
   ]) {
     assert.match(studio, new RegExp(endpoint.replace(/[/:]/g, "\\$&")));
   }
@@ -118,6 +132,58 @@ test("deployment files document startup and expose required scripts", () => {
   assert.match(readme, /安装|install/i);
   assert.match(readme, /启动|start|dev/i);
   assert.match(readme, /核心能力|功能|feature/i);
+});
+
+test("local startup is driven by the root env file", () => {
+  const packageJson = JSON.parse(read("package.json"));
+  const readme = readRoot("README.md");
+  const envExample = readRoot(".env.example");
+  const compose = readRoot("docker-compose.yml");
+  const viteConfig = read("vite.config.ts");
+  const backendScriptUrl = new URL("../../scripts/dev-backend.sh", import.meta.url);
+  const frontendScriptUrl = new URL("../../scripts/dev-frontend.sh", import.meta.url);
+
+  assert.equal(existsSync(backendScriptUrl), true);
+  assert.equal(existsSync(frontendScriptUrl), true);
+  const backendScript = readRoot("scripts/dev-backend.sh");
+  const frontendScript = readRoot("scripts/dev-frontend.sh");
+
+  for (const entry of [
+    "BACKEND_HOST=0.0.0.0",
+    "BACKEND_PORT=8000",
+    "FRONTEND_HOST=0.0.0.0",
+    "FRONTEND_PORT=5173",
+    "DATABASE_URL=sqlite:///./data/novel_agent.db",
+    "JOB_ARTIFACT_DIR=artifacts/runs",
+    "VITE_API_BASE_URL=http://localhost:8000/api",
+  ]) {
+    assert.match(envExample, new RegExp(entry.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+
+  assert.match(backendScript, /source "\$ROOT_DIR\/\.env"/);
+  assert.match(backendScript, /BACKEND_HOST/);
+  assert.match(backendScript, /BACKEND_PORT/);
+  assert.match(backendScript, /uvicorn --app-dir backend app\.main:app/);
+  assert.match(frontendScript, /source "\$ROOT_DIR\/\.env"/);
+  assert.match(frontendScript, /VITE_API_BASE_URL/);
+  assert.match(frontendScript, /pnpm.*dev/);
+
+  assert.match(readme, /\.\/scripts\/dev-backend\.sh/);
+  assert.match(readme, /\.\/scripts\/dev-frontend\.sh/);
+  assert.doesNotMatch(readme, /DATABASE_URL=sqlite:\/\/\/\.\/backend\/data\/novel_agent\.db/);
+  assert.doesNotMatch(readme, /VITE_API_BASE_URL=http:\/\/localhost:8000\/api pnpm dev/);
+
+  assert.match(compose, /DATABASE_URL: \$\{DATABASE_URL:-sqlite:\/\/\/\.\/data\/novel_agent\.db\}/);
+  assert.match(compose, /JOB_ARTIFACT_DIR: \$\{JOB_ARTIFACT_DIR:-artifacts\/runs\}/);
+  assert.match(compose, /FRONTEND_ORIGIN: \$\{FRONTEND_ORIGIN:-http:\/\/localhost:5173\}/);
+  assert.match(compose, /VITE_API_BASE_URL: \$\{VITE_API_BASE_URL:-http:\/\/localhost:8000\/api\}/);
+
+  assert.equal(packageJson.scripts.dev, "vite");
+  assert.equal(packageJson.scripts.start, "vite preview");
+  assert.match(viteConfig, /loadEnv/);
+  assert.match(viteConfig, /envDir: "\.\."/);
+  assert.match(viteConfig, /FRONTEND_HOST/);
+  assert.match(viteConfig, /FRONTEND_PORT/);
 });
 
 test("project creation and dashboard protect repeated actions and expose friendly errors", () => {
@@ -196,6 +262,86 @@ test("workspace exposes loading, empty, error, generation, and foreshadowing con
   assert.match(wizard, /刷新三个方向/);
   assert.match(wizard, /完成一张显示一张|完成一个显示一个/);
   assert.doesNotMatch(wizard, /加载一张世界观|加载一张主角|加载一个方向/);
+
+  for (const field of ["channel", "genre", "subgenres", "tags", "manual_tags", "target_reader", "target_words", "style", "initial_idea"]) {
+    assert.match(wizard, new RegExp(`name="${field}"`));
+  }
+  for (const marker of [
+    "creation-star-brief-shell",
+    "creation-star-brief-header",
+    "creation-star-basic-section",
+    "creation-star-ai-suggestion-grid",
+    "creation-star-flow-checklist",
+    "后续流程读取",
+    "创作种子",
+    "targetReaderOptions",
+    "targetWordOptions",
+    "TARGET_READER_PRESETS",
+    "target_word_bands",
+    "generateCreationBasicSuggestions",
+    "basicSuggestionMutation",
+    "刷新 AI 选项",
+    "应用到初始想法",
+    "应用到额外约束",
+    "appendManualConstraint",
+  ]) {
+    assert.match(wizard, new RegExp(marker));
+  }
+  assert.doesNotMatch(wizard, /IDEA_PRESETS/);
+  assert.doesNotMatch(wizard, /MANUAL_CONSTRAINT_PRESETS/);
+  assert.doesNotMatch(wizard, /renderTargetWordPresets/);
+  assert.match(studio, /creation\/basic-suggestions/);
+});
+
+test("creation star can interrupt worldview generation and edit all card fields", () => {
+  const wizard = read("src/components/CreationStarWizard.tsx");
+
+  for (const marker of [
+    "worldviewBatchTokenRef",
+    "protagonistBatchTokenRef",
+    "stopWorldviewGeneration",
+    "stopProtagonistGeneration",
+    "createCardSkeleton",
+    "applyGeneratedCard",
+    "renderEditableText",
+    "renderEditableList",
+    "进入主角抽卡",
+    "中断后续世界观生成",
+    "生成中",
+  ]) {
+    assert.match(wizard, new RegExp(marker));
+  }
+
+  assert.doesNotMatch(wizard, /逐字生成/);
+  assert.doesNotMatch(wizard, /revealCardText/);
+  assert.doesNotMatch(wizard, /STREAM_CHUNK_SIZE|STREAM_DELAY_MS/);
+  assert.match(wizard, /stopWorldviewGeneration\(\);\s*\n\s*setStep\(2\)/);
+  assert.match(wizard, /disabled=\{!selectedWorldview\}/);
+  assert.doesNotMatch(wizard, /loading=\{protagonistBatchLoading \|\| loadProtagonist\.isPending\} onClick=\{enterProtagonist\}>进入主角抽卡/);
+
+  for (const field of [
+    "one_sentence_pitch",
+    "core_world_rule",
+    "social_pressure",
+    "power_or_resource_system",
+    "conflict_engine_seed",
+    "protagonist_entry",
+    "long_form_potential",
+    "key_entities",
+    "rules_not_to_break",
+    "reader_hooks",
+    "selling_point",
+    "writing_risk",
+    "opening_situation",
+    "world_rule_connection",
+    "long_term_desire",
+    "ability_cost",
+    "relationship_hooks",
+    "conflict_seed",
+    "reader_satisfaction",
+  ]) {
+    assert.match(wizard, new RegExp(field));
+  }
 });
 
 test("workspace exposes streaming assistant chat for selected chapter text", () => {
@@ -380,17 +526,37 @@ test("world generation previews candidates before users commit them", () => {
   assert.doesNotMatch(world, /Agent 已生成 \$\{total\} 条候选设定`;\s*setGenerateTarget/);
 });
 
-test("settings subsections group characters, world, graph, and foreshadowing under one UI", () => {
+test("settings subsections group file tree, characters, world, graph, and foreshadowing under one UI", () => {
   const settingsNav = read("src/components/SettingsSectionNav.tsx");
   const styles = read("src/styles/index.css");
+  const settingsTree = read("src/pages/SettingsWorkbenchPage.tsx");
   const profile = read("src/pages/ProjectProfilePage.tsx");
   const characters = read("src/pages/CharactersPage.tsx");
   const world = read("src/pages/WorldPage.tsx");
   const graph = read("src/pages/GraphPage.tsx");
   const foreshadowing = read("src/pages/ForeshadowingPage.tsx");
 
-  for (const section of ["profile", "characters", "world", "graph", "foreshadowing"]) {
+  for (const section of ["tree", "profile", "characters", "world", "graph", "foreshadowing"]) {
     assert.match(settingsNav, new RegExp(`settings/\\$\\{section.key\\}|settings/${section}`));
+  }
+  assert.match(settingsNav, /设定文件树/);
+  assert.match(settingsTree, /SettingsSectionNav active="tree"/);
+  assert.match(settingsTree, /getSettingsTree/);
+  assert.match(settingsTree, /listCanonVersions/);
+  assert.match(settingsTree, /rollbackCanonVersion/);
+  assert.match(settingsTree, /approveCanonProposal/);
+  assert.match(settingsTree, /archiveCanonItems/);
+  assert.match(settingsTree, /createCanonFolder/);
+  assert.match(settingsTree, /moveCanonNode/);
+  assert.match(settingsTree, /setCanonLocks/);
+  assert.match(settingsTree, /getCanonImpact/);
+  assert.match(settingsTree, /scanCanonDuplicates/);
+  assert.match(settingsTree, /exportCanonPackage/);
+  assert.match(settingsTree, /影响索引/);
+  assert.match(settingsTree, /版本/);
+  assert.match(settingsTree, /候选/);
+  for (const label of ["小说宪法", "核心矛盾系统", "关系图谱", "候选变更", "来源", "关系", "状态演进", "Agent 审计", "重复项", "差异对比", "冻结字段", "人物卡当前状态", "正典健康度仪表盘", "新建文件夹", "导出 Markdown", "导出 JSON", "扫描重复项"]) {
+    assert.match(settingsTree, new RegExp(label));
   }
   assert.match(settingsNav, /作品资料/);
   assert.match(profile, /SettingsSectionNav active="profile"/);
@@ -402,6 +568,10 @@ test("settings subsections group characters, world, graph, and foreshadowing und
   assert.match(foreshadowing, /settings-canon-card/);
   assert.match(graph, /settings-stat-card/);
   assert.match(styles, /grid-template-columns: 34px minmax\(0, 1fr\)/);
+  assert.match(styles, /settings-tree-card/);
+  assert.match(styles, /settings-impact-panel/);
+  assert.match(styles, /settings-character-card/);
+  assert.match(styles, /settings-version-diff/);
   assert.match(styles, /min-height: 118px/);
   assert.match(styles, /-webkit-line-clamp: 2/);
 });
@@ -425,9 +595,9 @@ test("outline studio hides inline canon completion panel content", () => {
 
 test("docs describe the split API and outline frontend structure", () => {
   const readme = readRoot("README.md");
-  const codex = readRoot("Codex.md");
+  const agents = readRoot("AGENTS.md");
 
-  for (const doc of [readme, codex]) {
+  for (const doc of [readme, agents]) {
     assert.match(doc, /backend\/app\/api\/v1\/endpoints\/project_studio\.py/);
     assert.match(doc, /backend\/app\/api\/v1\/endpoints\/knowledge\.py/);
     assert.match(doc, /backend\/app\/api\/v1\/endpoints\/writing\.py/);
