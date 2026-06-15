@@ -41,42 +41,6 @@ const BASIC_FLOW_REQUIREMENTS = [
   "主角人设读取基本信息与已选世界观，确保欲望、能力和伤口服务核心规则。",
   "标题卖点、核心矛盾、小说宪法和正典预览都会继续沿用这组创作种子。",
 ];
-const WORLDVIEW_STREAM_FIELDS = [
-  "title",
-  "description",
-  "one_sentence_pitch",
-  "core_world_rule",
-  "social_pressure",
-  "power_or_resource_system",
-  "conflict_engine_seed",
-  "protagonist_entry",
-  "long_form_potential",
-  "selling_point",
-  "writing_risk",
-  "revision_hint",
-  "difference_from_previous_batch",
-];
-const PROTAGONIST_STREAM_FIELDS = [
-  "name",
-  "identity",
-  "one_sentence_pitch",
-  "opening_situation",
-  "world_rule_connection",
-  "long_term_desire",
-  "immediate_goal",
-  "inner_wound",
-  "ability",
-  "ability_cost",
-  "weakness",
-  "secret",
-  "growth_arc",
-  "conflict_seed",
-  "reader_satisfaction",
-  "long_form_potential",
-  "writing_risk",
-  "revision_hint",
-];
-
 type CardKind = "worldview" | "protagonist";
 
 interface CreationStarWizardProps {
