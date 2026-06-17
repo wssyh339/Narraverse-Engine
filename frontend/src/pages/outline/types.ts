@@ -11,6 +11,9 @@ export interface LongOutlineForm {
   volume_count: number;
   chapters_per_volume: number;
   chapter_word_target: number;
+  chapter_word_min: number;
+  chapter_word_max: number;
+  scale_plan?: Record<string, number>;
   volume_title: string;
   outline_requirement: string;
   custom_input: string;
@@ -62,10 +65,10 @@ export interface OutlineDirectoryHandlers {
   setSelectedView: (view: OutlineView) => void;
   setSelectedVolumeId: (volumeId: string) => void;
   setSelectedChapterId: (chapterId: string) => void;
+  setDetailOpen: (open: boolean) => void;
   setBatchManagementEnabled: (enabled: boolean) => void;
   openCreateVolume: () => void;
   openCreateChapter: () => void;
-  openGenerationPreview: (mode: GenerationMode) => void;
   confirmClearOutline: () => void;
   confirmDeleteVolume: (volume: Volume) => void;
   confirmBatchDeleteVolumes: () => void;

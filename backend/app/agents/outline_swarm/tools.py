@@ -13,6 +13,30 @@ def upsert_canon_candidate(state: OutlineSwarmState, payload: dict[str, Any]) ->
     return candidate
 
 
+def create_character_candidate(state: OutlineSwarmState, payload: dict[str, Any]) -> dict[str, Any]:
+    candidate = {
+        **payload,
+        "source": "outline_swarm",
+        "status": "candidate",
+        "activity_status": payload.get("activity_status") or "candidate",
+    }
+    state.character_candidates.append(candidate)
+    append_trace(state.agent_trace, agent_name=state.active_agent, event_type="character_candidate", message="生成候选角色卡", payload=candidate)
+    return candidate
+
+
+def create_setting_candidate(state: OutlineSwarmState, payload: dict[str, Any]) -> dict[str, Any]:
+    candidate = {
+        **payload,
+        "source": "outline_swarm",
+        "status": "candidate",
+        "activity_status": payload.get("activity_status") or "candidate",
+    }
+    state.setting_candidates.append(candidate)
+    append_trace(state.agent_trace, agent_name=state.active_agent, event_type="setting_candidate", message="生成候选设定卡", payload=candidate)
+    return candidate
+
+
 def create_completion_ticket(state: OutlineSwarmState, payload: dict[str, Any]) -> dict[str, Any]:
     ticket = {**payload, "source": "outline_swarm", "status": "open"}
     state.completion_tickets.append(ticket)

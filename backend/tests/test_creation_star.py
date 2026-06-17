@@ -228,7 +228,10 @@ def test_creation_session_decoupled_steps_and_single_card_loading() -> None:
         "subgenres": ["高武"],
         "tags": ["学院流", "升级流"],
         "target_reader": "喜欢高武升级和旧案悬疑的读者",
-        "target_words": 1200000,
+        "volume_count": 10,
+        "chapter_count": 400,
+        "chapter_word_min": 2400,
+        "chapter_word_max": 3600,
         "style": "热血悬疑",
         "initial_idea": "宗门变成教育集团，主角从武考旧案里翻身。",
     }
@@ -243,6 +246,11 @@ def test_creation_session_decoupled_steps_and_single_card_loading() -> None:
     session_id = session["id"]
     assert session["current_step"] == "brief"
     assert session["basic_info"]["genre"] == "都市"
+    assert session["basic_info"]["target_words"] == 1200000
+    assert session["basic_info"]["volume_count"] == 10
+    assert session["basic_info"]["chapter_count"] == 400
+    assert session["basic_info"]["chapter_word_target"] == 3000
+    assert session["basic_info"]["chapters_per_volume"] == 40
 
     first_worldview = assert_success(
         client.post(
@@ -251,8 +259,10 @@ def test_creation_session_decoupled_steps_and_single_card_loading() -> None:
         )
     )
     assert len(first_worldview["cards"]) == 1
-    assert len(first_worldview["session"]["state"]["worldview_candidates"]) == 1
+    assert first_worldview["session"]["state"]["worldview_candidates_count"] == 1
+    assert "worldview_candidates" not in first_worldview["session"]["state"]
     assert first_worldview["job"]["job_type"] == "creation_worldview_card"
+    assert first_worldview["job"]["result"]["_llm"]["elapsed_ms"] >= 0
 
     second_worldview = assert_success(
         client.post(
@@ -261,7 +271,7 @@ def test_creation_session_decoupled_steps_and_single_card_loading() -> None:
         )
     )
     assert len(second_worldview["cards"]) == 1
-    assert len(second_worldview["session"]["state"]["worldview_candidates"]) == 2
+    assert second_worldview["session"]["state"]["worldview_candidates_count"] == 2
     assert first_worldview["cards"][0]["title"] in second_worldview["prompt_snapshot"]["previous_cards_summary"]
     assert second_worldview["cards"][0]["core_rule"]
     replacement_worldview = assert_success(
@@ -271,11 +281,11 @@ def test_creation_session_decoupled_steps_and_single_card_loading() -> None:
         )
     )
     assert len(replacement_worldview["cards"]) == 1
-    assert len(replacement_worldview["session"]["state"]["worldview_candidates"]) == 1
-    assert replacement_worldview["session"]["state"]["selected_worldview"]["id"] == replacement_worldview["cards"][0]["id"]
-    assert replacement_worldview["session"]["state"]["protagonist_candidates"] == []
-    assert replacement_worldview["session"]["state"]["title_candidates"] == []
-    assert replacement_worldview["session"]["state"]["project_seed"] == {}
+    assert replacement_worldview["session"]["state"]["worldview_candidates_count"] == 1
+    assert replacement_worldview["session"]["state"]["selected_worldview_id"] == replacement_worldview["cards"][0]["id"]
+    assert replacement_worldview["session"]["state"]["protagonist_candidates_count"] == 0
+    assert replacement_worldview["session"]["state"]["title_candidates_count"] == 0
+    assert replacement_worldview["session"]["state"]["has_project_seed"] is False
     assert replacement_worldview["prompt_snapshot"]["previous_cards_summary"] == "无上一批候选。"
     selected_worldview = replacement_worldview["cards"][0]
 
@@ -286,7 +296,7 @@ def test_creation_session_decoupled_steps_and_single_card_loading() -> None:
         )
     )
     assert len(protagonist_payload["cards"]) == 1
-    assert protagonist_payload["session"]["state"]["selected_worldview"]["id"] == selected_worldview["id"]
+    assert protagonist_payload["session"]["state"]["selected_worldview_id"] == selected_worldview["id"]
     selected_protagonist = protagonist_payload["cards"][0]
 
     market_payload = assert_success(
@@ -296,8 +306,12 @@ def test_creation_session_decoupled_steps_and_single_card_loading() -> None:
         )
     )
     assert len(market_payload["title_candidates"]) == 1
-    assert len(market_payload["market_position_candidates"]) == 1
+    assert market_payload["market_position_candidates"] == []
+    assert market_payload["prompt_snapshot"]["prompt_id"] == "creation_title_packaging"
     selected_title = market_payload["title_candidates"][0]
+    assert "core_selling_point" in selected_title
+    assert "reader_expectation" in selected_title
+    assert market_payload["session"]["state"]["market_position_source"] == "title_packaging"
 
     seed_payload = assert_success(
         client.post(
@@ -358,6 +372,13 @@ def test_creation_session_decoupled_steps_and_single_card_loading() -> None:
         )
     )
     assert committed["project"]["title"] == selected_title["title"]
+    assert committed["project"]["target_words"] == 1200000
+    assert committed["project"]["planned_volume_count"] == 10
+    assert committed["project"]["planned_chapter_count"] == 400
+    assert committed["project"]["chapters_per_volume"] == 40
+    assert committed["project"]["chapter_word_target"] == 3000
+    assert committed["project"]["chapter_word_min"] == 2400
+    assert committed["project"]["chapter_word_max"] == 3600
     assert committed["story_bible"]["main_conflict"]
     assert committed["version"]["agent_name"] == "canon_curator"
     assert committed["session"]["status"] == "committed"
@@ -670,6 +691,233 @@ def test_creation_session_protagonist_uses_dedicated_prompt(monkeypatch) -> None
     assert payload["cards"][0]["world_rule_connection"] == "他的失败记录会触发榜单隐藏审计。"
     assert payload["cards"][0]["ability_cost"] == "每次推演都会损失一段真实记忆。"
     assert payload["job"]["current_agent"] == "creation_protagonist_draw"
+
+
+def test_creation_session_title_uses_dedicated_packaging_prompt(monkeypatch) -> None:
+    class FakeLLMClient:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def generate(self, system_prompt: str, user_prompt: str, model: str | None = None):
+            payload = json.loads(user_prompt)
+            self.calls.append({"system_prompt": system_prompt, "payload": payload, "model": model})
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "step": "title",
+                        "cards": [
+                            {
+                                "id": "title_packaging_1",
+                                "title": "榜单误删后我让全城重排",
+                                "subtitle": "规则流高武开局包装",
+                                "description": "用一句强钩子书名直接承诺榜单压迫、主角反打和长线升级。",
+                                "platform_style": "强钩子口语化",
+                                "one_sentence_ad": "被榜单删名的少年，用失败记录逼全城规则重排。",
+                                "core_selling_point": "规则压迫 + 申诉反杀 + 高武升级。",
+                                "selling_point": "主角每次纠错都会让旧榜单破防。",
+                                "reader_expectation": "前三章看见冤屈、反打和规则漏洞。",
+                                "worldview_hook": "榜单即时改写所有资格。",
+                                "protagonist_hook": "主角能从失败记录反推漏洞。",
+                                "risk": "标题信息量偏高，需按平台长度压缩。",
+                                "revision_hint": "可弱化高武词，强化榜单和误删钩子。",
+                                "tags": ["规则流", "高武", "强钩子"],
+                                "source": "agent",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                provider="fake-provider",
+                model=model or "fake-title-model",
+                used_remote_model=True,
+            )
+
+    reset_database()
+    fake_llm = FakeLLMClient()
+    monkeypatch.setattr(studio_service_module, "llm_client", fake_llm)
+    client = TestClient(app)
+    project_id = create_project(client)
+    session_id = assert_success(
+        client.post(
+            f"/api/projects/{project_id}/creation/sessions",
+            json={"basic_info": {"genre": "都市", "target_reader": "喜欢规则流的读者", "initial_idea": "榜单会回应主角批注。"}},
+        )
+    )["session"]["id"]
+    worldview = {
+        "id": "world_1",
+        "title": "榜单回应世界",
+        "core_rule": "所有资格都由可审计榜单即时改写。",
+        "social_pressure": "普通人被排名绑定亲密关系和上升通道。",
+        "power_or_resource_system": "资格榜单、申诉积分和城市权限。",
+        "protagonist_entry": "主角从被错误降档的候选者切入。",
+        "conflict_engine_seed": "榜单规则被维护阶层持续喂养。",
+        "reader_hooks": ["纠错爽点", "规则反噬"],
+    }
+    protagonist = {
+        "id": "protagonist_1",
+        "name": "顾燃",
+        "identity": "被榜单标记为失格的贫民区候选者",
+        "long_term_goal": "让被榜单吞掉的人重新拥有名字。",
+        "world_rule_connection": "他的失败记录会触发榜单隐藏审计。",
+        "conflict_seed": "他越证明榜单错误，榜单越要证明他不存在。",
+    }
+    patch_creation_session_state(
+        session_id,
+        {
+            "selected_worldview": worldview,
+            "selected_protagonist": protagonist,
+            "worldview_candidates": [worldview],
+            "protagonist_candidates": [protagonist],
+        },
+    )
+
+    payload = assert_success(
+        client.post(
+            f"/api/projects/{project_id}/creation/sessions/{session_id}/market-position",
+            json={"count": 1, "model": "unit-title-model"},
+        )
+    )
+
+    assert fake_llm.calls[0]["payload"]["agent_name"] == "creation_title_packaging"
+    assert fake_llm.calls[0]["model"] == "unit-title-model"
+    assert "长篇小说书名与包装抽卡 Agent" in fake_llm.calls[0]["system_prompt"]
+    assert "请帮我设计一部长篇小说的核心矛盾系统" not in fake_llm.calls[0]["system_prompt"]
+    assert "生成一份“长篇小说宪法”" not in fake_llm.calls[0]["system_prompt"]
+    snapshot = fake_llm.calls[0]["payload"]["context"]["prompt_snapshot"]
+    assert snapshot["prompt_id"] == "creation_title_packaging"
+    assert snapshot["runtime_strategy"]["selected"] == "dedicated_title_packaging_prompt"
+    assert snapshot["output_schema"]["cards"][0]["core_selling_point"]
+    assert "榜单回应世界" in snapshot["context_summary"]
+    assert payload["title_candidates"][0]["title"] == "榜单误删后我让全城重排"
+    assert payload["title_candidates"][0]["core_selling_point"] == "规则压迫 + 申诉反杀 + 高武升级。"
+    assert payload["market_position_candidates"] == []
+    assert payload["session"]["state"]["market_position_source"] == "title_packaging"
+    assert payload["session"]["state"]["title_candidates_count"] == 1
+    assert "market_position" not in payload["session"]["state"]
+    assert payload["job"]["current_agent"] == "creation_title_packaging"
+
+
+def test_creation_session_core_and_constitution_read_expanded_seed_context(monkeypatch) -> None:
+    class FakeLLMClient:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def generate(self, system_prompt: str, user_prompt: str, model: str | None = None):
+            payload = json.loads(user_prompt)
+            self.calls.append({"system_prompt": system_prompt, "payload": payload, "model": model})
+            if payload["task"].startswith("根据创作 Star 已确认的立项种子生成核心矛盾系统"):
+                content = {
+                    "protagonist_desire": "让被榜单吞掉的人重新拥有名字。",
+                    "world_resistance": "榜单规则被维护阶层持续喂养。",
+                    "core_conflict": "顾燃想让被榜单吞掉的人重新拥有名字，但榜单维护阶层必须证明他不存在。",
+                    "external_resistance": "城市权限和申诉积分被旧榜单控制。",
+                    "internal_resistance": "顾燃害怕自己也会复制榜单逻辑。",
+                    "relationship_resistance": "妹妹的保障名额被当成筹码。",
+                    "institutional_resistance": "榜单、学校和财团共享资格解释权。",
+                    "typical_cost": "每次纠错都会失去一部分身份信用。",
+                    "long_form_engine": "每卷揭开一层榜单背后的资源分配规则。",
+                    "possible_endpoint": "顾燃重写榜单，但必须承担新规则的审判。",
+                    "theme_question": "普通人能否夺回被制度删除的名字。",
+                }
+            else:
+                content = {
+                    "basic_positioning": {"genre": "都市", "target_reader_experience": "喜欢规则流的读者"},
+                    "core_narrative_engine": {"core_conflict": "顾燃与榜单维护阶层持续冲突。"},
+                    "protagonist_arc": {"surface_goal": "让被榜单吞掉的人重新拥有名字。"},
+                    "world_rules": {"primary_logic": "榜单即时改写所有资格。"},
+                    "character_functions": {"protagonist": "顾燃"},
+                    "theme_pressure": {"core_question": "普通人能否夺回被制度删除的名字。"},
+                    "cost_mechanism": ["纠错必须失去身份信用"],
+                    "forbidden_directions": ["不能无代价改写榜单"],
+                    "long_form_sustainability": "榜单、财团、城市权限可逐层展开。",
+                }
+            return SimpleNamespace(
+                content=json.dumps(content, ensure_ascii=False),
+                provider="fake-provider",
+                model=model or "fake-core-model",
+                used_remote_model=True,
+            )
+
+    reset_database()
+    fake_llm = FakeLLMClient()
+    monkeypatch.setattr(studio_service_module, "llm_client", fake_llm)
+    client = TestClient(app)
+    project_id = create_project(client)
+    session_id = assert_success(
+        client.post(
+            f"/api/projects/{project_id}/creation/sessions",
+            json={"basic_info": {"genre": "都市", "target_reader": "喜欢规则流的读者", "initial_idea": "榜单会回应主角批注。"}},
+        )
+    )["session"]["id"]
+    worldview = {
+        "id": "world_1",
+        "title": "榜单回应世界",
+        "core_world_rule": "所有资格都由可审计榜单即时改写。",
+        "social_pressure": "普通人被排名绑定亲密关系和上升通道。",
+        "power_or_resource_system": "资格榜单、申诉积分和城市权限。",
+        "protagonist_entry": "主角从被错误降档的候选者切入。",
+        "conflict_engine_seed": "榜单规则被维护阶层持续喂养。",
+        "reader_hooks": ["纠错爽点", "规则反噬"],
+    }
+    protagonist = {
+        "id": "protagonist_1",
+        "name": "顾燃",
+        "identity": "被榜单标记为失格的贫民区候选者",
+        "long_term_desire": "让被榜单吞掉的人重新拥有名字。",
+        "ability_cost": "每次纠错都会失去身份信用。",
+        "relationship_hooks": ["妹妹的保障名额被当成筹码"],
+        "conflict_seed": "他越证明榜单错误，榜单越要证明他不存在。",
+    }
+    title = {
+        "id": "title_1",
+        "title": "榜单误删后我让全城重排",
+        "core_selling_point": "规则压迫 + 申诉反杀 + 高武升级。",
+        "reader_expectation": "前三章看见冤屈、反打和规则漏洞。",
+    }
+    market_position = {
+        "target_reader": "喜欢规则流的读者",
+        "platform_fit": "男频强钩子",
+        "core_selling_point": "规则压迫 + 申诉反杀 + 高武升级。",
+        "reader_expectation": "前三章看见冤屈、反打和规则漏洞。",
+    }
+    patch_creation_session_state(
+        session_id,
+        {
+            "project_seed": {
+                "basic_info": {"genre": "都市", "target_reader": "喜欢规则流的读者"},
+                "selected_worldview": worldview,
+                "selected_protagonist": protagonist,
+                "selected_title": title,
+                "market_position": market_position,
+            }
+        },
+    )
+
+    assert_success(client.post(f"/api/projects/{project_id}/creation/sessions/{session_id}/core-conflict", json={"model": "unit-core-model"}))
+    assert_success(client.post(f"/api/projects/{project_id}/creation/sessions/{session_id}/constitution", json={"model": "unit-constitution-model"}))
+
+    core_call = fake_llm.calls[0]
+    constitution_call = fake_llm.calls[1]
+    assert core_call["model"] == "unit-core-model"
+    assert "project_seed" in core_call["system_prompt"]
+    assert "selected_worldview" in core_call["system_prompt"]
+    assert "题材类型：【填写" not in core_call["system_prompt"]
+    core_context = core_call["payload"]["context"]
+    assert core_context["selected_worldview"]["conflict_engine_seed"] == "榜单规则被维护阶层持续喂养。"
+    assert core_context["selected_protagonist"]["ability_cost"] == "每次纠错都会失去身份信用。"
+    assert core_context["selected_title"]["core_selling_point"] == "规则压迫 + 申诉反杀 + 高武升级。"
+    assert core_context["market_position"]["reader_expectation"] == "前三章看见冤屈、反打和规则漏洞。"
+
+    assert constitution_call["model"] == "unit-constitution-model"
+    assert "core_conflict_system" in constitution_call["system_prompt"]
+    assert "basic_positioning" in constitution_call["system_prompt"]
+    assert "【粘贴核心矛盾系统】" not in constitution_call["system_prompt"]
+    constitution_context = constitution_call["payload"]["context"]
+    assert constitution_context["selected_worldview"]["title"] == "榜单回应世界"
+    assert constitution_context["selected_protagonist"]["name"] == "顾燃"
+    assert constitution_context["selected_title"]["title"] == "榜单误删后我让全城重排"
+    assert constitution_context["market_position"]["platform_fit"] == "男频强钩子"
+    assert constitution_context["core_conflict_system"]["core_conflict"].startswith("顾燃想")
 
 
 def test_creation_basic_suggestions_call_llm_client(monkeypatch) -> None:

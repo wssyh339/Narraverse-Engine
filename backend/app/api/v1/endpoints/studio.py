@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from fastapi import BackgroundTasks, Depends, WebSocket, WebSocketDisconnect
+from fastapi import BackgroundTasks, Depends, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -294,6 +294,15 @@ def cancel_job(request: JobControlRequest, db: Session = Depends(get_db)):
 
 def get_job(job_id: str, db: Session = Depends(get_db)):
     return success_response(studio_service.get_job(db, job_id))
+
+
+def list_jobs(
+    project_id: str | None = Query(default=None),
+    job_type: str | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    return success_response(studio_service.list_jobs(db, project_id=project_id, job_type=job_type, limit=limit))
 
 
 def get_agent_runs(job_id: str, db: Session = Depends(get_db)):

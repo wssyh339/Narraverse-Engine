@@ -13,6 +13,7 @@ from app.agents.shared.prompt_catalog import (
     LONG_NOVEL_PROMPT_IDS,
     get_prompt_entry,
     list_long_novel_prompt_entries,
+    list_prompt_workflows,
     load_catalog_prompt,
 )
 from app.agents.shared.prompt_node_contracts import get_prompt_node_contract
@@ -22,11 +23,11 @@ from app.services.studio_service import studio_service
 def test_long_novel_catalog_covers_all_prompt_files() -> None:
     entries = list_long_novel_prompt_entries()
 
-    assert len(entries) == 34
+    assert len(entries) == 35
     assert LONG_NOVEL_PROMPT_IDS[0] == "general_control"
-    assert LONG_NOVEL_PROMPT_IDS[-1] == "creation_protagonist_draw"
+    assert LONG_NOVEL_PROMPT_IDS[-1] == "creation_title_packaging"
     assert entries[0].filename == "00_general_control_prompt.md"
-    assert entries[-1].filename == "33_creation_protagonist_draw_prompt.md"
+    assert entries[-1].filename == "34_creation_title_packaging_prompt.md"
 
 
 def test_catalog_loads_prompt_text_and_metadata() -> None:
@@ -80,6 +81,91 @@ def test_protagonist_draw_prompt_is_dedicated_to_character_cards() -> None:
     assert "不要生成小说宪法" in text
     assert "核心矛盾系统如下" not in text
     assert "生成一份“长篇小说宪法”" not in text
+
+
+def test_title_packaging_prompt_is_dedicated_to_title_and_selling_point_cards() -> None:
+    entry = get_prompt_entry("creation_title_packaging")
+    text = load_catalog_prompt("creation_title_packaging")
+    workflow = next(item for item in list_prompt_workflows() if item["key"] == "creation_star")
+
+    assert entry.index == 34
+    assert entry.workflow == "creation_star"
+    assert entry.default_agent == "creation_star"
+    assert entry.filename == "34_creation_title_packaging_prompt.md"
+    assert workflow["prompt_ids"] == [
+        "creation_worldview_draw",
+        "creation_protagonist_draw",
+        "creation_title_packaging",
+    ]
+    assert "长篇小说书名与包装抽卡 Agent" in text
+    assert "basic_info" in text
+    assert "selected_worldview" in text
+    assert "selected_protagonist" in text
+    assert "core_selling_point" in text
+    assert "reader_expectation" in text
+    assert "platform_style" in text
+    assert "one_sentence_ad" in text
+    assert "不要生成世界观" in text
+    assert "不要生成主角人设" in text
+    assert "不要生成核心矛盾系统" in text
+    assert "不要生成小说宪法" in text
+    assert "只输出严格 JSON object" in text
+    assert "核心矛盾系统如下" not in text
+    assert "生成一份“长篇小说宪法”" not in text
+
+
+def test_core_conflict_prompt_reads_creation_seed_fields() -> None:
+    text = load_catalog_prompt("core_conflict_system")
+
+    for marker in [
+        "project_seed",
+        "selected_worldview",
+        "selected_protagonist",
+        "selected_title",
+        "market_position",
+        "conflict_engine_seed",
+        "long_term_desire",
+        "ability_cost",
+        "relationship_hooks",
+        "core_selling_point",
+        "reader_expectation",
+        "protagonist_desire",
+        "world_resistance",
+        "core_conflict",
+    ]:
+        assert marker in text
+
+    assert "不要生成小说宪法" in text
+    assert "只输出严格 JSON object" in text
+    assert "题材类型：【填写" not in text
+    assert "请输出 5 套不同的核心矛盾系统" not in text
+
+
+def test_novel_constitution_prompt_reads_seed_and_core_conflict_fields() -> None:
+    text = load_catalog_prompt("novel_constitution")
+
+    for marker in [
+        "project_seed",
+        "selected_worldview",
+        "selected_protagonist",
+        "selected_title",
+        "market_position",
+        "core_conflict_system",
+        "basic_positioning",
+        "core_narrative_engine",
+        "protagonist_arc",
+        "world_rules",
+        "character_functions",
+        "theme_pressure",
+        "cost_mechanism",
+        "forbidden_directions",
+        "long_form_sustainability",
+    ]:
+        assert marker in text
+
+    assert "只输出严格 JSON object" in text
+    assert "【粘贴核心矛盾系统】" not in text
+    assert "请按照以下结构输出：" not in text
 
 
 def test_agent_spec_prompt_bodies_live_in_markdown_files() -> None:

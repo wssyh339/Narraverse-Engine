@@ -19,6 +19,8 @@ class OutlineSwarmState(APIModel):
     characters: list[dict[str, Any]] = Field(default_factory=list)
     story_entities: list[dict[str, Any]] = Field(default_factory=list)
     world_facts: list[dict[str, Any]] = Field(default_factory=list)
+    character_candidates: list[dict[str, Any]] = Field(default_factory=list)
+    setting_candidates: list[dict[str, Any]] = Field(default_factory=list)
     graph_nodes: list[dict[str, Any]] = Field(default_factory=list)
     graph_edges: list[dict[str, Any]] = Field(default_factory=list)
     outline: dict[str, Any] = Field(default_factory=dict)

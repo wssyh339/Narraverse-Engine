@@ -1,8 +1,6 @@
-import { Button, Empty, Space, Tooltip, Typography } from "antd";
-import { ListChecks, RefreshCw } from "lucide-react";
-import type { UseMutationResult } from "@tanstack/react-query";
+import { Empty, Typography } from "antd";
 import type { Chapter, Project, StoryBible, Volume } from "../../types/api";
-import type { GenerationMode, OutlineView } from "./types";
+import type { OutlineView } from "./types";
 
 interface OutlineEditorPanelProps {
   selectedView: OutlineView;
@@ -11,10 +9,6 @@ interface OutlineEditorPanelProps {
   lastOutlinePlan: Record<string, unknown> | null;
   project?: Project;
   storyBible?: StoryBible;
-  isPlanning: boolean;
-  saveVolume: UseMutationResult<unknown, Error, { title: string; outline: string }, unknown>;
-  saveChapter: UseMutationResult<unknown, Error, Partial<Chapter>, unknown>;
-  openGenerationPreview: (mode: GenerationMode) => void;
   children?: React.ReactNode;
 }
 
@@ -32,6 +26,9 @@ const outlineFieldLabels: Record<string, string> = {
   volume_count: "卷数",
   chapters_per_volume: "每卷章节数",
   chapter_word_target: "每章字数",
+  chapter_word_min: "每章最少字数",
+  chapter_word_max: "每章最多字数",
+  scale_plan: "规模计划",
   "世界圣经": "世界圣经",
   "全书10卷总纲": "全书十卷总纲",
   "10卷单元总表": "十卷单元总表",
@@ -122,7 +119,7 @@ export function formatOutlineDocument(lastOutlinePlan: Record<string, unknown> |
       style_guide: storyBible.style_guide,
     }).join("\n");
   }
-  return naturalLines(project ?? {}).join("\n") || "暂无大纲正文。请先生成大纲，或在左侧选择卷纲/章纲。";
+  return naturalLines(project ?? {}).join("\n") || "暂无大纲正文。请在右侧议事引擎中讨论并确认大纲，或在左侧选择卷纲/章纲。";
 }
 
 export function formatVolumeOutlineDocument(volume: Volume) {
@@ -145,8 +142,15 @@ export function formatChapterOutlineDocument(chapter: Chapter) {
       pov_character: chapter.pov_character,
       core_event: chapter.core_event,
       conflict: chapter.conflict,
+      crisis: chapter.crisis,
+      climax: chapter.climax,
+      outcome: chapter.outcome,
       turn_point: chapter.turn_point,
-      cliffhanger: chapter.cliffhanger,
+      chapter_hook: chapter.chapter_hook || chapter.cliffhanger,
+      foreshadowing_plants: chapter.foreshadowing_plants,
+      foreshadowing_payoffs: chapter.foreshadowing_payoffs,
+      canon_updates: chapter.canon_updates,
+      continuity_risks: chapter.continuity_risks,
       emotional_beats: chapter.emotional_beats,
     }).join("\n") || "暂无章纲正文。"
   );
@@ -172,10 +176,6 @@ export function OutlineEditorPanel({
   lastOutlinePlan,
   project,
   storyBible,
-  isPlanning,
-  saveVolume,
-  saveChapter,
-  openGenerationPreview,
   children,
 }: OutlineEditorPanelProps) {
   const renderOutlineView = () => {
@@ -218,15 +218,9 @@ export function OutlineEditorPanel({
     <main className="studio-panel outline-editor-panel">
       <div className="outline-editor-header">
         <div>
-          <Typography.Text type="secondary">大纲工作台</Typography.Text>
+          <Typography.Text type="secondary">大纲正文</Typography.Text>
           <Typography.Title level={3}>{selectedView === "outline" ? "总纲" : selectedView === "volume" ? "卷纲" : selectedView === "chapter" ? "章节" : "章纲"}</Typography.Title>
         </div>
-        <Space>
-          <Button icon={<RefreshCw size={15} />} loading={isPlanning} onClick={() => openGenerationPreview("outline")}>生成大纲</Button>
-          <Tooltip title="根据已确认总纲、卷纲和勾选范围批量生成章纲">
-            <Button type="primary" icon={<ListChecks size={15} />} loading={isPlanning} onClick={() => openGenerationPreview("chapter")}>批量生成章纲</Button>
-          </Tooltip>
-        </Space>
       </div>
       {renderOutlineView()}
       {children}

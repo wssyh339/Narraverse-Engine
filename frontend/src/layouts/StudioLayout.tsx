@@ -178,7 +178,7 @@ export function StudioLayout() {
         <Content className="project-studio-content">
           <Outlet />
         </Content>
-        {projectId ? (
+        {projectId && creationStarOpen ? (
           <Suspense fallback={null}>
             <CreationStarWizard
               projectId={projectId}

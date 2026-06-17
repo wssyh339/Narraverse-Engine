@@ -38,6 +38,7 @@ import type {
   LangSmithStatus,
   LLMModelOption,
   LLMProviderOption,
+  ScalePlan,
 } from "../types/api";
 
 export type { AgentConfig } from "../types/api";
@@ -168,6 +169,8 @@ export interface CreationSessionSeedPayload {
 export interface CreationSessionRunPayload {
   instruction?: string;
   model?: string;
+  core_conflict_system?: Record<string, unknown>;
+  novel_constitution?: Record<string, unknown>;
 }
 
 export interface CreationSessionCommitSessionPayload {
@@ -241,14 +244,195 @@ export type ChapterChatStreamEvent =
     }
   | { type: "done" };
 
-function emitSseBlock(block: string, onEvent: (event: ChapterChatStreamEvent) => void) {
+export type OutlineDebatePhase = "book" | "volumes" | "chapters";
+
+export interface OutlineDebatePayload {
+  requirement?: string;
+  use_topology_inference?: boolean;
+  target_words?: number;
+  volume_count?: number;
+  chapters_per_volume?: number;
+  chapter_word_target?: number;
+  chapter_word_min?: number;
+  chapter_word_max?: number;
+  scale_plan?: ScalePlan;
+  chapter_ranges?: Array<{ volume_no: number; start_chapter_no: number; end_chapter_no: number }>;
+  target_volume_no?: number;
+  target_chapter_no?: number;
+  refresh_phase?: boolean;
+  join_discussion?: boolean;
+  target_agent_name?: string;
+  user_message?: string;
+  finish_phase?: boolean;
+  model?: string;
+}
+
+export interface OutlineDebateTurn {
+  id: string;
+  phase: OutlineDebatePhase;
+  round_no: number;
+  agent_name: string;
+  role: string;
+  agent_spec?: OutlineDebateAgentSpec;
+  stance: string;
+  message: string;
+  display_text?: string;
+  next_agent_name?: string;
+  handoff?: {
+    from_agent_name?: string;
+    from_label?: string;
+    from_mention?: string;
+    to_agent_name?: string;
+    to_label?: string;
+    to_mention?: string;
+    display?: string;
+  };
+  claims: string[];
+  objections?: string[];
+  proposed_decisions?: unknown[];
+  artifact_patch?: Record<string, unknown>;
+  result_patch?: Record<string, unknown>;
+  character_candidate?: Record<string, unknown>;
+  setting_candidate?: Record<string, unknown>;
+  uncertainties?: string[];
+  confidence?: number;
+  decisions?: unknown[];
+  risks: string[];
+  output_refs: string[];
+}
+
+export interface OutlineDebateAgentSpec {
+  name: string;
+  role: string;
+  core_capability: string;
+  skills: string[];
+  required_context_keys: string[];
+  allowed_read_tools: string[];
+  allowed_candidate_tools: string[];
+  validators: string[];
+  forbidden_tools: string[];
+  candidate_policy: string;
+}
+
+export interface OutlineDebateValidationCheck {
+  validator: string;
+  status: "passed" | "warning" | "failed" | string;
+  message: string;
+  issues: string[];
+}
+
+export interface OutlineDebateValidationReport {
+  status: "passed" | "warning" | "failed" | string;
+  checked_at?: string;
+  checks: OutlineDebateValidationCheck[];
+}
+
+export interface OutlineDebateDecision {
+  id: string;
+  phase: OutlineDebatePhase;
+  title: string;
+  decision: string;
+  rationale: string;
+}
+
+export interface OutlineDebateArtifact {
+  id: string;
+  type: string;
+  title: string;
+  payload: Record<string, unknown>;
+  candidate_status?: "draft" | "pending_confirmation" | "partially_confirmed" | "confirmed" | "stale" | string;
+  requires_user_confirmation?: boolean;
+  materialization?: Record<string, unknown>;
+}
+
+export interface OutlineDebateUserMessage {
+  id: string;
+  phase: OutlineDebatePhase;
+  role: "user" | "system";
+  message: string;
+  target_agent_name?: string;
+  mentions: string[];
+  created_at: string;
+  handled_by_turn_id?: string;
+}
+
+export interface OutlineDebateConfirmationItem {
+  item_key: string;
+  phase: OutlineDebatePhase;
+  candidate_status: "draft" | "pending_confirmation" | "partially_confirmed" | "confirmed" | "stale" | string;
+  volume_no?: number;
+  chapter_no?: number;
+  title?: string;
+  confirmed_at?: string;
+  stale_reason?: string;
+  canon_update?: Record<string, unknown>;
+}
+
+export interface OutlineDebatePhaseRun {
+  id: string;
+  phase: OutlineDebatePhase;
+  phase_label: string;
+  status: string;
+  candidate_status?: "draft" | "pending_confirmation" | "partially_confirmed" | "confirmed" | "stale" | string;
+  confirmed_at?: string;
+  stale_reason?: string;
+  expected_item_count?: number;
+  input: OutlineDebatePayload;
+  agent_specs?: OutlineDebateAgentSpec[];
+  candidate_policy?: Record<string, unknown>;
+  validation_report?: OutlineDebateValidationReport;
+  turns: OutlineDebateTurn[];
+  user_messages?: OutlineDebateUserMessage[];
+  decisions: OutlineDebateDecision[];
+  artifacts: OutlineDebateArtifact[];
+  confirmation_items?: OutlineDebateConfirmationItem[];
+  canon_materializations?: Record<string, unknown>[];
+  outline_topology: Record<string, unknown>;
+  result: Record<string, unknown>;
+  last_confirmed_item_key?: string;
+  last_canon_update?: Record<string, unknown>;
+  next_agent_name?: string;
+}
+
+export interface OutlineDebateSession {
+  id: string;
+  project_id: string;
+  status: string;
+  current_phase: OutlineDebatePhase | "";
+  brief: string;
+  phase_order: OutlineDebatePhase[];
+  phase_runs: Partial<Record<OutlineDebatePhase, OutlineDebatePhaseRun>>;
+  confirmed_candidates?: Partial<Record<OutlineDebatePhase, Record<string, unknown>>>;
+  formal_commit?: Record<string, unknown>;
+  messages?: OutlineDebateUserMessage[];
+  source: "outline_debate";
+  created_at?: string;
+  updated_at?: string;
+}
+
+export type OutlineDebateStreamEvent =
+  | { type: "meta"; session_id: string; phase: OutlineDebatePhase; phase_label: string; message: string }
+  | { type: "user_message"; phase: OutlineDebatePhase; message: OutlineDebateUserMessage; session: OutlineDebateSession }
+  | { type: "turn"; phase: OutlineDebatePhase; turn: OutlineDebateTurn }
+  | { type: "delta"; phase: OutlineDebatePhase; turn_id: string; agent_name: string; text: string; done?: boolean }
+  | { type: "pause"; phase: OutlineDebatePhase; message: string; next_agent_name?: string; phase_run: OutlineDebatePhaseRun; session: OutlineDebateSession }
+  | { type: "interrupt"; phase: OutlineDebatePhase; message: string; session: OutlineDebateSession }
+  | { type: "decision"; phase: OutlineDebatePhase; decision: OutlineDebateDecision }
+  | { type: "artifact"; phase: OutlineDebatePhase; artifact: OutlineDebateArtifact }
+  | { type: "done"; phase: OutlineDebatePhase; phase_run: OutlineDebatePhaseRun; session: OutlineDebateSession };
+
+function emitJsonSseBlock<T>(block: string, onEvent: (event: T) => void) {
   const data = block
     .split(/\r?\n/)
     .filter((line) => line.startsWith("data: "))
     .map((line) => line.slice(6))
     .join("\n");
   if (!data) return;
-  onEvent(JSON.parse(data) as ChapterChatStreamEvent);
+  onEvent(JSON.parse(data) as T);
+}
+
+function emitSseBlock(block: string, onEvent: (event: ChapterChatStreamEvent) => void) {
+  emitJsonSseBlock<ChapterChatStreamEvent>(block, onEvent);
 }
 
 export async function streamChapterChat(
@@ -286,6 +470,42 @@ export async function streamChapterChat(
   if (buffer.trim()) emitSseBlock(buffer, onEvent);
 }
 
+export async function streamOutlineDebatePhase(
+  projectId: string,
+  sessionId: string,
+  phase: OutlineDebatePhase,
+  payload: OutlineDebatePayload,
+  onEvent: (event: OutlineDebateStreamEvent) => void,
+  signal?: AbortSignal,
+) {
+  const response = await fetch(`${API_BASE_URL}/projects/${projectId}/outline/debate/sessions/${sessionId}/${phase}/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    signal,
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || "大纲议事请求失败");
+  }
+  if (!response.body) {
+    throw new Error("当前浏览器不支持流式响应读取");
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const blocks = buffer.split(/\n\n/);
+    buffer = blocks.pop() ?? "";
+    blocks.forEach((block) => emitJsonSseBlock<OutlineDebateStreamEvent>(block, onEvent));
+  }
+  buffer += decoder.decode();
+  if (buffer.trim()) emitJsonSseBlock<OutlineDebateStreamEvent>(buffer, onEvent);
+}
+
 export const studioApi = {
   listProjects: () => unwrap<{ projects: Project[]; stats: Record<string, number> }>(api.get("/projects")),
   createProject: (payload: CreateProjectPayload) => unwrap<{ project: Project; story_bible: StoryBible }>(api.post("/projects", payload)),
@@ -319,6 +539,43 @@ export const studioApi = {
     unwrap<{ chapters: Chapter[]; chapter_outlines: Record<string, unknown>[] }>(
       api.post(`/projects/${projectId}/outline/chapters/commit`, payload),
     ),
+  createOutlineDebateSession: (projectId: string, payload: { idempotency_key?: string; brief?: string; model?: string }) =>
+    unwrap<{ session: OutlineDebateSession; job: GenerationJob }>(
+      api.post(`/projects/${projectId}/outline/debate/sessions`, payload),
+    ),
+  getOutlineDebateSession: (projectId: string, sessionId: string) =>
+    unwrap<{ session: OutlineDebateSession; job: GenerationJob }>(
+      api.get(`/projects/${projectId}/outline/debate/sessions/${sessionId}`),
+    ),
+  postOutlineDebateMessage: (projectId: string, sessionId: string, payload: { phase: OutlineDebatePhase; message: string; target_agent_name?: string }) =>
+    unwrap<{ session: OutlineDebateSession; message: OutlineDebateUserMessage; job: GenerationJob }>(
+      api.post(`/projects/${projectId}/outline/debate/sessions/${sessionId}/messages`, payload),
+    ),
+  interruptOutlineDebateSession: (projectId: string, sessionId: string, payload: { phase?: OutlineDebatePhase; reason?: string }) =>
+    unwrap<{ session: OutlineDebateSession; job: GenerationJob }>(
+      api.post(`/projects/${projectId}/outline/debate/sessions/${sessionId}/interrupt`, payload),
+    ),
+  runOutlineDebatePhase: (projectId: string, sessionId: string, phase: OutlineDebatePhase, payload: OutlineDebatePayload) =>
+    unwrap<{ session: OutlineDebateSession; phase_run: OutlineDebatePhaseRun; job: GenerationJob }>(
+      api.post(`/projects/${projectId}/outline/debate/sessions/${sessionId}/${phase}/run`, payload),
+    ),
+  confirmOutlineDebatePhase: (projectId: string, sessionId: string, phase: OutlineDebatePhase, payload: { notes?: string; item_key?: string } = {}) =>
+    unwrap<{
+      session: OutlineDebateSession;
+      phase_run: OutlineDebatePhaseRun;
+      canon_update?: Record<string, unknown>;
+      book_commit?: { project: Project; story_bible: StoryBible; volumes: Volume[]; outline_plan: Record<string, unknown> };
+      job: GenerationJob;
+    }>(
+      api.post(`/projects/${projectId}/outline/debate/sessions/${sessionId}/${phase}/confirm`, payload),
+    ),
+  commitOutlineDebateCandidates: (projectId: string, sessionId: string, payload: { overwrite_existing_chapters?: boolean; notes?: string } = {}) =>
+    unwrap<{
+      session: OutlineDebateSession;
+      book_commit: { project: Project; story_bible: StoryBible; volumes: Volume[]; outline_plan: Record<string, unknown> };
+      chapter_commit: { chapters: Chapter[]; chapter_outlines: Record<string, unknown>[] };
+      job: GenerationJob;
+    }>(api.post(`/projects/${projectId}/outline/debate/sessions/${sessionId}/commit`, payload)),
   listChapters: (projectId: string) => unwrap<{ chapters: Chapter[] }>(api.get(`/projects/${projectId}/chapters`)),
   getChapter: (projectId: string, chapterId: string) => unwrap<{ chapter: Chapter }>(api.get(`/projects/${projectId}/chapters/${chapterId}`)),
   updateChapter: (projectId: string, chapterId: string, payload: Partial<Chapter>) =>
@@ -488,6 +745,8 @@ export const studioApi = {
   updateAgentPrompt: (agentName: string, prompt: string) => unwrap<{ agent: AgentConfig }>(api.put(`/agents/${agentName}/prompt`, { prompt })),
   restoreAgentPrompt: (agentName: string) => unwrap<{ agent: AgentConfig }>(api.post(`/agents/${agentName}/prompt/restore`)),
   getJob: (jobId: string) => unwrap<{ job: GenerationJob }>(api.get(`/jobs/${jobId}`)),
+  listJobs: (params?: { project_id?: string; job_type?: string; limit?: number }) =>
+    unwrap<{ jobs: GenerationJob[] }>(api.get("/jobs", { params })),
   getAgentRuns: (jobId: string) => unwrap<{ agent_runs: AgentRun[] }>(api.get(`/jobs/${jobId}/agent-runs`)),
   listCharacters: (projectId: string) => unwrap<{ characters: Character[] }>(api.get(`/projects/${projectId}/characters`)),
   createCharacter: (projectId: string, payload: CharacterPayload) =>
@@ -590,6 +849,7 @@ export const studioApi = {
     unwrap<{ job: GenerationJob }>(api.post("/write/resume", { job_id, reason })),
   cancelJob: (job_id: string, reason = "") =>
     unwrap<{ job: GenerationJob }>(api.post("/write/cancel", { job_id, reason })),
+  retryJob: (jobId: string) => unwrap<{ job: GenerationJob }>(api.post(`/jobs/${jobId}/retry`)),
   exportProject: (project_id: string, format: string) =>
     unwrap<{ export_job: { output_path: string; status: string }; preview: string }>(api.post("/export", { project_id, format })),
   summary: (project_id: string) => unwrap<{ summary: string; chapter_count: number }>(api.post("/tools/summary", { project_id })),

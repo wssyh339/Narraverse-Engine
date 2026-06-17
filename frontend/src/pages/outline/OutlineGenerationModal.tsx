@@ -43,6 +43,27 @@ export function OutlineGenerationModal({
   const summaryPreserved = Array.isArray(change_summary?.preserved_manual_settings) ? change_summary.preserved_manual_settings.map(String) : [];
   const createdVolumes = Array.isArray(change_summary?.will_create_volume_numbers) ? change_summary.will_create_volume_numbers.map(String) : [];
   const overwrittenVolumes = Array.isArray(change_summary?.will_overwrite_volume_numbers) ? change_summary.will_overwrite_volume_numbers.map(String) : [];
+  const updateTargetWords = (_: Partial<LongOutlineForm>, values: LongOutlineForm) => {
+    const volumeCount = Number(values.volume_count || 0);
+    const chaptersPerVolume = Number(values.chapters_per_volume || 0);
+    const chapterWordTarget = Number(values.chapter_word_target || 0);
+    const chapterWordMin = Number(values.chapter_word_min || chapterWordTarget);
+    const chapterWordMax = Math.max(chapterWordMin, Number(values.chapter_word_max || chapterWordTarget));
+    const chapterCount = volumeCount * chaptersPerVolume;
+    const targetWords = chapterCount * chapterWordTarget;
+    if (targetWords > 0 && values.target_words !== targetWords) form.setFieldValue("target_words", targetWords);
+    if (targetWords > 0) {
+      form.setFieldValue("scale_plan", {
+        target_words: targetWords,
+        volume_count: volumeCount,
+        chapter_count: chapterCount,
+        chapters_per_volume: chaptersPerVolume,
+        chapter_word_target: chapterWordTarget,
+        chapter_word_min: chapterWordMin,
+        chapter_word_max: chapterWordMax,
+      });
+    }
+  };
   return (
     <Modal
       title={generationStarted ? `${titleText} · 推演工作台` : titleText}
@@ -57,7 +78,7 @@ export function OutlineGenerationModal({
       onCancel={onCancel}
     >
       {!generationStarted ? (
-        <Form form={form} layout="vertical" className="outline-preview-form">
+        <Form form={form} layout="vertical" className="outline-preview-form" onValuesChange={updateTargetWords}>
           <Typography.Title level={5}>基本信息</Typography.Title>
           <div className="form-grid-2">
             <Form.Item name="title" label="作品名" rules={[{ required: true }]}>
@@ -94,6 +115,12 @@ export function OutlineGenerationModal({
             </Form.Item>
             <Form.Item name="chapter_word_target" label="每章字数" rules={[{ required: true }]}>
               <InputNumber min={500} max={20000} step={500} className="full-width" />
+            </Form.Item>
+            <Form.Item name="chapter_word_min" label="每章最少字数" rules={[{ required: true }]}>
+              <InputNumber min={500} max={20000} step={100} className="full-width" />
+            </Form.Item>
+            <Form.Item name="chapter_word_max" label="每章最多字数" rules={[{ required: true }]}>
+              <InputNumber min={500} max={20000} step={100} className="full-width" />
             </Form.Item>
           </div>
           <Form.Item name="outline_requirement" label="生成要求">

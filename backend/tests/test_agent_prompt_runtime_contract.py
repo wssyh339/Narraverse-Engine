@@ -403,9 +403,9 @@ def test_creation_star_session_workflow_is_registered_for_visualization() -> Non
     ]
 
     agent_by_node = {node["id"]: node["agent_name"] for node in workflow["nodes"]}
-    assert agent_by_node["worldview_cards"] == "creation_star"
-    assert agent_by_node["protagonist_cards"] == "creation_star"
-    assert agent_by_node["market_position"] == "creation_star"
+    assert agent_by_node["worldview_cards"] == "creation_worldview_draw"
+    assert agent_by_node["protagonist_cards"] == "creation_protagonist_draw"
+    assert agent_by_node["market_position"] == "creation_title_packaging"
     assert agent_by_node["core_constitution"] == "chief_architect"
     assert agent_by_node["constitution_review"] == "reviewer"
     assert agent_by_node["canon_preview"] == "canon_curator"

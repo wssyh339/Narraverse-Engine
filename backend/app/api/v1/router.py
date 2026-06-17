@@ -8,6 +8,7 @@ from app.api.v1.endpoints import (
     foreshadowing,
     knowledge,
     langsmith,
+    outline_debate,
     project_studio,
     projects,
     story_bible,
@@ -36,6 +37,20 @@ api_router.add_api_route("/projects/{project_id}/outline/book/generate", project
 api_router.add_api_route("/projects/{project_id}/outline/book/commit", project_studio.commit_book_outline, methods=["POST"])
 api_router.add_api_route("/projects/{project_id}/outline/chapters/batch-generate", project_studio.generate_chapter_outlines_batch, methods=["POST"])
 api_router.add_api_route("/projects/{project_id}/outline/chapters/commit", project_studio.commit_chapter_outlines, methods=["POST"])
+api_router.add_api_route("/projects/{project_id}/outline/debate/sessions", outline_debate.create_outline_debate_session, methods=["POST"])
+api_router.add_api_route("/projects/{project_id}/outline/debate/sessions/{session_id}", outline_debate.get_outline_debate_session, methods=["GET"])
+api_router.add_api_route("/projects/{project_id}/outline/debate/sessions/{session_id}/messages", outline_debate.post_outline_debate_message, methods=["POST"])
+api_router.add_api_route("/projects/{project_id}/outline/debate/sessions/{session_id}/interrupt", outline_debate.interrupt_outline_debate_session, methods=["POST"])
+api_router.add_api_route("/projects/{project_id}/outline/debate/sessions/{session_id}/book/run", outline_debate.run_outline_debate_book, methods=["POST"])
+api_router.add_api_route("/projects/{project_id}/outline/debate/sessions/{session_id}/book/confirm", outline_debate.confirm_outline_debate_book, methods=["POST"])
+api_router.add_api_route("/projects/{project_id}/outline/debate/sessions/{session_id}/book/stream", outline_debate.stream_outline_debate_book, methods=["POST"])
+api_router.add_api_route("/projects/{project_id}/outline/debate/sessions/{session_id}/volumes/run", outline_debate.run_outline_debate_volumes, methods=["POST"])
+api_router.add_api_route("/projects/{project_id}/outline/debate/sessions/{session_id}/volumes/confirm", outline_debate.confirm_outline_debate_volumes, methods=["POST"])
+api_router.add_api_route("/projects/{project_id}/outline/debate/sessions/{session_id}/volumes/stream", outline_debate.stream_outline_debate_volumes, methods=["POST"])
+api_router.add_api_route("/projects/{project_id}/outline/debate/sessions/{session_id}/chapters/run", outline_debate.run_outline_debate_chapters, methods=["POST"])
+api_router.add_api_route("/projects/{project_id}/outline/debate/sessions/{session_id}/chapters/confirm", outline_debate.confirm_outline_debate_chapters, methods=["POST"])
+api_router.add_api_route("/projects/{project_id}/outline/debate/sessions/{session_id}/chapters/stream", outline_debate.stream_outline_debate_chapters, methods=["POST"])
+api_router.add_api_route("/projects/{project_id}/outline/debate/sessions/{session_id}/commit", outline_debate.commit_outline_debate_candidates, methods=["POST"])
 api_router.add_api_route("/projects/{project_id}/chapters", workbench.create_chapter, methods=["POST"])
 api_router.add_api_route("/projects/{project_id}/chapters", project_studio.list_chapters, methods=["GET"])
 api_router.add_api_route("/projects/{project_id}/chapters/reorder", workbench.reorder_chapters, methods=["POST"])
@@ -100,6 +115,7 @@ api_router.add_api_route("/write/batch-generate", writing.batch_generate, method
 api_router.add_api_route("/write/pause", writing.pause_job, methods=["POST"])
 api_router.add_api_route("/write/resume", writing.resume_job, methods=["POST"])
 api_router.add_api_route("/write/cancel", writing.cancel_job, methods=["POST"])
+api_router.add_api_route("/jobs", writing.list_jobs, methods=["GET"])
 api_router.add_api_route("/jobs/{job_id}", writing.get_job, methods=["GET"])
 api_router.add_api_route("/jobs/{job_id}/agent-runs", writing.get_agent_runs, methods=["GET"])
 api_router.add_api_route("/jobs/{job_id}/retry", writing.retry_job, methods=["POST"])

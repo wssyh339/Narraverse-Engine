@@ -16,6 +16,12 @@ def _not_found(message: str) -> HTTPException:
 
 class ProjectService:
     def create_project(self, db: Session, request: CreateProjectRequest) -> dict:
+        planned_volume_count = request.planned_volume_count or max(1, round(request.planned_chapter_count / 40))
+        chapters_per_volume = request.chapters_per_volume or max(1, (request.planned_chapter_count + planned_volume_count - 1) // planned_volume_count)
+        chapter_word_min = request.chapter_word_min or request.chapter_word_target
+        chapter_word_max = request.chapter_word_max or request.chapter_word_target
+        if chapter_word_max < chapter_word_min:
+            chapter_word_min, chapter_word_max = chapter_word_max, chapter_word_min
         target_words = request.target_words or request.planned_chapter_count * request.chapter_word_target
         project = models.Project(
             id=generate_id("prj"),
@@ -26,7 +32,11 @@ class ProjectService:
             style_guide=request.style_guide,
             language=request.language,
             planned_chapter_count=request.planned_chapter_count,
+            planned_volume_count=planned_volume_count,
+            chapters_per_volume=chapters_per_volume,
             chapter_word_target=request.chapter_word_target,
+            chapter_word_min=chapter_word_min,
+            chapter_word_max=chapter_word_max,
             target_words=target_words,
             current_volume=request.current_volume,
             current_chapter=request.current_chapter,
@@ -98,6 +108,8 @@ class ProjectService:
                 setattr(project, field, value)
         if "planned_chapter_count" in updates or "chapter_word_target" in updates:
             project.target_words = project.planned_chapter_count * project.chapter_word_target
+        if project.chapters_per_volume <= 0 and project.planned_volume_count > 0:
+            project.chapters_per_volume = max(1, (project.planned_chapter_count + project.planned_volume_count - 1) // project.planned_volume_count)
         db.commit()
         db.refresh(project)
         return {"project": serialize_project(project)}
@@ -163,7 +175,11 @@ class ProjectService:
             style_guide=project.style_guide,
             language=project.language,
             planned_chapter_count=project.planned_chapter_count,
+            planned_volume_count=project.planned_volume_count,
+            chapters_per_volume=project.chapters_per_volume,
             chapter_word_target=project.chapter_word_target,
+            chapter_word_min=project.chapter_word_min,
+            chapter_word_max=project.chapter_word_max,
             target_words=project.target_words,
             initial_idea=project.initial_idea,
             status="draft",

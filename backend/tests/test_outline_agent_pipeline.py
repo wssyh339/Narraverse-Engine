@@ -34,6 +34,8 @@ OUTLINE_SWARM_AGENT_NAMES = [
     "outline_swarm/WorldSettingAgent",
     "outline_swarm/CharacterArcAgent",
     "outline_swarm/ConflictAgent",
+    "outline_swarm/CharacterGeneratorAgent",
+    "outline_swarm/SettingGeneratorAgent",
     "outline_swarm/PlotArchitectAgent",
     "outline_swarm/BeatControllerAgent",
     "outline_swarm/ForeshadowingAgent",
@@ -204,3 +206,83 @@ def test_plan_chapters_calls_llm_client_for_each_outline_agent(monkeypatch) -> N
     assert [run["agent_name"] for run in swarm_runs] == OUTLINE_SWARM_AGENT_NAMES
     for run in swarm_runs:
         assert run["output_payload"]["_llm"]["source"] in {"remote_api", "local_fallback"}
+
+
+def test_outline_swarm_generates_character_and_setting_candidates() -> None:
+    from app.agents.outline_swarm.service import run_outline_swarm
+
+    result = run_outline_swarm(
+        {
+            "project_id": "project_outline_candidates",
+            "generation_kind": "book_outline",
+            "seed": {
+                "title": "候选补全测试",
+                "genre": "权谋玄幻",
+                "target_reader": "期待压迫感、权谋感和成长感的读者",
+                "premise": "被废黜的少主必须在王朝禁令下重建失落宗门。",
+                "worldview": "王朝以血脉律令限制修行资源流动。",
+                "outline_requirement": "需要生成总纲时补齐关键对手和制度设定。",
+            },
+            "volume_target": 2,
+            "chapter_target": 8,
+            "max_iterations": 14,
+        }
+    )
+
+    assert [event["agent_name"] for event in result["agent_trace"] if event["event_type"] == "agent_step"][:7] == [
+        "StoryDirectorAgent",
+        "WhyInterrogatorAgent",
+        "WorldSettingAgent",
+        "CharacterArcAgent",
+        "ConflictAgent",
+        "CharacterGeneratorAgent",
+        "SettingGeneratorAgent",
+    ]
+    assert result["character_candidates"]
+    assert result["setting_candidates"]
+    character = result["character_candidates"][0]
+    setting = result["setting_candidates"][0]
+    assert character["activity_status"] == "candidate"
+    assert character["canon_write_suggestion"]["requires_user_approval"] is True
+    assert character["first_needed_in"]["stage"] == "book_outline"
+    assert setting["activity_status"] == "candidate"
+    assert setting["canon_write_suggestion"]["requires_user_approval"] is True
+    assert setting["first_needed_in"]["stage"] == "book_outline"
+    assert any(event["event_type"] == "character_candidate" for event in result["agent_trace"])
+    assert any(event["event_type"] == "setting_candidate" for event in result["agent_trace"])
+
+
+def test_book_outline_topology_exposes_character_and_setting_candidates() -> None:
+    reset_database()
+    client = TestClient(app)
+    project_id = create_outline_project(client)
+
+    data = assert_success(
+        client.post(
+            f"/api/projects/{project_id}/outline/book/generate",
+            json={
+                "outline_requirement": "讨论全书总纲时，如果缺少阶段对手或世界规则，请生成候选角色和候选设定。",
+                "target_words": 300000,
+                "volume_count": 2,
+                "chapters_per_volume": 8,
+                "chapter_word_target": 2000,
+                "use_topology_inference": True,
+                "idempotency_key": f"book-outline-candidates:{project_id}:v1",
+            },
+        )
+    )
+
+    outline_plan = data["outline_plan"]
+    swarm = outline_plan["outline_swarm"]
+    topology = outline_plan["outline_topology"]
+    assert swarm["character_candidates"]
+    assert swarm["setting_candidates"]
+    event_types = {event["event_type"] for event in topology["events"]}
+    assert "character_candidate" in event_types
+    assert "setting_candidate" in event_types
+    artifact_types = [artifact["type"] for artifact in topology["artifacts"]]
+    assert "character_candidate" in artifact_types
+    assert "setting_candidate" in artifact_types
+    node_labels = [node["label"] for node in topology["nodes"]]
+    assert "大纲角色生成 Agent" in node_labels
+    assert "大纲设定生成 Agent" in node_labels

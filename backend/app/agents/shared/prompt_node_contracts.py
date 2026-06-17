@@ -75,6 +75,15 @@ PROMPT_NODE_CONTRACTS: dict[str, PromptNodeContract] = {
         "创作 Star 主角人设抽卡节点：只生成候选主角和主角侧 conflict_seed，不生成核心矛盾系统或小说宪法。",
         ("manual_input", "previous_cards_summary", "count"),
     ),
+    "creation_title_packaging": _contract(
+        "creation_title_packaging",
+        ("basic_info", "selected_worldview", "selected_protagonist"),
+        ("title_candidates", "market_position"),
+        schemas.CreationTitlePackagingInput,
+        schemas.CreationTitlePackagingOutput,
+        "创作 Star 书名与包装抽卡节点：只生成标题、广告句、核心卖点、读者期待、平台风格和风险提示。",
+        ("manual_input", "count"),
+    ),
     "core_conflict_system": _contract(
         "core_conflict_system",
         ("project_seed", "canon_context", "market_position"),

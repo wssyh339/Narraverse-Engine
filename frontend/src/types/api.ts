@@ -29,7 +29,11 @@ export interface Project {
   style_guide: string;
   language: string;
   planned_chapter_count: number;
+  planned_volume_count?: number;
+  chapters_per_volume?: number;
   chapter_word_target: number;
+  chapter_word_min?: number;
+  chapter_word_max?: number;
   target_words?: number;
   current_volume?: number;
   current_chapter?: number;
@@ -38,6 +42,16 @@ export interface Project {
   status: "draft" | "active" | "archived";
   created_at: string;
   updated_at: string;
+}
+
+export interface ScalePlan {
+  target_words: number;
+  volume_count: number;
+  chapter_count: number;
+  chapters_per_volume: number;
+  chapter_word_target: number;
+  chapter_word_min: number;
+  chapter_word_max: number;
 }
 
 export interface StoryBible {
@@ -59,6 +73,11 @@ export interface JobProgress {
   current_step?: string;
   total_steps?: number;
   completed_steps?: number;
+  current_chapter_no?: number;
+  child_job_id?: string;
+  child_current_step?: string;
+  child_total_steps?: number;
+  child_completed_steps?: number;
   message?: string;
 }
 
@@ -101,6 +120,14 @@ export interface Chapter {
   emotional_beats: string[];
   plot_purpose: string;
   cliffhanger: string;
+  crisis?: string;
+  climax?: string;
+  outcome?: string;
+  chapter_hook?: string;
+  foreshadowing_plants?: Record<string, unknown>[];
+  foreshadowing_payoffs?: Record<string, unknown>[];
+  canon_updates?: Record<string, unknown>[];
+  continuity_risks?: Record<string, unknown>[];
   draft_text: string;
   final_text: string;
   summary: string;
@@ -619,6 +646,14 @@ export interface CreationStarBasicInfo {
   manual_tags?: string[];
   target_reader?: string;
   target_words?: number;
+  volume_count?: number;
+  chapter_count?: number;
+  planned_chapter_count?: number;
+  chapters_per_volume?: number;
+  chapter_word_target?: number;
+  chapter_word_min?: number;
+  chapter_word_max?: number;
+  scale_plan?: ScalePlan;
   style?: string;
   initial_idea?: string;
 }

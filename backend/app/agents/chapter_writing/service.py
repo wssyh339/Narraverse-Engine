@@ -14,6 +14,9 @@ class ChapterWritingService:
     def run_chapter_draft(self, state: NovelStudioState) -> NovelStudioState:
         return agent_workflow.run_chapter_draft(state)
 
+    def stream_chapter_draft(self, state: NovelStudioState):
+        yield from agent_workflow.stream_chapter_draft(state)
+
 
 chapter_writing_service = ChapterWritingService()
 

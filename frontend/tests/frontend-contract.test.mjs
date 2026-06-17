@@ -233,20 +233,19 @@ test("workspace exposes loading, empty, error, generation, and foreshadowing con
   assert.match(studio, /\/creation-star\/options/);
   assert.match(studio, /\/creation-star\/draw/);
   assert.match(studio, /\/creation-star\/commit/);
-  for (const label of ["基本信息", "世界观抽卡", "主角人设", "标题与卖点", "立项种子", "核心与宪法", "压力测试", "正典预览", "完成创建"]) {
+  for (const label of ["基本信息", "世界观抽卡", "主角人设", "书名与包装", "核心与宪法", "完成创建"]) {
     assert.match(wizard, new RegExp(label));
+  }
+  for (const removedStep of ["立项种子", "压力测试", "正典预览"]) {
+    assert.doesNotMatch(wizard, new RegExp(`title: "${removedStep}"`));
   }
   assert.doesNotMatch(wizard, /总设定表|创建书名/);
   assert.match(wizard, /step: "title"/);
   assert.match(wizard, /selected_title/);
-  assert.match(wizard, /customTitle/);
-  assert.match(wizard, /自定义书名/);
-  assert.match(wizard, /使用自定义书名/);
+  assert.doesNotMatch(wizard, /customTitle/);
+  assert.doesNotMatch(wizard, /自定义书名/);
+  assert.doesNotMatch(wizard, /使用自定义书名/);
   assert.match(wizard, /prompt_snapshot/);
-  assert.match(wizard, /isConstitutionReady/);
-  assert.match(wizard, /needs_revision|blocked/);
-  assert.match(wizard, /approvedCanonSections/);
-  assert.match(wizard, /approved_canon_sections/);
   assert.match(studio, /replace_existing/);
   assert.match(studio, /approved_canon_sections/);
   assert.match(wizard, /name="target_reader"/);
@@ -254,18 +253,45 @@ test("workspace exposes loading, empty, error, generation, and foreshadowing con
   assert.match(wizard, /爽感、压迫感、宿命感、成长感、权谋感、情感拉扯、史诗感/);
   assert.doesNotMatch(wizard, /label="目标读者"/);
   assert.match(wizard, /DRAW_BATCH_SIZE = 3/);
+  assert.match(wizard, /loadProgressiveCardBatch/);
+  assert.match(wizard, /Promise\.all/);
+  assert.match(wizard, /count: 1/);
   assert.match(wizard, /加载三张世界观/);
   assert.match(wizard, /刷新三张世界观/);
   assert.match(wizard, /加载三张主角/);
   assert.match(wizard, /刷新三张主角/);
-  assert.match(wizard, /加载三个方向/);
-  assert.match(wizard, /刷新三个方向/);
+  assert.match(wizard, /加载三张书名包装/);
+  assert.match(wizard, /刷新三张书名包装/);
   assert.match(wizard, /完成一张显示一张|完成一个显示一个/);
+  assert.doesNotMatch(wizard, /count: DRAW_BATCH_SIZE/);
   assert.doesNotMatch(wizard, /加载一张世界观|加载一张主角|加载一个方向/);
 
-  for (const field of ["channel", "genre", "subgenres", "tags", "manual_tags", "target_reader", "target_words", "style", "initial_idea"]) {
+  for (const field of [
+    "channel",
+    "genre",
+    "subgenres",
+    "tags",
+    "manual_tags",
+    "target_reader",
+    "volume_count",
+    "chapter_count",
+    "chapter_word_min",
+    "chapter_word_max",
+    "target_words",
+    "style",
+    "initial_idea",
+  ]) {
     assert.match(wizard, new RegExp(`name="${field}"`));
   }
+  assert.match(wizard, /Scale Planner/);
+  assert.match(wizard, /computedTargetWords/);
+  assert.match(wizard, /chapter_word_target/);
+  assert.match(wizard, /label="每章字数"/);
+  assert.doesNotMatch(wizard, /label="每章最少字数"/);
+  assert.doesNotMatch(wizard, /label="每章最多字数"/);
+  assert.doesNotMatch(wizard, /每章字数范围/);
+  assert.match(wizard, /总字数不可手动填写/);
+  assert.doesNotMatch(wizard, /<Select options=\{targetWordOptions\} placeholder="选择目标字数带" \/>/);
   for (const marker of [
     "creation-star-brief-shell",
     "creation-star-brief-header",
@@ -285,7 +311,7 @@ test("workspace exposes loading, empty, error, generation, and foreshadowing con
     "应用到额外约束",
     "appendManualConstraint",
   ]) {
-    assert.match(wizard, new RegExp(marker));
+    assert.ok(wizard.includes(marker), `missing marker: ${marker}`);
   }
   assert.doesNotMatch(wizard, /IDEA_PRESETS/);
   assert.doesNotMatch(wizard, /MANUAL_CONSTRAINT_PRESETS/);
@@ -293,30 +319,210 @@ test("workspace exposes loading, empty, error, generation, and foreshadowing con
   assert.match(studio, /creation\/basic-suggestions/);
 });
 
-test("creation star can interrupt worldview generation and edit all card fields", () => {
+test("creation star title packaging is a single editable card lane without separate market cards", () => {
   const wizard = read("src/components/CreationStarWizard.tsx");
 
   for (const marker of [
+    "书名与包装",
+    "loadTitlePackaging",
+    "loadTitlePackagingBatch",
+    "titlePackagingBatchLoading",
+    "renderTitlePackaging",
+    "core_selling_point",
+    "reader_expectation",
+    "platform_style",
+    "one_sentence_ad",
+    "worldview_hook",
+    "protagonist_hook",
+    "标题包装生成失败",
+    "下一步",
+  ]) {
+    assert.ok(wizard.includes(marker), `missing marker: ${marker}`);
+  }
+
+  for (const removed of [
+    "marketCards",
+    "selectedMarketId",
+    "selectedMarket",
+    "updateMarket",
+    "renderMarketPosition",
+    "loadMarketPositionBatch",
+    "marketBatchLoading",
+    "市场定位",
+    "market_position_candidates ??",
+  ]) {
+    assert.doesNotMatch(wizard, new RegExp(removed));
+  }
+
+  assert.match(wizard, /market_position:\s*buildMarketPositionFromTitle\(selectedTitle/);
+});
+
+test("creation star seed preview localizes structured field labels", () => {
+  const wizard = read("src/components/CreationStarWizard.tsx");
+
+  assert.match(wizard, /CREATION_STAR_FIELD_LABELS/);
+  assert.match(wizard, /labelForKey/);
+  assert.match(wizard, /<strong>\{labelForKey\(key\)\}：<\/strong>/);
+  assert.doesNotMatch(wizard, /<strong>\{key\}：<\/strong>/);
+
+  for (const marker of [
+    'target_reader: "目标读者"',
+    'platform_fit: "平台风格"',
+    'selling_point: "卖点"',
+    'core_selling_point: "核心卖点"',
+    'basic_positioning: "小说基本定位"',
+    'core_narrative_engine: "核心叙事发动机"',
+    'protagonist_arc: "主角轨迹"',
+    'world_rules: "世界规则"',
+    'character_functions: "主要人物功能"',
+    'theme_pressure: "主题压力"',
+    'reader_expectation: "读者期待"',
+    'session_id: "会话 ID"',
+    'current_step: "当前步骤"',
+    'story_bible_candidate: "Story Bible 候选"',
+  ]) {
+    assert.ok(wizard.includes(marker), `missing marker: ${marker}`);
+  }
+
+  assert.match(wizard, /renderDisplayValue/);
+  assert.match(wizard, /hasDisplayValue/);
+  assert.match(wizard, /typeof value === "object"/);
+  assert.match(wizard, /renderKeyValues\(record\(value\)\)/);
+  assert.doesNotMatch(wizard, /<strong>\{labelForKey\(key\)\}：<\/strong>\{displayValue\(key, value\)\}/);
+});
+
+test("creation star removes seed review and canon preview stages from the wizard", () => {
+  const wizard = read("src/components/CreationStarWizard.tsx");
+
+  for (const removed of [
+    "renderSeed",
+    "renderConstitutionReview",
+    "renderCanonPreview",
+    "enterSeed",
+    "enterConstitutionReview",
+    "enterCanonPreview",
+    "enterFinalConfirm",
+    "确认立项种子",
+    "生成压力测试",
+    "生成正典预览",
+    "正典审批项",
+    "已选世界观完整字段",
+    "已选主角完整字段",
+    "已选书名包装完整字段",
+    "renderKeyValues(record(selectedWorldview",
+    "renderKeyValues(record(selectedProtagonist",
+    "renderKeyValues(record(selectedTitle",
+  ]) {
+    assert.ok(!wizard.includes(removed), `unexpected seed preview marker: ${removed}`);
+  }
+});
+
+test("creation star core and constitution are editable with localized fields", () => {
+  const wizard = read("src/components/CreationStarWizard.tsx");
+
+  for (const marker of [
+    "renderEditableKeyValues",
+    "updateCoreConflictField",
+    "updateNovelConstitutionField",
+    "core_conflict_system: coreConflict",
+    "novel_constitution: novelConstitution",
+    "conflict_engine_seed",
+    'protagonist_desire: "主角欲望"',
+    'world_resistance: "世界阻力"',
+    'core_conflict: "核心矛盾"',
+    'external_resistance: "外部阻力"',
+    'internal_resistance: "内部阻力"',
+    'relationship_resistance: "关系阻力"',
+    'institutional_resistance: "制度阻力"',
+    'typical_cost: "典型代价"',
+    'long_form_engine: "长篇发动机"',
+    'possible_endpoint: "可能终点"',
+    'theme_question: "主题问题"',
+    'basic_positioning: "小说基本定位"',
+    'core_narrative_engine: "核心叙事发动机"',
+    'protagonist_arc: "主角轨迹"',
+    'world_rules: "世界规则"',
+    'character_functions: "主要人物功能"',
+    'theme_pressure: "主题压力"',
+    'cost_mechanism: "代价机制"',
+    'forbidden_directions: "禁区"',
+    'long_form_sustainability: "长篇可持续性"',
+  ]) {
+    assert.ok(wizard.includes(marker), `missing marker: ${marker}`);
+  }
+
+  assert.doesNotMatch(wizard, /renderKeyValues\(coreConflict\)/);
+  assert.doesNotMatch(wizard, /renderKeyValues\(novelConstitution\)/);
+});
+
+test("creation star footer only navigates while generation uses project cache and progressive card requests", () => {
+  const wizard = read("src/components/CreationStarWizard.tsx");
+
+  for (const marker of [
+    "useEffect",
+    "formatElapsedTime",
+    "useElapsedSeconds",
+    "GenerationTimer",
+    "generation-timer",
+    "用时",
+    "worldviewGenerationActive",
+    "protagonistGenerationActive",
+    "titlePackagingGenerationActive",
+    "coreConstitutionGenerationActive",
+    "basicSuggestionMutation.isPending",
+    "GenerationTimer active={worldviewGenerationActive}",
+    "GenerationTimer active={protagonistGenerationActive}",
+    "GenerationTimer active={titlePackagingGenerationActive}",
+    "GenerationTimer active={coreConstitutionGenerationActive}",
+    "GenerationTimer active={basicSuggestionMutation.isPending}",
+    "creationStarProjectCacheKey",
+    "loadCachedCreationStar",
+    "saveCreationStarCache",
+    "localStorage",
+    "count: 1",
+    "loadProgressiveCardBatch",
+    "Promise.all",
+    "ensureCreationSession",
+    "ensureProjectSeed",
+    "previousCreationStep",
+    "nextCreationStep",
+    "上一步",
+    "下一步",
     "worldviewBatchTokenRef",
     "protagonistBatchTokenRef",
-    "stopWorldviewGeneration",
-    "stopProtagonistGeneration",
+    "titlePackagingBatchTokenRef",
     "createCardSkeleton",
     "applyGeneratedCard",
     "renderEditableText",
     "renderEditableList",
-    "进入主角抽卡",
-    "中断后续世界观生成",
     "生成中",
   ]) {
-    assert.match(wizard, new RegExp(marker));
+    assert.ok(wizard.includes(marker), `missing marker: ${marker}`);
   }
 
   assert.doesNotMatch(wizard, /逐字生成/);
   assert.doesNotMatch(wizard, /revealCardText/);
   assert.doesNotMatch(wizard, /STREAM_CHUNK_SIZE|STREAM_DELAY_MS/);
-  assert.match(wizard, /stopWorldviewGeneration\(\);\s*\n\s*setStep\(2\)/);
-  assert.match(wizard, /disabled=\{!selectedWorldview\}/);
+  assert.doesNotMatch(wizard, /Promise\.allSettled/);
+  assert.doesNotMatch(wizard, /stopWorldviewGeneration/);
+  assert.doesNotMatch(wizard, /stopProtagonistGeneration/);
+  assert.doesNotMatch(wizard, /进入主角抽卡/);
+  assert.doesNotMatch(wizard, /进入书名包装/);
+  assert.doesNotMatch(wizard, /进入立项种子/);
+  assert.doesNotMatch(wizard, /进入压力测试/);
+  assert.doesNotMatch(wizard, /进入正典预览/);
+  assert.doesNotMatch(wizard, /void loadWorldviewBatch\(sessionId\)/);
+  assert.doesNotMatch(wizard, /void loadProtagonistBatch\(sessionId\)/);
+  assert.doesNotMatch(wizard, /void loadTitlePackagingBatch\(sessionId\)/);
+  assert.doesNotMatch(wizard, /void runCoreConstitutionLane\(\)/);
+  assert.doesNotMatch(wizard, /reviewConstitution\.mutate\(sessionId\)/);
+  assert.doesNotMatch(wizard, /previewCanon\.mutate\(sessionId\)/);
+  assert.doesNotMatch(wizard, /loading=\{.*\}>下一步<\/Button>/);
+  assert.doesNotMatch(wizard, />关闭<\/Button>/);
+  assert.doesNotMatch(wizard, /关闭/);
+  assert.doesNotMatch(wizard, /disabled=\{!selectedWorldview\}/);
+  assert.doesNotMatch(wizard, /disabled=\{!selectedProtagonist\}/);
+  assert.doesNotMatch(wizard, /disabled=\{!Object\.keys\(novelConstitution\)\.length\}/);
   assert.doesNotMatch(wizard, /loading=\{protagonistBatchLoading \|\| loadProtagonist\.isPending\} onClick=\{enterProtagonist\}>进入主角抽卡/);
 
   for (const field of [
@@ -361,42 +567,33 @@ test("outline studio exposes long-novel planning controls", () => {
   const outlineDirectory = read("src/pages/outline/OutlineDirectory.tsx");
   const outlineEditor = read("src/pages/outline/OutlineEditorPanel.tsx");
   const outlineGraph = read("src/pages/outline/OutlineInferenceGraph.tsx");
-  const outlineModal = read("src/pages/outline/OutlineGenerationModal.tsx");
   const outlineCanon = read("src/pages/outline/CanonStudioPanel.tsx");
   const outlineGeneration = read("src/pages/outline/outlineGeneration.ts");
-  const outlineUtils = read("src/pages/outline/outlineUtils.tsx");
   const studio = read("src/api/studio.ts");
-  const outlineBundle = [outline, outlineDirectory, outlineEditor, outlineGraph, outlineModal, outlineCanon, outlineGeneration].join("\n");
+  const outlineBundle = [outline, outlineDirectory, outlineEditor, outlineGraph, outlineCanon, outlineGeneration].join("\n");
+  const mountedOutlineUi = [outline, outlineDirectory, outlineEditor].join("\n");
 
-  for (const label of ["生成大纲", "批量生成章纲", "基本信息", "世界观", "主角", "额外自定义输入", "真实 Agent 推演链", "总纲", "卷纲", "章节", "章纲"]) {
+  for (const label of ["总纲", "卷纲", "章节", "章纲", "大纲正文"]) {
     assert.match(outlineBundle, new RegExp(label));
   }
-  assert.match(outlineModal, /拓扑推演/);
-  assert.match(outlineModal, /Switch/);
+  assert.doesNotMatch(mountedOutlineUi, /生成大纲|批量生成章纲|openGenerationPreview|OutlineGenerationModal|outlinePreviewOpen|confirmApplyOutlineUpdate/);
+  assert.doesNotMatch(outlineDirectory, /<Plus|title="添加"/);
   assert.match(outlineGeneration, /use_topology_inference/);
-  assert.match(outline, /outlineTopology/);
   assert.match(outlineGraph, /outlineTopology/);
   assert.match(outlineGraph, /outline_topology\.nodes|topologyNodes/);
   assert.match(outlineGraph, /outline_topology\.edges|topologyEdges/);
   assert.match(outlineGraph, /ResizeObserver/);
   assert.match(outlineGraph, /requestAnimationFrame/);
-  assert.match(`${outline}\n${outlineUtils}`, /resolveCurrentInferenceAgent/);
-  assert.match(read("src/pages/outline/useOutlineGenerationJob.ts"), /sameInferenceSteps/);
-  assert.match(read("src/pages/outline/useOutlineGenerationJob.ts"), /onCompleteRef/);
   assert.doesNotMatch(outlineBundle, /生成卷纲/);
   assert.match(outlineBundle, /target_words/);
   assert.match(outlineBundle, /volume_count/);
   assert.match(outlineBundle, /chapters_per_volume/);
   assert.match(outlineBundle, /chapter_word_target/);
-  assert.match(outline, /outlinePreviewOpen/);
+  assert.match(outlineBundle, /scale_plan/);
+  assert.match(outlineBundle, /chapter_word_min/);
+  assert.match(outlineBundle, /chapter_word_max/);
   assert.match(outline, /App\.useApp/);
   assert.doesNotMatch(outline, /Modal\.confirm/);
-  assert.match(outline, /inferenceSteps/);
-  assert.match(outline, /outline_swarm/);
-  assert.match(`${outline}\n${outlineUtils}`, /agent_trace/);
-  assert.doesNotMatch(outlineUtils, /OUTLINE_AGENT_STEPS/);
-  assert.match(outline, /computedTargetWords/);
-  assert.match(outlineModal, /OutlineInferenceGraph/);
   assert.match(outlineGraph, /echarts\/charts/);
   assert.match(outlineGraph, /selectedStep/);
   assert.match(outlineGraph, /selectedStepId/);
@@ -410,8 +607,22 @@ test("outline studio exposes long-novel planning controls", () => {
   assert.match(outlineGraph, /init\(chartRef\.current\)/);
   assert.match(outline, /OutlineDirectory/);
   assert.match(outline, /OutlineEditorPanel/);
-  assert.match(outline, /OutlineGenerationModal/);
+  assert.match(outline, /OutlineDebatePanel/);
   assert.match(outline, /CanonStudioPanel/);
+  assert.match(outlineDirectory, /显示大纲正文/);
+  assert.match(outlineDirectory, /隐藏大纲正文/);
+  assert.match(outlineDirectory, /outline-directory-toolbar/);
+  assert.match(outlineDirectory, /outline-directory-icon-button/);
+  assert.match(outlineDirectory, /ListChecks/);
+  assert.match(outlineDirectory, /EyeOff/);
+  assert.match(outlineDirectory, /Eye/);
+  assert.match(outlineDirectory, /setDetailOpen\(!detailOpen\)/);
+  assert.match(outlineDirectory, /setBatchManagementEnabled\(!batchManagementEnabled\)/);
+  assert.doesNotMatch(outlineDirectory, /outline-detail-toggle/);
+  assert.doesNotMatch(outlineDirectory, /outline-batch-toggle/);
+  assert.doesNotMatch(outlineDirectory, /<Switch/);
+  assert.match(outlineEditor, /大纲正文/);
+  assert.doesNotMatch(outlineEditor, /大纲工作台/);
   assert.ok(outline.split("\n").length < 430, "OutlineStudioPage should remain an orchestrator, not a monolith");
   assert.match(outlineGraph, /outline-agent-graph/);
   assert.match(outlineGraph, /等待后端返回真实推演记录/);
@@ -422,25 +633,31 @@ test("outline studio exposes long-novel planning controls", () => {
   assert.match(outline, /sameStringArray/);
   assert.match(outlineDirectory, /批量管理/);
   assert.match(outlineDirectory, /batchManagementEnabled/);
-  assert.match(outlineBundle, /批量删除/);
-  assert.match(outlineBundle, /删除总纲/);
+  assert.match(outlineDirectory, /已选 \{selectedChapterIdsAcrossDirectory\.length\}章/);
+  assert.match(outlineBundle, /删章节/);
+  assert.match(outlineBundle, /删总纲/);
   assert.match(outlineBundle, /删除卷纲/);
-  assert.match(outlineBundle, /批量删除卷纲/);
+  assert.match(outlineBundle, /删卷纲/);
+  assert.match(outlineDirectory, /全选章节/);
+  assert.match(outlineDirectory, /可删卷纲/);
+  assert.doesNotMatch(outlineDirectory, /全选全部章节/);
+  assert.doesNotMatch(outlineDirectory, /批量删除选中/);
+  assert.doesNotMatch(outlineDirectory, /全选可删除卷纲/);
+  assert.doesNotMatch(outlineDirectory, /批量删除卷纲/);
   assert.match(outline, /deleteSelectedChapters/);
   assert.match(outline, /deleteSelectedVolumes/);
   assert.match(outline, /confirmClearOutline/);
   assert.match(outline, /confirmDeleteVolume/);
   assert.match(outline, /confirmBatchDeleteVolumes/);
   assert.match(outline, /hasDeletableOutline/);
-  assert.match(outline, /pendingOutlinePlan/);
-  assert.match(outline, /confirmApplyOutlineUpdate/);
   assert.doesNotMatch(outline, /generateFromExistingOutline/);
   assert.doesNotMatch(outline, /请先生成总纲/);
   assert.match(outlineGeneration, /overwrite_existing: true/);
   assert.doesNotMatch(outlineGeneration, /基于已生成总纲/);
   assert.match(outlineDirectory, /renderVolumeChapterTree/);
   assert.match(outlineDirectory, /outline-directory-bulk-actions/);
-  assert.match(outlineDirectory, /批量管理[\s\S]*删除总纲/);
+  assert.match(outlineDirectory, /outline-bulk-footer/);
+  assert.match(outlineDirectory, /outline-directory-bulk-actions[\s\S]*删总纲/);
   assert.match(outlineDirectory, /selectedVolumeIds/);
   assert.match(outlineDirectory, /toggleAllVolumeOutlines/);
   assert.match(outlineDirectory, /outline-volume-group/);
@@ -449,10 +666,7 @@ test("outline studio exposes long-novel planning controls", () => {
   assert.doesNotMatch(outlineDirectory, /回收站/);
   assert.doesNotMatch(outline, /回收站/);
   assert.match(outline, /toggleDirectorySelection/);
-  assert.match(outlineEditor, /openGenerationPreview/);
   assert.doesNotMatch(outlineEditor, /generateFromExistingOutline/);
-  assert.doesNotMatch(outlineEditor, /openGenerationPreview\("volume"\)/);
-  assert.match(outlineEditor, /openGenerationPreview\("chapter"\)/);
   assert.match(outlineGeneration, /bookOutlineGenerate/);
   assert.match(outlineGeneration, /chapterOutlineBatchGenerate/);
   assert.match(studio, /outline\/book\/generate/);
@@ -467,19 +681,6 @@ test("outline studio exposes long-novel planning controls", () => {
   assert.match(outlineEditor, /outline-prose/);
   assert.doesNotMatch(outlineEditor, /readableJson/);
   assert.doesNotMatch(outlineEditor, /Descriptions/);
-  assert.match(outlineModal, /generationStarted/);
-  assert.match(outlineModal, /推演工作台/);
-  assert.match(outlineModal, /当前激活 Agent/);
-  assert.match(outlineModal, /resultText/);
-  assert.match(outlineModal, /推演结果文本/);
-  assert.match(outlineModal, /确认写入摘要/);
-  assert.match(outlineModal, /change_summary/);
-  assert.match(outlineModal, /确认后写入正式数据/);
-  assert.match(outlineModal, /确认更新/);
-  assert.match(outlineModal, /onConfirmUpdate/);
-  assert.match(outline, /buildRunningInferenceSteps/);
-  assert.match(outline, /isOutlineResultReady/);
-  assert.match(outline, /activeAgentName/);
   assert.match(outline, /setLastOutlinePlan/);
   assert.doesNotMatch(outlineCanon, /正典补全/);
   assert.doesNotMatch(outlineCanon, /长篇小说多 Agent 协作推演与正典补全系统/);
@@ -493,7 +694,7 @@ test("outline studio exposes long-novel planning controls", () => {
   assert.match(studio, /outline_plan/);
 });
 
-test("outline running graph is pruned by generation mode and topology switch", () => {
+test("outline studio no longer mounts the legacy generation modal flow", () => {
   const outline = read("src/pages/OutlineStudioPage.tsx");
   const outlineUtils = read("src/pages/outline/outlineUtils.tsx");
   const outlineJobHook = read("src/pages/outline/useOutlineGenerationJob.ts");
@@ -504,10 +705,130 @@ test("outline running graph is pruned by generation mode and topology switch", (
   assert.match(outlineUtils, /BOOK_OUTLINE_SWARM_AGENT_ROLES/);
   assert.match(outlineUtils, /agentName !== "BeatControllerAgent"/);
   assert.match(outlineUtils, /CHAPTER_OUTLINE_AGENT_ROLES/);
-  assert.match(outline, /buildRunningInferenceSteps\(\{\s*generationMode/);
-  assert.match(outline, /useTopologyInference: Boolean\(values\.use_topology_inference\)/);
+  assert.doesNotMatch(outline, /buildRunningInferenceSteps\(\{\s*generationMode/);
+  assert.doesNotMatch(outline, /useTopologyInference: Boolean\(values\.use_topology_inference\)/);
+  assert.doesNotMatch(outline, /useOutlineGenerationJob/);
   assert.match(outlineJobHook, /useTopologyInference/);
   assert.match(outlineJobHook, /buildRunningInferenceSteps\(\{\s*generationMode,\s*useTopologyInference/);
+});
+
+test("outline studio exposes streaming debate engine phases", () => {
+  const outline = read("src/pages/OutlineStudioPage.tsx");
+  const panel = read("src/pages/outline/OutlineDebatePanel.tsx");
+  const studio = read("src/api/studio.ts");
+  const styles = read("src/styles/index.css");
+
+  assert.match(outline, /OutlineDebatePanel/);
+  assert.match(studio, /outline\/debate\/sessions/);
+  assert.match(studio, /streamOutlineDebatePhase/);
+  assert.match(studio, /type: "delta"/);
+  assert.match(studio, /display_text\?: string/);
+  assert.match(studio, /handoff\?:/);
+  assert.match(studio, /confirmOutlineDebatePhase/);
+  assert.match(studio, /commitOutlineDebateCandidates/);
+  assert.match(studio, /outline\/debate\/sessions\/\$\{sessionId\}\/commit/);
+  assert.match(studio, /candidate_status/);
+  assert.match(studio, /confirmation_items/);
+  assert.match(studio, /target_volume_no/);
+  assert.match(studio, /target_chapter_no/);
+  assert.match(studio, /item_key/);
+  assert.match(studio, /confirmed_candidates/);
+  assert.match(studio, /formal_commit/);
+  assert.match(panel, /讨论总纲/);
+  assert.match(panel, /讨论卷纲/);
+  assert.match(panel, /讨论章纲/);
+  assert.match(panel, /streamOutlineDebatePhase/);
+  assert.match(panel, /appendTurnDelta/);
+  assert.match(panel, /emptyStreamingTurn/);
+  assert.match(panel, /event\.type === "delta"/);
+  assert.match(panel, /display_text !== undefined/);
+  assert.match(panel, /event\.turn\.handoff\?\.display/);
+  assert.match(panel, /交接：\{event\.turn\.handoff\.display\}/);
+  assert.match(panel, /真实 Agent 议事流/);
+  assert.doesNotMatch(panel, /真实 Agent 议事流会逐条显示/);
+  assert.doesNotMatch(panel, /outline-debate-intro/);
+  assert.doesNotMatch(panel, /Scale Planner：/);
+  assert.doesNotMatch(outline, /Scale Planner：\$\{debateScalePlan/);
+  assert.match(studio, /canon_materializations/);
+  assert.match(panel, /Mentions/);
+  assert.match(panel, /加入讨论/);
+  assert.match(panel, /发表意见/);
+  assert.match(panel, /继续下一轮/);
+  assert.match(panel, /打断发言/);
+  assert.match(panel, /形成阶段结论/);
+  assert.match(panel, /确认总纲/);
+  assert.match(panel, /确认本卷/);
+  assert.match(panel, /确认本章/);
+  assert.match(panel, /activeItemKey/);
+  assert.match(panel, /confirmation_items/);
+  assert.match(panel, /target_volume_no/);
+  assert.match(panel, /target_chapter_no/);
+  assert.match(panel, /item_key/);
+  assert.match(panel, /写入正式大纲/);
+  assert.match(panel, /待确认|已确认|已过期/);
+  assert.match(panel, /candidateStatusLabel/);
+  assert.match(panel, /confirmActivePhase/);
+  assert.match(panel, /commitConfirmedCandidates/);
+  assert.match(panel, /allCandidatesConfirmed/);
+  assert.doesNotMatch(panel, /议事正文/);
+  assert.doesNotMatch(panel, /隐藏正文/);
+  assert.doesNotMatch(panel, /显示正文/);
+  assert.doesNotMatch(panel, /bodyHidden/);
+  assert.match(panel, /outline-debate-event-text/);
+  assert.doesNotMatch(panel, /outline-debate-requirement/);
+  assert.doesNotMatch(panel, /is-body-hidden/);
+  assert.match(panel, /outline-debate-composer-dock/);
+  assert.match(panel, /streamViewportRef/);
+  assert.match(panel, /streamEndRef/);
+  assert.match(panel, /回到最新发言/);
+  assert.match(panel, /scrollIntoView/);
+  assert.match(panel, /outline-debate-round-separator/);
+  assert.match(panel, /is-active-speaker/);
+  assert.match(panel, /当前发言/);
+  assert.match(panel, /joinDiscussion \? \(/);
+  assert.doesNotMatch(panel, /快速本地推演/);
+  assert.doesNotMatch(panel, /local_preview/);
+  assert.doesNotMatch(panel, /阶段候选产物/);
+  assert.doesNotMatch(panel, /outline-debate-artifacts/);
+  assert.doesNotMatch(panel, /artifactsCollapsed/);
+  assert.doesNotMatch(panel, /展开候选|收起候选/);
+  assert.doesNotMatch(panel, /outline-debate-artifact-summary/);
+  assert.doesNotMatch(panel, /Agent 能力/);
+  assert.doesNotMatch(panel, /阶段校验/);
+  assert.doesNotMatch(panel, /renderAgentSpecs/);
+  assert.doesNotMatch(panel, /renderValidationReport/);
+  assert.match(studio, /OutlineDebateAgentSpec/);
+  assert.match(studio, /OutlineDebateValidationReport/);
+  assert.match(studio, /postOutlineDebateMessage/);
+  assert.match(studio, /interruptOutlineDebateSession/);
+  assert.match(studio, /join_discussion/);
+  assert.doesNotMatch(studio, /local_preview/);
+  assert.match(studio, /event: "pause"|type: "pause"/);
+  assert.match(styles, /outline-debate-panel/);
+  assert.match(styles, /outline-debate-composer/);
+  assert.match(styles, /outline-directory-toolbar/);
+  assert.match(styles, /outline-directory-icon-button/);
+  assert.doesNotMatch(styles, /outline-batch-toggle/);
+  assert.doesNotMatch(styles, /outline-detail-toggle/);
+  assert.match(styles, /grid-template-columns:\s*minmax\(210px,\s*250px\)\s*minmax\(0,\s*1fr\)/);
+  assert.match(styles, /white-space:\s*pre-wrap/);
+  assert.match(styles, /overflow-wrap:\s*anywhere/);
+  assert.doesNotMatch(styles, /outline-debate-panel\.is-body-hidden/);
+  assert.doesNotMatch(styles, /outline-debate-requirement/);
+  assert.match(styles, /\.outline-debate-panel\s*\{[\s\S]*overflow-y:\s*auto/);
+  assert.match(styles, /\.outline-debate-panel\s*\{[\s\S]*scrollbar-gutter:\s*stable/);
+  assert.match(styles, /\.outline-debate-panel\s*\{[\s\S]*overscroll-behavior:\s*contain/);
+  assert.match(styles, /\.outline-debate-body\s*\{[\s\S]*grid-template-columns:\s*minmax\(0,\s*1fr\)/);
+  assert.match(styles, /\.outline-debate-body\s*\{[\s\S]*min-height:\s*clamp\(420px,\s*58vh,\s*760px\)/);
+  assert.match(styles, /\.outline-debate-composer-dock\s*\{(?:(?!\}).)*display:\s*grid/s);
+  assert.doesNotMatch(styles, /\.outline-debate-composer-dock\s*\{(?:(?!\}).)*position:\s*sticky/s);
+  assert.doesNotMatch(styles, /\.outline-debate-composer-dock\s*\{(?:(?!\}).)*bottom:\s*0/s);
+  assert.doesNotMatch(styles, /\.outline-debate-composer-dock\s*\{(?:(?!\}).)*linear-gradient/s);
+  assert.match(styles, /outline-debate-stream-body[\s\S]*overflow-y:\s*auto/);
+  assert.doesNotMatch(styles, /outline-debate-body\.is-artifacts-collapsed/);
+  assert.doesNotMatch(styles, /outline-debate-artifacts/);
+  assert.match(styles, /outline-debate-round-separator/);
+  assert.match(styles, /outline-debate-event\.is-active-speaker/);
 });
 
 test("world generation previews candidates before users commit them", () => {
@@ -620,13 +941,26 @@ test("batch page exposes real job status and control actions", () => {
   const studio = read("src/api/studio.ts");
 
   assert.match(batch, /setJob\(result\.job\)/);
+  assert.match(batch, /useQuery/);
+  assert.match(batch, /listChapters/);
+  assert.match(batch, /getJob/);
+  assert.match(batch, /localStorage/);
+  assert.match(batch, /请先确认章纲/);
+  assert.match(batch, /批量任务已创建/);
+  assert.match(batch, /已完成章节/);
+  assert.match(batch, /失败章节/);
   assert.match(batch, /暂停/);
   assert.match(batch, /恢复/);
   assert.match(batch, /取消/);
+  assert.match(batch, /重试/);
+  assert.doesNotMatch(batch, /initialValues=\{\{ chapter_start: 1, chapter_end: 3 \}\}/);
+  assert.doesNotMatch(batch, /正在生成章节\.\.\./);
   assert.doesNotMatch(batch, /mutation\.isPending \? 45/);
+  assert.match(studio, /\/jobs\/\$\{jobId\}/);
   assert.match(studio, /\/write\/pause/);
   assert.match(studio, /\/write\/resume/);
   assert.match(studio, /\/write\/cancel/);
+  assert.match(studio, /\/jobs\/\$\{jobId\}\/retry/);
 });
 
 test("job page renders readable outline swarm agent run details", () => {

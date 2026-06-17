@@ -11,6 +11,9 @@ class BookOutlineGenerateRequest(APIModel):
     volume_count: int = Field(default=3, ge=1, le=30)
     chapters_per_volume: int = Field(default=50, ge=1, le=200)
     chapter_word_target: int | None = Field(default=None, ge=500, le=20000)
+    chapter_word_min: int | None = Field(default=None, ge=500, le=20000)
+    chapter_word_max: int | None = Field(default=None, ge=500, le=20000)
+    scale_plan: dict = Field(default_factory=dict)
     use_topology_inference: bool = True
     idempotency_key: str = Field(min_length=1)
     model: str | None = None
@@ -43,6 +46,13 @@ class ChapterOutlineRange(APIModel):
 class ChapterOutlineBatchGenerateRequest(APIModel):
     chapter_ranges: list[ChapterOutlineRange] = Field(min_length=1, max_length=30)
     generation_requirement: str = Field(default="", max_length=12000)
+    target_words: int | None = Field(default=None, ge=30000, le=10000000)
+    volume_count: int | None = Field(default=None, ge=1, le=30)
+    chapters_per_volume: int | None = Field(default=None, ge=1, le=200)
+    chapter_word_target: int | None = Field(default=None, ge=500, le=20000)
+    chapter_word_min: int | None = Field(default=None, ge=500, le=20000)
+    chapter_word_max: int | None = Field(default=None, ge=500, le=20000)
+    scale_plan: dict = Field(default_factory=dict)
     overwrite_existing: bool = False
     use_topology_inference: bool = True
     idempotency_key: str = Field(min_length=1)
@@ -60,3 +70,58 @@ class ChapterOutlineCommitRequest(APIModel):
         if not self.job_id and not self.chapter_outlines:
             raise ValueError("job_id 或 chapter_outlines 至少需要提供一个")
         return self
+
+
+class OutlineDebateSessionCreateRequest(APIModel):
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=240)
+    brief: str = Field(default="", max_length=20000)
+    model: str | None = None
+
+
+class OutlineDebateRunRequest(APIModel):
+    requirement: str = Field(default="", max_length=20000)
+    use_topology_inference: bool = True
+    target_words: int | None = Field(default=None, ge=30000, le=10000000)
+    volume_count: int = Field(default=3, ge=1, le=30)
+    chapters_per_volume: int = Field(default=30, ge=1, le=200)
+    chapter_word_target: int | None = Field(default=None, ge=500, le=20000)
+    chapter_word_min: int | None = Field(default=None, ge=500, le=20000)
+    chapter_word_max: int | None = Field(default=None, ge=500, le=20000)
+    scale_plan: dict = Field(default_factory=dict)
+    chapter_ranges: list[ChapterOutlineRange] = Field(default_factory=list, max_length=30)
+    target_volume_no: int | None = Field(default=None, ge=1, le=30)
+    target_chapter_no: int | None = Field(default=None, ge=1)
+    refresh_phase: bool = True
+    join_discussion: bool = False
+    target_agent_name: str | None = Field(default=None, max_length=120)
+    user_message: str = Field(default="", max_length=12000)
+    finish_phase: bool = False
+    local_preview: bool = False
+    model: str | None = None
+
+    @model_validator(mode="after")
+    def validate_chapter_word_range(self) -> "OutlineDebateRunRequest":
+        if self.chapter_word_min is not None and self.chapter_word_max is not None and self.chapter_word_max < self.chapter_word_min:
+            raise ValueError("chapter_word_max 必须大于或等于 chapter_word_min")
+        return self
+
+
+class OutlineDebateConfirmRequest(APIModel):
+    item_key: str = Field(default="", max_length=80)
+    notes: str = Field(default="", max_length=4000)
+
+
+class OutlineDebateCommitRequest(APIModel):
+    overwrite_existing_chapters: bool = True
+    notes: str = Field(default="", max_length=4000)
+
+
+class OutlineDebateUserMessageRequest(APIModel):
+    phase: str = Field(min_length=1, max_length=24)
+    message: str = Field(min_length=1, max_length=12000)
+    target_agent_name: str | None = Field(default=None, max_length=120)
+
+
+class OutlineDebateInterruptRequest(APIModel):
+    phase: str | None = Field(default=None, max_length=24)
+    reason: str = Field(default="", max_length=4000)

@@ -14,5 +14,7 @@ class PlanChaptersRequest(APIModel):
     volume_count: int | None = Field(default=None, ge=1, le=30)
     chapters_per_volume: int | None = Field(default=None, ge=1, le=200)
     chapter_word_target: int | None = Field(default=None, ge=500, le=20000)
+    chapter_word_min: int | None = Field(default=None, ge=500, le=20000)
+    chapter_word_max: int | None = Field(default=None, ge=500, le=20000)
     model: str | None = None
     async_mode: bool = False

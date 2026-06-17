@@ -101,7 +101,21 @@ def test_duplicate_chapter_plan_with_same_idempotency_key_creates_one_job() -> N
     assert len(chapters) == 2
 
 
-def test_repeated_batch_generation_creates_fresh_draft_jobs_and_reports_complete_progress() -> None:
+def test_batch_generation_rejects_missing_confirmed_chapters_without_placeholders() -> None:
+    reset_database()
+    client = TestClient(app)
+    project_id = create_project(client)
+
+    response = client.post("/api/write/batch-generate", json={"project_id": project_id, "chapter_start": 1, "chapter_end": 3})
+
+    assert response.status_code == 400
+    assert_error_envelope(response.json(), "VALIDATION_ERROR")
+    assert "请先确认章纲" in response.json()["error"]["message"]
+    chapters = client.get(f"/api/projects/{project_id}/chapters").json()["data"]["chapters"]
+    assert chapters == []
+
+
+def test_repeated_batch_generation_creates_fresh_async_parent_jobs() -> None:
     reset_database()
     client = TestClient(app)
     project_id = create_project(client)
@@ -113,6 +127,7 @@ def test_repeated_batch_generation_creates_fresh_draft_jobs_and_reports_complete
             "chapter_count": 2,
             "outline_requirement": "建立空间站谜团。",
             "overwrite_existing": False,
+            "idempotency_key": f"acceptance-batch-plan:{project_id}:1-2",
         },
     )
 
@@ -124,9 +139,14 @@ def test_repeated_batch_generation_creates_fresh_draft_jobs_and_reports_complete
     assert_success_envelope(first.json())
     assert_success_envelope(second.json())
     assert first.json()["data"]["job"]["id"] != second.json()["data"]["job"]["id"]
+    assert first.json()["data"]["job"]["job_type"] == "batch_generate"
+    assert first.json()["data"]["job"]["status"] in {"queued", "running"}
+    assert first.json()["data"]["job"]["progress"]["total_steps"] == 2
+    assert first.json()["data"]["job"]["progress"]["completed_steps"] == 0
+    assert first.json()["data"]["chapters"] == []
     assert second.json()["data"]["job"]["progress"]["total_steps"] == 2
-    assert second.json()["data"]["job"]["progress"]["completed_steps"] == 2
-    assert len(second.json()["data"]["chapters"]) == 2
+    assert second.json()["data"]["job"]["progress"]["completed_steps"] == 0
+    assert second.json()["data"]["chapters"] == []
 
 
 def test_missing_api_key_uses_local_fallback_and_records_successful_job() -> None:

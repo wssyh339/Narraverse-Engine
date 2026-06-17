@@ -130,7 +130,7 @@ MVP 阶段已有表继续保留；1.0 通过运行时 SQLite 轻量迁移补齐�
 - LLM 模型：`GET /api/llm/models`，`GET/PUT /api/agent-model-configs`，`DELETE /api/agent-model-configs/{workflow_id}/{agent_name}`
 - Deep Agent：`GET/PUT /api/deep-agent/config`，`POST/GET /api/projects/{id}/deep-agent/sessions`，`GET /api/projects/{id}/deep-agent/sessions/{session_id}`，`POST /api/projects/{id}/deep-agent/sessions/{session_id}/chat/stream`，`POST /api/projects/{id}/deep-agent/tool-calls/{tool_call_id}/approve`，`POST /api/projects/{id}/deep-agent/tool-calls/{tool_call_id}/reject`
 - LangSmith：`GET /api/langsmith/status`，`GET /api/langsmith/runs/{job_id}`，`POST /api/langsmith/prompts/push`，`POST /api/langsmith/prompts/pull-preview`，`POST /api/langsmith/evals/run`
-- 任务：`POST /api/write/generate`，`POST /api/write/batch-generate`，`POST pause/resume/cancel`，`GET /api/jobs/{job_id}`，`GET /api/jobs/{job_id}/agent-runs`
+- 任务：`POST /api/write/generate`，`POST /api/write/batch-generate`，`POST pause/resume/cancel`，`GET /api/jobs`，`GET /api/jobs/{job_id}`，`GET /api/jobs/{job_id}/agent-runs`
 - 版本：`GET /api/versions`，`POST /api/versions/compare`，`POST rollback/branch`
 - 图谱/设定集：`GET/POST /api/projects/{id}/characters`，`GET/PUT/DELETE /api/projects/{id}/characters/{character_id}`，`GET/POST /api/projects/{id}/entities`，`PUT/DELETE /api/projects/{id}/entities/{entity_id}`，`GET/POST /api/projects/{id}/world-facts`，`PUT/DELETE /api/projects/{id}/world-facts/{fact_id}`，`GET /api/projects/{id}/graph`，`GET /api/projects/{id}/canon/context`
 - Agent 辅助生成设定：`POST /api/projects/{id}/settings/generate`，支持 `target=characters/entities/world_facts/all`；前端默认传 `preview_only=true` 仅生成候选预览，不写入角色/实体/世界观事实和图谱，用户确认后再调用对应创建接口正式入库。
@@ -195,12 +195,12 @@ MVP 阶段已有表继续保留；1.0 通过运行时 SQLite 轻量迁移补齐�
 
 用户已确认将粘贴的长篇小说生产提示词拆分为 `backend/app/prompts/00_*.md` 到 `31_*.md`，并作为 1.0 Agent 重构的正式提示词库。
 
-2026-06-15 补充：创作 Star 世界观抽卡从总提示词中拆出为 `backend/app/prompts/32_creation_worldview_draw_prompt.md`，`prompt_id=creation_worldview_draw`。主角人设抽卡从总提示词中拆出为 `backend/app/prompts/33_creation_protagonist_draw_prompt.md`，`prompt_id=creation_protagonist_draw`。这两个提示词只服务候选卡片生成，不属于新增正式 Agent 角色；世界观只生成 `conflict_engine_seed`（冲突发动机种子），主角只生成 `conflict_seed`（主角侧冲突种子），不得在抽卡阶段强行生成 `core_conflict_system` 或 `novel_constitution`。用户选定世界观、主角并确认立项种子后，才由 `chief_architect` 进入核心矛盾系统与小说宪法流程。
+2026-06-15 补充：创作 Star 世界观抽卡从总提示词中拆出为 `backend/app/prompts/32_creation_worldview_draw_prompt.md`，`prompt_id=creation_worldview_draw`。主角人设抽卡从总提示词中拆出为 `backend/app/prompts/33_creation_protagonist_draw_prompt.md`，`prompt_id=creation_protagonist_draw`。书名与包装抽卡从总提示词中拆出为 `backend/app/prompts/34_creation_title_packaging_prompt.md`，`prompt_id=creation_title_packaging`。这三个提示词只服务候选卡片生成，不属于新增正式 Agent 角色；世界观只生成 `conflict_engine_seed`（冲突发动机种子），主角只生成 `conflict_seed`（主角侧冲突种子），书名包装只生成可编辑的标题、广告句、核心卖点、读者期待、平台风格和风险提示，不得在抽卡阶段强行生成 `core_conflict_system` 或 `novel_constitution`。用户选定世界观、主角、书名包装并确认立项种子后，才由 `chief_architect` 进入核心矛盾系统与小说宪法流程。
 
 重构原则：
 
-- 提示词是可复用模板，Agent 是角色职责，Workflow 决定调用顺序；不得把 `00`-`31` 正式提示词库或 `32`/`33` 创作 Star 专用补充提示词机械扩展为独立正式 Agent。
-- `creation_star` 不得默认绑定 `core_conflict_system` 与 `novel_constitution`；世界观抽卡必须单独调用 `creation_worldview_draw`，主角人设抽卡必须单独调用 `creation_protagonist_draw`，并记录专用 Agent 运行名，便于 Agent 栏追踪实际应用。
+- 提示词是可复用模板，Agent 是角色职责，Workflow 决定调用顺序；不得把 `00`-`31` 正式提示词库或 `32`/`33`/`34` 创作 Star 专用补充提示词机械扩展为独立正式 Agent。
+- `creation_star` 不得默认绑定 `core_conflict_system` 与 `novel_constitution`；世界观抽卡必须单独调用 `creation_worldview_draw`，主角人设抽卡必须单独调用 `creation_protagonist_draw`，书名与包装抽卡必须单独调用 `creation_title_packaging`，并记录专用 Agent 运行名，便于 Agent 栏追踪实际应用。
 - 保留 0.4 中的 11 个正式 Agent 作为对外稳定角色；新增“核心矛盾、小说宪法、章节卡、叙事账本、结构体检”等能力优先实现为 workflow node 或 prompt task。
 - 后端必须提供统一 Prompt Catalog，记录 `prompt_id`、文件名、所属工作流、默认 Agent 和标题。
 - `/api/workflows` 必须同时保留既有工作流结构，并新增“立项与小说宪法、全书与分卷规划、单章生产闭环、连载维护与体检、专项增强”五条提示词驱动工作流。
@@ -219,7 +219,7 @@ MVP 阶段已有表继续保留；1.0 通过运行时 SQLite 轻量迁移补齐�
 基本信息
   -> 世界观逐卡加载
   -> 主角人设逐卡加载
-  -> 标题与卖点方向逐卡加载
+  -> 书名与包装方向逐卡加载
   -> 立项种子确认
   -> 核心矛盾系统
   -> 小说宪法
@@ -230,7 +230,7 @@ MVP 阶段已有表继续保留；1.0 通过运行时 SQLite 轻量迁移补齐�
 
 职责边界：
 
-- `creation_star` 只负责世界观、主角、标题和市场卖点的候选抽卡；所有输出在用户确认前均为候选。
+- `creation_star` 只负责世界观、主角、书名与包装卖点的候选抽卡；所有输出在用户确认前均为候选。
 - `chief_architect` 负责把已确认的立项种子收敛为 `core_conflict_system` 与 `novel_constitution`。
 - `reviewer` 负责 `constitution_review`，状态必须为 `passed`、`passed_with_notes`、`needs_revision` 或 `blocked`。
 - `canon_curator` 负责把立项种子、核心矛盾、小说宪法和压力测试映射为 `canon_candidates`，并在用户最终确认后写入正式设定集。
@@ -432,6 +432,148 @@ LangSmith 是可选观测与 Prompt/Eval 管理层：
 
 文档版本：2026-06-15
 
+### 0.18 大纲线角色与设定候选生成修订（2026-06-15）
+
+大纲线允许在总纲、卷纲或章纲推演发现缺口时调用候选补全 Agent，但该能力只属于大纲线，不作为设定工作台、正文生成或创作 Star 的全局入口。
+
+- `CharacterGeneratorAgent` 生成大纲所需候选角色档案卡，必须标记 `activity_status=candidate`、`first_needed_in`、`story_function`、`relationship_hooks`、`duplicate_check` 与 `canon_write_suggestion.requires_user_approval=true`；这里的审批点等同于用户确认对应总纲、卷纲或章纲候选。
+- `SettingGeneratorAgent` 生成大纲所需候选设定档案，覆盖世界规则、组织、地点、物件、事件、制度、资源或禁忌，必须标记 `activity_status=candidate`、`first_needed_in`、`conflict_utility`、`foreshadowing_utility`、`continuity_check` 与 `canon_write_suggestion.requires_user_approval=true`；这里的审批点等同于用户确认对应总纲、卷纲或章纲候选。
+- 两个 Agent 不得在讨论发言阶段自行写入 `characters`、`story_entities`、`world_facts`、`graph_nodes` 或 `graph_edges`；用户确认对应大纲候选后，服务层必须把未冲突的角色/设定候选物化为正式角色、实体或世界事实，并同步正典文件树与版本审计。
+- 大纲主持链必须优先判断是否复用已有角色/设定；只有现有正典无法承担剧情功能时才生成新候选。
+- `outline_topology` 必须保留 `character_candidate` 与 `setting_candidate` 事件，前端可展示其来源 Agent、首次需要位置、重要度、冲突用途、确认审批范围和物化结果。
+
+文档版本：2026-06-17
+
+### 0.19 大纲议事引擎修订（2026-06-15）
+
+大纲线可以新增“议事引擎”作为 `outline_swarm` 的上层交互式编排方式，用于把大纲生成拆成三个互相独立、可重跑、可追踪的讨论阶段：
+
+1. 讨论总纲：围绕全书核心承诺、终局方向、主线压力、读者体验和长期伏笔形成总纲候选。
+2. 讨论卷纲：围绕分卷功能、节奏模型、阶段目标、卷末钩子和卷间因果形成卷纲候选。
+3. 讨论章纲：围绕章节范围、场景推进、危机/高潮/结果区分、章末钩子和连续性风险形成章纲候选。
+
+议事引擎约束：
+
+- 后端必须提供会话式接口，保存每个阶段的 `turns`、`decisions`、`artifacts`、`outline_topology` 和最终候选结果；阶段之间可以读取上游结果，但必须允许独立运行和刷新。
+- 前端必须展示实时 Agent 讨论流，不得用纯前端假动画替代后端事件；流式事件至少包含 `meta`、`turn`、`decision`、`artifact`、`done`。
+- 议事中的角色生成与设定生成仅限大纲线，输出为 `character_candidate` 与 `setting_candidate` artifact，并标记 `status=candidate`、`source=outline_debate`、`requires_user_approval=true`；讨论生成阶段不得直接写库，用户确认对应总纲、卷纲或章纲候选后必须由服务层同步物化。
+- 议事结果确认写入仍复用既有两段式“生成候选 → 用户确认 → commit 写入”边界；对角色/设定候选而言，确认总纲/本卷/本章即为审批点，但服务层仍必须执行重复项扫描、设定锁定保护、来源记录和正典版本审计。
+- `/api/workflows` 和 Agent 轨迹中应能区分 `outline_swarm` 与 `outline_debate`，便于用户理解是动态推演还是议事讨论。
+
+文档版本：2026-06-17
+
+### 0.20 回合制实时议事体验修订（2026-06-16）
+
+大纲议事引擎必须从“一次性生成后回放”升级为回合制实时议事。该能力仍属于 `outline_debate`，不得替代 `outline_swarm`、两段式大纲提交或正典审批边界。
+
+交互约束：
+
+- 前端必须提供“加入讨论”开关。关闭时按当前阶段自动连续推演；开启时每个 Agent 发言后进入暂停状态，等待用户继续、发表意见、打断或形成阶段结论。
+- 用户意见必须作为会话消息保存，可通过 `@` 指定讨论角色；被指定角色应在下一轮优先回应，除非该角色不属于当前议事角色白名单。
+- “打断发言”必须终止当前流式请求并把会话/阶段标记为 interrupted 或 paused，不得继续生成阶段产物。
+- “发表意见”只影响后续议事上下文，不直接改写 Story Bible、Volumes、Chapters、角色、实体、世界事实或图谱。
+- “形成阶段结论”必须由主持链根据已有 turns、用户意见和阶段目标生成 `decisions`、候选产物与 `outline_topology`，仍需用户确认后才能 commit 写入。
+
+后端接口补充：
+
+- 现有 `POST /api/projects/{id}/outline/debate/sessions/{session_id}/{phase}/stream` 在 `join_discussion=true` 时必须按单轮推进并返回 `pause` 事件；`join_discussion=false` 保持自动连续完成阶段。
+- `POST /api/projects/{id}/outline/debate/sessions/{session_id}/messages` 保存用户意见、`target_agent_name` 和解析后的 mentions。
+- `POST /api/projects/{id}/outline/debate/sessions/{session_id}/interrupt` 标记会话中断，并返回最新 session。
+- 流式事件至少包含 `meta`、`turn`、`pause`、`user_message`、`interrupt`、`decision`、`artifact`、`done`、`error`。`pause` 事件必须携带最新 session、phase 和 next_agent 候选。
+
+实现边界：
+
+- 第一版采用 SSE + 控制 POST，不引入 WebSocket 新协议；如未来支持多人同时在线，再新增 WebSocket 议事通道。
+- 会话状态优先保存在现有 `generation_jobs.result_json` 中，不新增表；若后续需要跨设备长期检索，再评估独立 `outline_debate_sessions` 表。
+- 前端可复用 `assistant-ui`、Ant Design `Mentions`、现有 SSE 读取器和 `OutlineInferenceGraph`，不得引入新的聊天 UI 重依赖。
+
+文档版本：2026-06-16
+
+### 0.21 分层大纲议事候选确认修订（2026-06-16）
+
+大纲议事生产线必须把总纲、卷纲、章纲拆成三个可独立展示、可重跑的候选阶段；其中总纲仍为阶段级确认，卷纲与章纲必须进一步拆成逐卷、逐章确认。议事讨论阶段仍只产出候选；用户确认某一卷或某一章后，服务层可以立即写入对应正式 `volumes` / `chapters` 记录，并同步 `canon_nodes` 与 `canon_versions`，形成“单项确认 → 单项正典更新”的闭环。
+
+阶段门禁：
+
+- `book` 阶段产出 `book_outline_candidate`，状态初始为 `pending_confirmation`。
+- 用户确认 `book_outline_candidate` 后，`volumes` 阶段才允许生成。
+- `volumes` 阶段每次只讨论一个目标卷，运行请求必须支持 `target_volume_no`，产出该卷的 `volume_outline_candidates` 条目，条目状态初始为 `pending_confirmation`。
+- 用户确认某个 `volume:{volume_no}` 后，必须写入或更新对应 Volume，并把该 Volume 同步为正典文件树节点与正典版本；已确认的该卷才允许进入对应章纲讨论。
+- `chapters` 阶段每次只讨论一个目标章，运行请求必须支持 `target_volume_no` 与 `target_chapter_no`，产出该章的 `chapter_outline_candidates` 条目，条目状态初始为 `pending_confirmation`。
+- 用户确认某个 `chapter:{chapter_no}` 后，必须写入或更新对应 Chapter，并把该 Chapter 同步为正典文件树节点与正典版本。
+- 重跑或刷新 `book` 阶段时，已存在的 `volumes` 与 `chapters` 候选必须标记为 `stale`。
+- 重跑或刷新某个 `volume:{volume_no}` 时，只能移除该卷的已确认候选；相关 `chapters` 候选必须标记为 `stale`。
+- 重跑或刷新某个 `chapter:{chapter_no}` 时，只能移除该章的已确认候选，不得冲掉其他已确认章。
+
+新增确认与提交桥接接口：
+
+- `POST /api/projects/{id}/outline/debate/sessions/{session_id}/book/confirm`
+- `POST /api/projects/{id}/outline/debate/sessions/{session_id}/volumes/confirm`
+- `POST /api/projects/{id}/outline/debate/sessions/{session_id}/chapters/confirm`
+- `POST /api/projects/{id}/outline/debate/sessions/{session_id}/commit`
+
+确认接口必须支持可选 `item_key`。`book/confirm` 标记总纲候选为已确认，并把本阶段未冲突的角色/设定候选物化入正式正典；`volumes/confirm` 与 `chapters/confirm` 必须确认单个 `item_key`，将结构化结果写入议事 session 的 `confirmed_candidates`，立即写入对应正式 Volume/Chapter 与正典版本，并把本阶段未物化的角色/设定候选同步入库。重复确认不得重复创建同名正式记录。
+
+提交接口用于最终整理已确认候选，必须同时满足总纲、所有已生成卷纲条目、所有已生成章纲条目均已确认。提交时只能把 `book_outline_candidate` 与已确认 `volume_outline_candidates` 合并后复用 `outline/book/commit` 的正式写入语义，把已确认 `chapter_outline_candidates` 复用 `outline/chapters/commit` 的正式写入语义；角色候选、设定候选和世界观正典变更应已在各确认点物化，提交不得重复创建。
+
+议事运行请求允许 `local_preview=true`，用于前端快速本地推演和浏览器闭环验证。该模式必须返回与远程模型一致的事件、候选包和确认/提交流程，但每个 Agent turn 的 `_llm.source` 必须标记为 `local_fallback`，不得伪装为远程模型调用。
+
+文档版本：2026-06-16
+
+### 0.22 创作 Star Scale Planner 修订（2026-06-17）
+
+创作 Star 第一页“02 读者与规模”必须加入 Scale Planner，作为长篇规模的唯一前台输入源。
+
+- 前端必须提供 `volume_count`、`chapter_count`、`chapter_word_min`、`chapter_word_max` 四个可编辑输入。
+- `target_words` 不允许手动填写，必须由 `chapter_count * chapter_word_target` 自动计算；`chapter_word_target` 默认取 `chapter_word_min` 与 `chapter_word_max` 的中位数。
+- `chapters_per_volume` 必须由 `ceil(chapter_count / volume_count)` 自动计算，允许作为结构化参数传递，但不得要求用户在创作 Star 第一页手动填写。
+- 创作 Star 会话的 `basic_info` 必须保存 `scale_plan`，至少包含 `target_words`、`volume_count`、`chapter_count`、`chapters_per_volume`、`chapter_word_target`、`chapter_word_min`、`chapter_word_max`。
+- 用户确认创作 Star 入库时，项目表必须同步保存 `planned_volume_count`、`planned_chapter_count`、`chapters_per_volume`、`chapter_word_target`、`chapter_word_min`、`chapter_word_max` 与 `target_words`，旧 SQLite 库通过运行时迁移补齐新增列。
+- 大纲议事不得再用当前目录已有卷数或当前卷已有章节数推断长篇规模；必须优先读取项目 Scale Planner，并在运行请求中显式传入 `scale_plan`、`target_words`、`volume_count`、`chapters_per_volume`、`chapter_word_target`、`chapter_word_min` 和 `chapter_word_max`。
+- 议事 Agent 的 turn context 必须包含 `scale_plan`，用于约束总纲、卷纲和章纲的节奏密度、卷章分配和单章字数范围。
+
+文档版本：2026-06-17
+
+### 0.23 批量正文异步队列修订（2026-06-17）
+
+批量正文生成必须服务 100 万字级长篇，不得继续作为单个同步 HTTP 请求执行。
+
+- `POST /api/write/batch-generate` 必须立即创建并返回 `job_type=batch_generate` 的 parent job，状态为 `queued` 或 `running`，前端通过 `/api/jobs/{job_id}` 轮询或后续 SSE/WebSocket 查询进度。
+- 批量正文生成只能读取已存在且未归档的正式章节；缺少章节时必须返回校验错误，提示用户先确认章纲/创建章节，不得自动创建“批量生成占位章节规划”或绕过章纲确认。
+- `GET /api/jobs` 必须支持按 `project_id`、`job_type` 和 `limit` 查询最近任务，用于批量页恢复不是当前页面创建的长任务。
+- parent job 的 `progress_json` 必须记录总章数、已完成章数、当前章节、当前状态消息；当正在执行单章正文子流程时，还必须记录 `child_job_id`、`child_current_step`、`child_total_steps` 和 `child_completed_steps`。`result_json` 必须记录已完成章节、失败章节、请求范围和可恢复信息。
+- 后台执行必须逐章运行单章正文工作流；每章使用独立数据库会话和事务提交，成功一章提交一章，失败时保留已完成结果并允许针对失败/未完成部分重试。
+- 暂停、恢复、取消只允许在章节边界生效；恢复或重试时必须重新入队 parent job，并跳过已成功完成的章节。
+- 前端批量页必须基于项目真实章节范围生成默认值，不得默认固定 1-3 章；没有可生成章节时必须禁用入口并引导用户先确认章纲。
+- 前端必须展示可恢复任务状态、进度、当前章节、失败原因、已完成章节列表，以及暂停、恢复、取消、重试控制。
+
+文档版本：2026-06-17
+
+### 0.24 旧兼容死代码清理修订（2026-06-17）
+
+旧 MVP 目录树中未挂载、未实现或已被新版领域路由替代的兼容 stub 不再保留。当前已删除：
+
+- `backend/app/api/v1/endpoints/chapters.py`：未挂载旧章节规划 endpoint；正式入口统一走 `project_studio.plan_chapters` 与新版 `outline/chapters/*`。
+- `backend/app/api/v1/endpoints/jobs.py`：未挂载旧任务 endpoint；正式入口统一走 `writing.get_job` 与 `writing.get_agent_runs`。
+- `backend/app/api/v1/endpoints/memory.py`：未挂载且仅返回 404 的旧记忆概览 stub。
+- `backend/app/api/v1/endpoints/runtime.py`：未挂载且仅返回 404 的旧章节追踪 stub。
+- `backend/app/services/chapter_service.py`：仅供已删除旧 endpoint 使用的早期章节规划服务。
+- `backend/app/services/generation_service.py`：仅供已删除旧 endpoint 使用的早期任务读取服务。
+- `backend/app/services/memory_service.py` 与 `backend/app/services/state_service.py`：未实现且无人引用的旧 MVP 空服务。
+- `backend/app/schemas/memory.py` 与 `backend/app/schemas/runtime.py`：仅供已删除旧 stub 使用的空查询模型。
+- `frontend/src/api/memory.ts` 与 `frontend/src/api/runtime.ts`：未实现且无人引用的空前端 API 模块。
+
+仍需保留的兼容边界：
+
+- `/api` 与 `/api/v1` 双前缀仍属于 1.0 API 合约，不得删除。
+- `/api/projects/{id}/chapters/plan` 仍作为旧兼容入口保留，但实现必须走 `studio_service.plan_chapters`，不得重新引入旧 `chapter_service`。
+- `/api/creation-star/*` 仍作为旧创作 Star 客户端兼容入口保留，新版前端默认走 `creation/sessions`。
+- `/api/projects/{id}/canon-studio/*`、`final_outline.md` 与 `canon_store.json` 仍作为旧正典补全兼容出口保留，正式持久化优先写入 SQLite、正典文件树和版本审计。
+- `backend/app/api/v1/endpoints/studio.py` 仍仅作为 legacy compatibility facade，不得继续新增业务分支。
+- `backend/app/agents/workflow.py`、`outline_workflow.py`、`canon_workflow.py` 仍按 0.13/0.14 作为兼容入口保留，新增能力不得继续堆入。
+
+文档版本：2026-06-17
+
 ## 1. 项目概述
 
 项目名称：叙界推演引擎 / Narraverse Engine
@@ -516,8 +658,7 @@ LangSmith 是可选观测与 Prompt/Eval 管理层：
 │       │   ├── projects.ts
 │       │   ├── chapters.ts
 │       │   ├── jobs.ts
-│       │   ├── memory.ts
-│       │   └── runtime.ts
+│       │   └── studio.ts
 │       ├── components
 │       │   ├── AppShell.tsx
 │       │   ├── ProjectNav.tsx
@@ -557,18 +698,19 @@ LangSmith 是可选观测与 Prompt/Eval 管理层：
     │   │   ├── story_bible.py
     │   │   ├── chapter.py
     │   │   ├── job.py
-    │   │   ├── memory.py
-    │   │   └── runtime.py
+    │   │   ├── outline.py
+    │   │   └── studio.py
     │   ├── api
     │   │   └── v1
     │   │       ├── router.py
     │   │       └── endpoints
     │   │           ├── projects.py
     │   │           ├── story_bible.py
-    │   │           ├── chapters.py
-    │   │           ├── jobs.py
-    │   │           ├── memory.py
-    │   │           └── runtime.py
+    │   │           ├── project_studio.py
+    │   │           ├── writing.py
+    │   │           ├── workbench.py
+    │   │           ├── knowledge.py
+    │   │           └── studio.py
     │   ├── prompting
     │   │   ├── registry.py
     │   │   ├── renderer.py
@@ -598,10 +740,10 @@ LangSmith 是可选观测与 Prompt/Eval 管理层：
     │   │   └── cancellation.py
     │   ├── services
     │   │   ├── project_service.py
-    │   │   ├── chapter_service.py
-    │   │   ├── generation_service.py
-    │   │   ├── memory_service.py
-    │   │   └── state_service.py
+    │   │   ├── studio_service.py
+    │   │   ├── workbench_service.py
+    │   │   ├── canon_service.py
+    │   │   └── outline_debate_service.py
     │   ├── agents
     │   │   ├── workflow.py
     │   │   ├── contracts.py

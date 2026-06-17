@@ -67,6 +67,8 @@ def test_outline_swarm_prompt_files_are_registered_for_all_agents() -> None:
         "WorldSettingAgent",
         "CharacterArcAgent",
         "ConflictAgent",
+        "CharacterGeneratorAgent",
+        "SettingGeneratorAgent",
         "PlotArchitectAgent",
         "BeatControllerAgent",
         "ForeshadowingAgent",

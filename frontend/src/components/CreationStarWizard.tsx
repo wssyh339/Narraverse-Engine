@@ -1,7 +1,7 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Alert, Button, Card, Checkbox, Divider, Drawer, Empty, Form, Input, Select, Space, Steps, Tag, Typography, message } from "antd";
-import { Check, Edit3, RefreshCw, Sparkles } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { Alert, Button, Card, Divider, Drawer, Empty, Form, Input, InputNumber, Select, Space, Steps, Tag, Typography, message } from "antd";
+import { Check, Edit3, RefreshCw, Sparkles, Timer } from "lucide-react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { studioApi } from "../api/studio";
 import type { CreationBasicSuggestion, CreationSession, CreationStarBasicInfo, CreationStarCard } from "../types/api";
 
@@ -9,25 +9,15 @@ const stepItems = [
   { title: "基本信息" },
   { title: "世界观抽卡" },
   { title: "主角人设" },
-  { title: "标题与卖点" },
-  { title: "立项种子" },
+  { title: "书名与包装" },
   { title: "核心与宪法" },
-  { title: "压力测试" },
-  { title: "正典预览" },
   { title: "完成创建" },
 ];
 
 const titleStepTrace = 'step: "title"';
+const creationStarProjectCacheTrace = "creationStarProjectCache";
 const DRAW_BATCH_SIZE = 3;
-const CANON_APPROVAL_OPTIONS = [
-  { label: "作品信息", value: "project" },
-  { label: "Story Bible", value: "story_bible" },
-  { label: "角色候选", value: "characters" },
-  { label: "实体候选", value: "entities" },
-  { label: "世界事实", value: "world_facts" },
-  { label: "图谱关系", value: "graph" },
-];
-const REQUIRED_CANON_APPROVAL_SECTIONS = CANON_APPROVAL_OPTIONS.map((item) => item.value);
+const REQUIRED_CANON_APPROVAL_SECTIONS = ["project", "story_bible", "characters", "entities", "world_facts", "graph"];
 const TARGET_READER_PRESETS = [
   "喜欢强爽点、快节奏升级和明确反派压迫的读者",
   "偏爱脑洞设定、规则反转和高概念悬念的读者",
@@ -38,10 +28,130 @@ const TARGET_READER_PRESETS = [
 const MANUAL_TAG_PRESETS = ["武道高考", "宗门财团", "规则怪谈", "幕后经营", "家族复仇", "灵气复苏", "都市秘境", "群像升级"];
 const BASIC_FLOW_REQUIREMENTS = [
   "世界观抽卡读取频道、类型、细分、标签、目标读者、风格和初始想法。",
+  "Scale Planner 会把卷数、章数和每章字数传给后续大纲议事。",
   "主角人设读取基本信息与已选世界观，确保欲望、能力和伤口服务核心规则。",
-  "标题卖点、核心矛盾、小说宪法和正典预览都会继续沿用这组创作种子。",
+  "书名包装、核心矛盾和小说宪法都会继续沿用这组创作种子。",
 ];
-type CardKind = "worldview" | "protagonist";
+const CREATION_STAR_FIELD_LABELS: Record<string, string> = {
+  ability: "能力",
+  ability_cost: "能力代价",
+  ally: "盟友",
+  antagonist: "主要对手",
+  basic_positioning: "小说基本定位",
+  category: "分类",
+  character_arc: "人物弧线",
+  character_candidates: "角色候选",
+  character_functions: "主要人物功能",
+  confidence: "置信度",
+  content: "内容",
+  core_conflict: "核心矛盾",
+  core_rule: "核心规则",
+  core_world_rule: "核心世界规则",
+  conflict_engine_seed: "冲突发动机种子",
+  conflict_hook: "冲突钩子",
+  core_narrative_engine: "核心叙事发动机",
+  core_selling_point: "核心卖点",
+  current_step: "当前步骤",
+  deep_need: "深层需求",
+  description: "说明",
+  edge_type: "关系类型",
+  ending_state: "结尾状态",
+  entity_candidates: "实体候选",
+  entity_type: "实体类型",
+  external_resistance: "外部阻力",
+  final_answer: "最终答案",
+  forbidden_directions: "禁区",
+  genre: "类型",
+  goals: "目标",
+  graph_candidate_edges: "图谱关系候选",
+  hook: "广告钩子",
+  id: "ID",
+  importance_level: "重要级别",
+  importance_score: "重要分",
+  institutional_resistance: "制度阻力",
+  internal_resistance: "内部阻力",
+  label: "标签",
+  long_term_desire: "长期欲望",
+  long_term_goal: "长期目标",
+  long_form_engine: "长篇发动机",
+  long_form_sustainability: "长篇可持续性",
+  largest_flaw: "最大缺陷",
+  main_conflict: "主线冲突",
+  mirror: "镜像人物",
+  model: "模型",
+  name: "名称",
+  narrative_pov: "叙事视角",
+  opening_state: "开篇状态",
+  platform_fit: "平台风格",
+  platform_style: "平台风格",
+  possible_endpoint: "可能终点",
+  power_distribution: "权力分配",
+  power_or_resource_system: "力量/资源系统",
+  primary_logic: "核心运行逻辑",
+  protagonist: "主角",
+  protagonist_arc: "主角轨迹",
+  protagonist_desire: "主角欲望",
+  protagonist_entry: "主角入口",
+  protagonist_hook: "主角钩子",
+  provider: "模型服务",
+  reader_expectation: "读者期待",
+  reader_hooks: "读者钩子",
+  reason: "原因",
+  relationship_resistance: "关系阻力",
+  relationship_hook: "关系钩子",
+  relationship_hooks: "关系钩子",
+  risk: "风险",
+  role_type: "角色类型",
+  selling_point: "卖点",
+  social_pressure: "社会压力",
+  session_id: "会话 ID",
+  source: "来源",
+  source_prompt_id: "来源提示词",
+  status: "状态",
+  story_keywords: "故事关键词",
+  story_bible_candidate: "Story Bible 候选",
+  style_guide: "风格指南",
+  surface_goal: "表层目标",
+  tags: "标签",
+  target_reader: "目标读者",
+  target_reader_experience: "目标读者体验",
+  target_words: "目标字数",
+  theme_question: "主题问题",
+  theme_pressure: "主题压力",
+  themes: "主题",
+  title: "标题",
+  tone: "基调",
+  type_promise: "类型承诺",
+  typical_cost: "典型代价",
+  used_remote_model: "是否远程模型",
+  continuity_rules: "连续性规则",
+  cost_mechanism: "代价机制",
+  forbidden_elements: "禁用元素",
+  rules_not_to_break: "不可破坏规则",
+  world_fact_candidates: "世界事实候选",
+  worldview_hook: "世界观钩子",
+  world_resistance: "世界阻力",
+  world_rules: "世界规则",
+  wrong_answer: "错误答案",
+};
+const CREATION_STAR_VALUE_LABELS: Record<string, string> = {
+  title_packaging: "书名包装",
+  basic: "基本信息",
+  worldview: "世界观抽卡",
+  protagonist: "主角人设",
+  title: "书名包装",
+  core_conflict: "核心矛盾",
+  constitution: "小说宪法",
+  committed: "已完成",
+  draft: "草稿",
+  active: "进行中",
+  completed: "已完成",
+  passed: "通过",
+  passed_with_notes: "带备注通过",
+  needs_revision: "需要修订",
+  blocked: "已阻塞",
+};
+type CardKind = "worldview" | "protagonist" | "title";
 
 interface CreationStarWizardProps {
   projectId: string;
@@ -64,10 +174,6 @@ function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
-function recordList<T extends Record<string, unknown>>(value: unknown): T[] {
-  return Array.isArray(value) ? value.filter((item): item is T => Boolean(item) && typeof item === "object" && !Array.isArray(item)) : [];
-}
-
 function selectedById<T extends { id?: string }>(items: T[], id: string) {
   return items.find((item) => item.id === id) ?? items[0];
 }
@@ -87,6 +193,93 @@ function uniqueStrings(values: string[]) {
 
 function toSelectOptions(values: string[] | undefined) {
   return (values ?? []).map((value) => ({ value, label: value }));
+}
+
+function boundedNumber(value: unknown, fallback: number, min: number, max: number) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(number)));
+}
+
+function buildCreationScalePlan(values: Partial<CreationStarBasicInfo>) {
+  const volumeCount = boundedNumber(values.volume_count, 10, 1, 30);
+  const chapterCount = boundedNumber(values.chapter_count ?? values.planned_chapter_count, 400, 1, 6000);
+  const legacyMin = Number(values.chapter_word_min);
+  const legacyMax = Number(values.chapter_word_max);
+  const legacyFallback = Number.isFinite(legacyMin) && Number.isFinite(legacyMax) ? Math.round((legacyMin + legacyMax) / 2) : 2500;
+  const chapterWordTarget = boundedNumber(values.chapter_word_target, legacyFallback, 500, 20000);
+  const chapterWordMin = chapterWordTarget;
+  const chapterWordMax = chapterWordTarget;
+  const chaptersPerVolume = Math.max(1, Math.ceil(chapterCount / volumeCount));
+  const targetWords = chapterCount * chapterWordTarget;
+  return {
+    target_words: targetWords,
+    volume_count: volumeCount,
+    chapter_count: chapterCount,
+    planned_chapter_count: chapterCount,
+    chapters_per_volume: chaptersPerVolume,
+    chapter_word_target: chapterWordTarget,
+    chapter_word_min: chapterWordMin,
+    chapter_word_max: chapterWordMax,
+    scale_plan: {
+      target_words: targetWords,
+      volume_count: volumeCount,
+      chapter_count: chapterCount,
+      chapters_per_volume: chaptersPerVolume,
+      chapter_word_target: chapterWordTarget,
+      chapter_word_min: chapterWordMin,
+      chapter_word_max: chapterWordMax,
+    },
+  };
+}
+
+function withComputedScalePlan(values: CreationStarBasicInfo): CreationStarBasicInfo {
+  return { ...values, ...buildCreationScalePlan(values) };
+}
+
+function labelForKey(key: string) {
+  return CREATION_STAR_FIELD_LABELS[key] ?? key.replace(/_/g, " ");
+}
+
+function hasDisplayValue(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  if (typeof value === "string") return value.trim().length > 0;
+  if (typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) return value.some((item) => hasDisplayValue(item));
+  if (typeof value === "object") return Object.values(record(value)).some((item) => hasDisplayValue(item));
+  return Boolean(value);
+}
+
+function displayValue(key: string, value: unknown): string {
+  if (typeof value === "boolean") return value ? "是" : "否";
+  if (typeof value === "string") return CREATION_STAR_VALUE_LABELS[value] ?? value;
+  if (Array.isArray(value)) return value.map((item) => displayValue(key, item)).join("、");
+  return text(value);
+}
+
+function renderDisplayValue(key: string, value: unknown): ReactNode {
+  if (Array.isArray(value)) {
+    const hasNested = value.some((item) => item && typeof item === "object");
+    if (!hasNested) return displayValue(key, value);
+    return (
+      <Space direction="vertical" size={6} className="full-width creation-nested-fields">
+        {value.filter(hasDisplayValue).map((item, index) => (
+          item && typeof item === "object" ? (
+            <div key={`${key}-${index}`} className="creation-nested-object">
+              {renderKeyValues(record(item))}
+            </div>
+          ) : (
+            <Typography.Text key={`${key}-${index}`}>{displayValue(key, item)}</Typography.Text>
+          )
+        ))}
+      </Space>
+    );
+  }
+  if (value && typeof value === "object") {
+    return <div className="creation-nested-fields">{renderKeyValues(record(value))}</div>;
+  }
+  return displayValue(key, value);
 }
 
 function createCardSkeleton(kind: CardKind, index: number, replace = false): CreationStarCard {
@@ -112,6 +305,23 @@ function createCardSkeleton(kind: CardKind, index: number, replace = false): Cre
       writing_risk: "",
       revision_hint: "",
       difference_from_previous_batch: "",
+      __kind: kind,
+      __placeholder: true,
+      __streaming: true,
+    };
+  }
+  if (kind === "title") {
+    return {
+      id,
+      title: "生成中",
+      description: "已提前生成卡片框架，正在生成书名与包装方向。",
+      tags: ["生成中"],
+      advertisement_line: "",
+      core_selling_point: "",
+      reader_expectation: "",
+      platform_style: "",
+      risk: "",
+      revision_hint: "",
       __kind: kind,
       __placeholder: true,
       __streaming: true,
@@ -202,17 +412,186 @@ function renderEditableList(label: string, value: unknown, onChange: (value: str
 }
 
 function renderKeyValues(payload: Record<string, unknown>, empty = "暂无内容") {
-  const entries = Object.entries(payload).filter(([, value]) => text(value));
+  const entries = Object.entries(payload).filter(([, value]) => hasDisplayValue(value));
   if (!entries.length) return <Typography.Text type="secondary">{empty}</Typography.Text>;
   return (
     <Space direction="vertical" size={6} className="full-width">
       {entries.map(([key, value]) => (
-        <Typography.Paragraph key={key} className="compact-paragraph">
-          <strong>{key}：</strong>{text(value)}
-        </Typography.Paragraph>
+        <div key={key} className="compact-paragraph creation-key-value-row">
+          <strong>{labelForKey(key)}：</strong>{renderDisplayValue(key, value)}
+        </div>
       ))}
     </Space>
   );
+}
+
+function setNestedRecordValue(source: Record<string, unknown>, path: string[], value: unknown): Record<string, unknown> {
+  if (!path.length) return source;
+  const [head, ...rest] = path;
+  if (!rest.length) return { ...source, [head]: value };
+  return {
+    ...source,
+    [head]: setNestedRecordValue(record(source[head]), rest, value),
+  };
+}
+
+function renderEditableKeyValues(
+  payload: Record<string, unknown>,
+  onChange: (path: string[], value: unknown) => void,
+  empty = "暂无内容",
+  path: string[] = [],
+): ReactNode {
+  const entries = Object.entries(payload).filter(([, value]) => hasDisplayValue(value));
+  if (!entries.length) return <Typography.Text type="secondary">{empty}</Typography.Text>;
+  return (
+    <Space direction="vertical" size={8} className="full-width creation-editable-key-values">
+      {entries.map(([key, value]) => {
+        const fieldPath = [...path, key];
+        if (value && typeof value === "object" && !Array.isArray(value)) {
+          return (
+            <div key={fieldPath.join(".")} className="creation-nested-fields">
+              <Typography.Text strong>{labelForKey(key)}</Typography.Text>
+              {renderEditableKeyValues(record(value), onChange, empty, fieldPath)}
+            </div>
+          );
+        }
+        if (Array.isArray(value)) {
+          return renderEditableList(labelForKey(key), value, (nextValue) => onChange(fieldPath, nextValue));
+        }
+        return renderEditableText(labelForKey(key), value, (nextValue) => onChange(fieldPath, nextValue));
+      })}
+    </Space>
+  );
+}
+
+function formatElapsedTime(totalSeconds: number) {
+  const safeSeconds = Math.max(0, Math.floor(totalSeconds));
+  const hours = Math.floor(safeSeconds / 3600);
+  const minutes = Math.floor((safeSeconds % 3600) / 60);
+  const seconds = safeSeconds % 60;
+  const paddedMinutes = hours > 0 ? String(minutes).padStart(2, "0") : String(minutes).padStart(2, "0");
+  const paddedSeconds = String(seconds).padStart(2, "0");
+  return hours > 0 ? `${hours}:${paddedMinutes}:${paddedSeconds}` : `${paddedMinutes}:${paddedSeconds}`;
+}
+
+function useElapsedSeconds(active: boolean) {
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+
+  useEffect(() => {
+    if (!active) {
+      setElapsedSeconds(0);
+      return undefined;
+    }
+    const startedAt = Date.now();
+    const updateElapsed = () => setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    updateElapsed();
+    const timerId = window.setInterval(updateElapsed, 1000);
+    return () => window.clearInterval(timerId);
+  }, [active]);
+
+  return elapsedSeconds;
+}
+
+function GenerationTimer({ active }: { active: boolean }) {
+  const elapsedSeconds = useElapsedSeconds(active);
+  if (!active) return null;
+  return (
+    <Tag color="blue" className="generation-timer">
+      <Timer size={13} />
+      <span>用时 {formatElapsedTime(elapsedSeconds)}</span>
+    </Tag>
+  );
+}
+
+function buildMarketPositionFromTitle(card?: CreationStarCard, basic?: CreationStarBasicInfo) {
+  if (!card) return {};
+  const sellingPoint = text(card.core_selling_point) || text(card.selling_point);
+  return {
+    id: card.id,
+    title: card.title,
+    target_reader: basic?.target_reader,
+    platform_fit: text(card.platform_style) || basic?.channel,
+    selling_point: sellingPoint,
+    core_selling_point: sellingPoint,
+    hook: text(card.one_sentence_ad) || text(card.worldview_hook) || text(card.protagonist_hook),
+    reader_expectation: card.reader_expectation,
+    risk: card.risk,
+    tags: card.tags,
+    source: "title_packaging",
+  };
+}
+
+interface CreationStarProjectCache {
+  version: 1;
+  step: number;
+  session: CreationSession | null;
+  manualInput: string;
+  basicInfo: CreationStarBasicInfo;
+  worldviewCards: CreationStarCard[];
+  protagonistCards: CreationStarCard[];
+  titleCards: CreationStarCard[];
+  promptSnapshots: Record<string, Record<string, unknown>>;
+  selectedWorldviewId: string;
+  selectedProtagonistId: string;
+  selectedTitleId: string;
+  projectSeed: Record<string, unknown>;
+  coreConflict: Record<string, unknown>;
+  novelConstitution: Record<string, unknown>;
+  constitutionReview: Record<string, unknown>;
+  basicSuggestions: CreationBasicSuggestion[];
+}
+
+function creationStarProjectCacheKey(projectId: string) {
+  return `creation-star-cache:${projectId}`;
+}
+
+function cacheGeneratedCards(cards: CreationStarCard[]) {
+  return cards.filter((card) => !card.__streaming && !card.__placeholder);
+}
+
+function normalizeCachedStep(step: unknown) {
+  const numericStep = typeof step === "number" && Number.isFinite(step) ? step : 0;
+  return Math.max(0, Math.min(stepItems.length - 1, numericStep));
+}
+
+function loadCachedCreationStar(projectId: string): CreationStarProjectCache | null {
+  try {
+    const raw = localStorage.getItem(creationStarProjectCacheKey(projectId));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<CreationStarProjectCache>;
+    if (parsed.version !== 1) return null;
+    return {
+      version: 1,
+      step: normalizeCachedStep(parsed.step),
+      session: parsed.session ?? null,
+      manualInput: parsed.manualInput ?? "",
+      basicInfo: parsed.basicInfo ?? {},
+      worldviewCards: cacheGeneratedCards(parsed.worldviewCards ?? []),
+      protagonistCards: cacheGeneratedCards(parsed.protagonistCards ?? []),
+      titleCards: cacheGeneratedCards(parsed.titleCards ?? []),
+      promptSnapshots: parsed.promptSnapshots ?? {},
+      selectedWorldviewId: parsed.selectedWorldviewId ?? "",
+      selectedProtagonistId: parsed.selectedProtagonistId ?? "",
+      selectedTitleId: parsed.selectedTitleId ?? "",
+      projectSeed: parsed.projectSeed ?? {},
+      coreConflict: parsed.coreConflict ?? {},
+      novelConstitution: parsed.novelConstitution ?? {},
+      constitutionReview: parsed.constitutionReview ?? {},
+      basicSuggestions: parsed.basicSuggestions ?? [],
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveCreationStarCache(projectId: string, cache: CreationStarProjectCache) {
+  localStorage.setItem(creationStarProjectCacheKey(projectId), JSON.stringify({
+    ...cache,
+    step: normalizeCachedStep(cache.step),
+    worldviewCards: cacheGeneratedCards(cache.worldviewCards),
+    protagonistCards: cacheGeneratedCards(cache.protagonistCards),
+    titleCards: cacheGeneratedCards(cache.titleCards),
+  }));
 }
 
 export function CreationStarWizard({ projectId, open, onClose, onCommitted }: CreationStarWizardProps) {
@@ -224,26 +603,22 @@ export function CreationStarWizard({ projectId, open, onClose, onCommitted }: Cr
   const [worldviewCards, setWorldviewCards] = useState<CreationStarCard[]>([]);
   const [protagonistCards, setProtagonistCards] = useState<CreationStarCard[]>([]);
   const [titleCards, setTitleCards] = useState<CreationStarCard[]>([]);
-  const [marketCards, setMarketCards] = useState<Array<Record<string, unknown>>>([]);
-  const [customTitle, setCustomTitle] = useState("");
-  const [customTitleDescription, setCustomTitleDescription] = useState("作者自定义书名，确认后直接写入作品标题。");
   const [promptSnapshots, setPromptSnapshots] = useState<Record<string, Record<string, unknown>>>({});
   const [selectedWorldviewId, setSelectedWorldviewId] = useState("");
   const [selectedProtagonistId, setSelectedProtagonistId] = useState("");
   const [selectedTitleId, setSelectedTitleId] = useState("");
-  const [selectedMarketId, setSelectedMarketId] = useState("");
   const [projectSeed, setProjectSeed] = useState<Record<string, unknown>>({});
   const [coreConflict, setCoreConflict] = useState<Record<string, unknown>>({});
   const [novelConstitution, setNovelConstitution] = useState<Record<string, unknown>>({});
   const [constitutionReview, setConstitutionReview] = useState<Record<string, unknown>>({});
-  const [canonCandidates, setCanonCandidates] = useState<Record<string, unknown>>({});
-  const [approvedCanonSections, setApprovedCanonSections] = useState<string[]>([]);
   const [worldviewBatchLoading, setWorldviewBatchLoading] = useState(false);
   const [protagonistBatchLoading, setProtagonistBatchLoading] = useState(false);
-  const [marketBatchLoading, setMarketBatchLoading] = useState(false);
+  const [titlePackagingBatchLoading, setTitlePackagingBatchLoading] = useState(false);
   const [basicSuggestions, setBasicSuggestions] = useState<CreationBasicSuggestion[]>([]);
   const worldviewBatchTokenRef = useRef(0);
   const protagonistBatchTokenRef = useRef(0);
+  const titlePackagingBatchTokenRef = useRef(0);
+  const cacheHydratedRef = useRef(false);
 
   const optionsQuery = useQuery({
     queryKey: ["creation-star-options"],
@@ -253,32 +628,13 @@ export function CreationStarWizard({ projectId, open, onClose, onCommitted }: Cr
 
   const selectedWorldview = useMemo(() => selectedGeneratedById(worldviewCards, selectedWorldviewId), [selectedWorldviewId, worldviewCards]);
   const selectedProtagonist = useMemo(() => selectedGeneratedById(protagonistCards, selectedProtagonistId), [selectedProtagonistId, protagonistCards]);
-  const selectedMarket = useMemo(() => selectedById(marketCards, selectedMarketId), [marketCards, selectedMarketId]);
-  const customTitleCard = useMemo<CreationStarCard | undefined>(() => {
-    const title = customTitle.trim();
-    if (!title) return undefined;
-    return {
-      id: "custom_title",
-      title,
-      description: customTitleDescription,
-      tags: ["自定义书名"],
-      selling_point: "完全采用作者手动输入，可覆盖抽卡标题并写入作品信息。",
-      risk: "建议确认是否包含题材关键词、主角处境或核心爽点。",
-      source: "manual",
-    };
-  }, [customTitle, customTitleDescription]);
   const selectedTitle = useMemo(
-    () => (selectedTitleId === "custom_title" ? customTitleCard : selectedById(titleCards, selectedTitleId) ?? customTitleCard),
-    [customTitleCard, selectedTitleId, titleCards],
+    () => selectedById(titleCards, selectedTitleId),
+    [selectedTitleId, titleCards],
   );
 
   const options = optionsQuery.data?.options;
   const sessionId = session?.id ?? "";
-  const constitutionReviewStatus = text(constitutionReview.status);
-  const constitutionBlockingIssues = list(constitutionReview.blocking_issues);
-  const isConstitutionReady =
-    ["passed", "passed_with_notes"].includes(constitutionReviewStatus) && constitutionBlockingIssues.length === 0;
-  const isCanonApproved = REQUIRED_CANON_APPROVAL_SECTIONS.every((section) => approvedCanonSections.includes(section));
   const channelOptions = toSelectOptions(options?.channels);
   const genreOptions = toSelectOptions(uniqueStrings([...(options?.genres ?? []), "都市", "玄幻", "科幻", "古言", "悬疑", "轻小说"]));
   const subgenreOptions = toSelectOptions(options?.subgenres);
@@ -288,6 +644,40 @@ export function CreationStarWizard({ projectId, open, onClose, onCommitted }: Cr
   const targetReaderOptions = toSelectOptions(TARGET_READER_PRESETS);
   const targetWordBands = options?.target_word_bands ?? [];
   const targetWordOptions = targetWordBands.map((item) => ({ value: item.value, label: item.label }));
+  const watchedVolumeCount = Form.useWatch("volume_count", form);
+  const watchedChapterCount = Form.useWatch("chapter_count", form);
+  const watchedChapterWordTarget = Form.useWatch("chapter_word_target", form);
+  const scalePlannerValues = useMemo(
+    () =>
+      buildCreationScalePlan({
+        volume_count: watchedVolumeCount,
+        chapter_count: watchedChapterCount,
+        chapter_word_target: watchedChapterWordTarget,
+      }),
+    [watchedChapterCount, watchedChapterWordTarget, watchedVolumeCount],
+  );
+  const computedTargetWords = scalePlannerValues.target_words;
+
+  useEffect(() => {
+    form.setFieldsValue({
+      target_words: computedTargetWords,
+      planned_chapter_count: scalePlannerValues.planned_chapter_count,
+      chapters_per_volume: scalePlannerValues.chapters_per_volume,
+      chapter_word_target: scalePlannerValues.chapter_word_target,
+      chapter_word_min: scalePlannerValues.chapter_word_min,
+      chapter_word_max: scalePlannerValues.chapter_word_max,
+      scale_plan: scalePlannerValues.scale_plan,
+    });
+  }, [
+    computedTargetWords,
+    form,
+    scalePlannerValues.chapter_word_max,
+    scalePlannerValues.chapter_word_min,
+    scalePlannerValues.chapter_word_target,
+    scalePlannerValues.chapters_per_volume,
+    scalePlannerValues.planned_chapter_count,
+    scalePlannerValues.scale_plan,
+  ]);
 
   const appendIdeaPreset = (value: string) => {
     const current = text(form.getFieldValue("initial_idea")).trim();
@@ -341,7 +731,7 @@ export function CreationStarWizard({ projectId, open, onClose, onCommitted }: Cr
   const basicSuggestionMutation = useMutation({
     mutationFn: () =>
       studioApi.generateCreationBasicSuggestions(projectId, {
-        basic_info: form.getFieldsValue(true),
+        basic_info: withComputedScalePlan(form.getFieldsValue(true)),
         manual_input: manualInput,
         previous_suggestions: basicSuggestions,
         count: 6,
@@ -360,42 +750,53 @@ export function CreationStarWizard({ projectId, open, onClose, onCommitted }: Cr
   });
 
   const loadWorldview = useMutation({
-    mutationFn: ({ targetSessionId, replaceExisting = false }: { targetSessionId: string; replaceExisting?: boolean }) =>
-      studioApi.generateCreationWorldview(projectId, targetSessionId, { count: 1, manual_input: manualInput, replace_existing: replaceExisting }),
-    onError: (error) => message.error(error instanceof Error ? error.message : "世界观抽卡失败"),
+    mutationFn: ({
+      targetSessionId,
+      replaceExisting = false,
+      count = 1,
+    }: {
+      targetSessionId: string;
+      replaceExisting?: boolean;
+      count?: number;
+    }) =>
+      studioApi.generateCreationWorldview(projectId, targetSessionId, { count, manual_input: manualInput, replace_existing: replaceExisting }),
   });
 
   const loadProtagonist = useMutation({
-    mutationFn: ({ targetSessionId, replaceExisting = false }: { targetSessionId: string; replaceExisting?: boolean }) =>
+    mutationFn: ({
+      targetSessionId,
+      replaceExisting = false,
+      count = 1,
+    }: {
+      targetSessionId: string;
+      replaceExisting?: boolean;
+      count?: number;
+    }) =>
       studioApi.generateCreationProtagonist(projectId, targetSessionId, {
-        count: 1,
+        count,
         manual_input: manualInput,
         selected_worldview: selectedWorldview ?? {},
         replace_existing: replaceExisting,
       }),
-    onError: (error) => message.error(error instanceof Error ? error.message : "主角抽卡失败"),
   });
 
-  const loadMarketPosition = useMutation({
-    mutationFn: ({ targetSessionId, replaceExisting = false }: { targetSessionId: string; replaceExisting?: boolean }) =>
+  const loadTitlePackaging = useMutation({
+    mutationFn: ({
+      targetSessionId,
+      replaceExisting = false,
+      count = 1,
+    }: {
+      targetSessionId: string;
+      replaceExisting?: boolean;
+      count?: number;
+    }) =>
       studioApi.generateCreationMarketPosition(projectId, targetSessionId, {
-        count: 1,
+        count,
         manual_input: manualInput,
         selected_worldview: selectedWorldview ?? {},
         selected_protagonist: selectedProtagonist ?? {},
         replace_existing: replaceExisting,
       }),
-    onSuccess: (result) => {
-      const titles = result.title_candidates ?? [];
-      const markets = result.market_position_candidates ?? [];
-      setSession(result.session);
-      setTitleCards((current) => [...current, ...titles]);
-      setMarketCards((current) => [...current, ...markets]);
-      setSelectedTitleId((current) => current || titles[0]?.id || "");
-      setSelectedMarketId((current) => current || String(markets[0]?.id || ""));
-      setPromptSnapshots((current) => ({ ...current, title: result.prompt_snapshot ?? {} }));
-    },
-    onError: (error) => message.error(error instanceof Error ? error.message : "标题卖点生成失败"),
   });
 
   const confirmSeed = useMutation({
@@ -404,16 +805,14 @@ export function CreationStarWizard({ projectId, open, onClose, onCommitted }: Cr
         selected_worldview: selectedWorldview ?? {},
         selected_protagonist: selectedProtagonist ?? {},
         selected_title: selectedTitle ?? {},
-        market_position: selectedMarket ?? {},
-        user_note: "确认创作 Star 立项种子",
+        market_position: buildMarketPositionFromTitle(selectedTitle, basicInfo),
+        user_note: "确认创作 Star 已选卡片",
       }),
     onSuccess: (result) => {
       setSession(result.session);
       setProjectSeed(result.project_seed);
-      setStep(5);
-      message.success("立项种子已确认");
     },
-    onError: (error) => message.error(error instanceof Error ? error.message : "立项种子确认失败"),
+    onError: (error) => message.error(error instanceof Error ? error.message : "选择确认失败"),
   });
 
   const generateCoreConflict = useMutation({
@@ -433,95 +832,171 @@ export function CreationStarWizard({ projectId, open, onClose, onCommitted }: Cr
   });
 
   const reviewConstitution = useMutation({
-    mutationFn: (targetSessionId: string) => studioApi.reviewCreationConstitution(projectId, targetSessionId),
+    mutationFn: ({
+      targetSessionId,
+      coreConflictSystem = coreConflict,
+      novelConstitutionPayload = novelConstitution,
+    }: {
+      targetSessionId: string;
+      coreConflictSystem?: Record<string, unknown>;
+      novelConstitutionPayload?: Record<string, unknown>;
+    }) =>
+      studioApi.reviewCreationConstitution(projectId, targetSessionId, {
+        core_conflict_system: coreConflictSystem,
+        novel_constitution: novelConstitutionPayload,
+      }),
     onSuccess: (result) => {
       setSession(result.session);
       setConstitutionReview(result.constitution_review);
     },
   });
 
-  const previewCanon = useMutation({
-    mutationFn: (targetSessionId: string) => studioApi.previewCreationCanon(projectId, targetSessionId),
-    onSuccess: (result) => {
-      setSession(result.session);
-      setCanonCandidates(result.canon_candidates);
-      setApprovedCanonSections([]);
-      message.success("正典候选已生成");
-    },
-    onError: (error) => message.error(error instanceof Error ? error.message : "正典预览生成失败"),
-  });
-
   const commit = useMutation({
     mutationFn: (targetSessionId: string) =>
       studioApi.commitCreationSession(projectId, targetSessionId, {
-        user_note: "解耦创作 Star 确认入库",
-        approved_canon_sections: approvedCanonSections,
+        user_note: "创作 Star 确认入库",
+        approved_canon_sections: REQUIRED_CANON_APPROVAL_SECTIONS,
       }),
     onSuccess: () => {
       message.success("创作 Star 已写入作品信息和设定集");
+      localStorage.removeItem(creationStarProjectCacheKey(projectId));
       onCommitted();
       onClose();
     },
     onError: (error) => message.error(error instanceof Error ? error.message : "创作 Star 提交失败"),
   });
 
+  const worldviewGenerationActive = worldviewBatchLoading || loadWorldview.isPending;
+  const protagonistGenerationActive = protagonistBatchLoading || loadProtagonist.isPending;
+  const titlePackagingGenerationActive = titlePackagingBatchLoading || loadTitlePackaging.isPending;
+  const coreConstitutionGenerationActive =
+    confirmSeed.isPending || generateCoreConflict.isPending || generateConstitution.isPending || reviewConstitution.isPending;
+
   const resetGeneratedState = () => {
     worldviewBatchTokenRef.current += 1;
     protagonistBatchTokenRef.current += 1;
+    titlePackagingBatchTokenRef.current += 1;
     setWorldviewCards([]);
     setProtagonistCards([]);
     setTitleCards([]);
-    setMarketCards([]);
     setSelectedWorldviewId("");
     setSelectedProtagonistId("");
     setSelectedTitleId("");
-    setSelectedMarketId("");
     setProjectSeed({});
     setCoreConflict({});
     setNovelConstitution({});
     setConstitutionReview({});
-    setCanonCandidates({});
     setPromptSnapshots({});
-    setApprovedCanonSections([]);
   };
 
   const resetAfterWorldviewRefresh = () => {
     protagonistBatchTokenRef.current += 1;
+    titlePackagingBatchTokenRef.current += 1;
     setProtagonistCards([]);
     setTitleCards([]);
-    setMarketCards([]);
     setSelectedProtagonistId("");
     setSelectedTitleId("");
-    setSelectedMarketId("");
     setProjectSeed({});
     setCoreConflict({});
     setNovelConstitution({});
     setConstitutionReview({});
-    setCanonCandidates({});
-    setApprovedCanonSections([]);
   };
 
   const resetAfterProtagonistRefresh = () => {
+    titlePackagingBatchTokenRef.current += 1;
     setTitleCards([]);
-    setMarketCards([]);
     setSelectedTitleId("");
-    setSelectedMarketId("");
     setProjectSeed({});
     setCoreConflict({});
     setNovelConstitution({});
     setConstitutionReview({});
-    setCanonCandidates({});
-    setApprovedCanonSections([]);
   };
 
-  const resetAfterMarketRefresh = () => {
+  const resetAfterTitlePackagingRefresh = () => {
     setProjectSeed({});
     setCoreConflict({});
     setNovelConstitution({});
     setConstitutionReview({});
-    setCanonCandidates({});
-    setApprovedCanonSections([]);
   };
+
+  useEffect(() => {
+    cacheHydratedRef.current = false;
+    const cached = loadCachedCreationStar(projectId);
+    if (!cached) {
+      setStep(0);
+      setSession(null);
+      setManualInput("");
+      setBasicInfo({});
+      form.resetFields();
+      resetGeneratedState();
+      setBasicSuggestions([]);
+      queueMicrotask(() => {
+        cacheHydratedRef.current = true;
+      });
+      return;
+    }
+    setStep(cached.step);
+    setSession(cached.session);
+    setManualInput(cached.manualInput);
+    setBasicInfo(withComputedScalePlan(cached.basicInfo));
+    form.setFieldsValue(withComputedScalePlan(cached.basicInfo));
+    setWorldviewCards(cached.worldviewCards);
+    setProtagonistCards(cached.protagonistCards);
+    setTitleCards(cached.titleCards);
+    setPromptSnapshots(cached.promptSnapshots);
+    setSelectedWorldviewId(cached.selectedWorldviewId);
+    setSelectedProtagonistId(cached.selectedProtagonistId);
+    setSelectedTitleId(cached.selectedTitleId);
+    setProjectSeed(cached.projectSeed);
+    setCoreConflict(cached.coreConflict);
+    setNovelConstitution(cached.novelConstitution);
+    setConstitutionReview(cached.constitutionReview);
+    setBasicSuggestions(cached.basicSuggestions);
+    queueMicrotask(() => {
+      cacheHydratedRef.current = true;
+    });
+  }, [form, projectId]);
+
+  useEffect(() => {
+    if (!cacheHydratedRef.current) return;
+    saveCreationStarCache(projectId, {
+      version: 1,
+      step,
+      session,
+      manualInput,
+      basicInfo,
+      worldviewCards,
+      protagonistCards,
+      titleCards,
+      promptSnapshots,
+      selectedWorldviewId,
+      selectedProtagonistId,
+      selectedTitleId,
+      projectSeed,
+      coreConflict,
+      novelConstitution,
+      constitutionReview,
+      basicSuggestions,
+    });
+  }, [
+    projectId,
+    step,
+    session,
+    manualInput,
+    basicInfo,
+    worldviewCards,
+    protagonistCards,
+    titleCards,
+    promptSnapshots,
+    selectedWorldviewId,
+    selectedProtagonistId,
+    selectedTitleId,
+    projectSeed,
+    coreConflict,
+    novelConstitution,
+    constitutionReview,
+    basicSuggestions,
+  ]);
 
   const patchWorldviewCard = (cardId: string, patch: Partial<CreationStarCard>) => {
     setWorldviewCards((cards) => cards.map((card) => (card.id === cardId ? { ...card, ...patch } : card)));
@@ -529,6 +1004,10 @@ export function CreationStarWizard({ projectId, open, onClose, onCommitted }: Cr
 
   const patchProtagonistCard = (cardId: string, patch: Partial<CreationStarCard>) => {
     setProtagonistCards((cards) => cards.map((card) => (card.id === cardId ? { ...card, ...patch } : card)));
+  };
+
+  const patchTitleCard = (cardId: string, patch: Partial<CreationStarCard>) => {
+    setTitleCards((cards) => cards.map((card) => (card.id === cardId ? { ...card, ...patch } : card)));
   };
 
   const removeWorldviewCard = (cardId: string) => {
@@ -539,17 +1018,67 @@ export function CreationStarWizard({ projectId, open, onClose, onCommitted }: Cr
     setProtagonistCards((cards) => cards.filter((card) => card.id !== cardId));
   };
 
-  const stopWorldviewGeneration = () => {
-    worldviewBatchTokenRef.current += 1;
-    setWorldviewBatchLoading(false);
-    setWorldviewCards((cards) => cards.filter((card) => !card.__streaming));
+  const removeTitleCard = (cardId: string) => {
+    setTitleCards((cards) => cards.filter((card) => card.id !== cardId));
   };
 
-  const stopProtagonistGeneration = () => {
-    protagonistBatchTokenRef.current += 1;
-    setProtagonistBatchLoading(false);
-    setProtagonistCards((cards) => cards.filter((card) => !card.__streaming));
-  };
+  async function loadProgressiveCardBatch<TResult extends { session: CreationSession; prompt_snapshot?: Record<string, unknown> }>({
+    skeletons,
+    replace,
+    requestOne,
+    extractCards,
+    patchCard,
+    removeCard,
+    isCurrent,
+    onResult,
+    onCard,
+  }: {
+    skeletons: CreationStarCard[];
+    replace: boolean;
+    requestOne: (replaceExisting: boolean) => Promise<TResult>;
+    extractCards: (result: TResult) => CreationStarCard[];
+    patchCard: (cardId: string, patch: Partial<CreationStarCard>) => void;
+    removeCard: (cardId: string) => void;
+    isCurrent: () => boolean;
+    onResult: (result: TResult) => void;
+    onCard: (card: CreationStarCard, index: number) => void;
+  }) {
+    const errors: unknown[] = [];
+    const runOne = async (skeleton: CreationStarCard, index: number, replaceExisting: boolean) => {
+      try {
+        const result = await requestOne(replaceExisting);
+        if (!isCurrent()) return null;
+        onResult(result);
+        const card = extractCards(result)[0];
+        if (!card) {
+          removeCard(skeleton.id);
+          return null;
+        }
+        applyGeneratedCard(card, (patch) => patchCard(skeleton.id, patch));
+        onCard(card, index);
+        return card;
+      } catch (error) {
+        if (isCurrent()) removeCard(skeleton.id);
+        errors.push(error);
+        return null;
+      }
+    };
+
+    const loadedCards: Array<CreationStarCard | null> = [];
+    if (replace && skeletons.length > 0) {
+      loadedCards.push(await runOne(skeletons[0], 0, true));
+      loadedCards.push(
+        ...(await Promise.all(skeletons.slice(1).map((skeleton, index) => runOne(skeleton, index + 1, false)))),
+      );
+    } else {
+      loadedCards.push(...(await Promise.all(skeletons.map((skeleton, index) => runOne(skeleton, index, false)))));
+    }
+    return {
+      cards: loadedCards.filter((card): card is CreationStarCard => Boolean(card)),
+      failedCount: errors.length,
+      firstError: errors[0],
+    };
+  }
 
   const loadWorldviewBatch = async (targetSessionId: string, replace = false) => {
     if (!targetSessionId || worldviewBatchLoading) return;
@@ -561,32 +1090,39 @@ export function CreationStarWizard({ projectId, open, onClose, onCommitted }: Cr
       resetAfterWorldviewRefresh();
     }
     setWorldviewBatchLoading(true);
-    let completedCount = 0;
+    let skeletons: CreationStarCard[] = [];
     try {
-      for (let index = 0; index < DRAW_BATCH_SIZE; index += 1) {
-        if (worldviewBatchTokenRef.current !== batchToken) break;
-        const skeleton = createCardSkeleton("worldview", index, replace);
-        setWorldviewCards((cards) => [...cards, skeleton]);
-        const result = await loadWorldview.mutateAsync({ targetSessionId, replaceExisting: replace && index === 0 });
-        if (worldviewBatchTokenRef.current !== batchToken) {
-          removeWorldviewCard(skeleton.id);
-          break;
-        }
-        setSession(result.session);
-        setPromptSnapshots((current) => ({ ...current, worldview: result.prompt_snapshot ?? {} }));
-        const card = result.cards?.[0];
-        if (!card) {
-          removeWorldviewCard(skeleton.id);
-          continue;
-        }
-        applyGeneratedCard(card, (patch) => patchWorldviewCard(skeleton.id, patch));
-        completedCount += 1;
-        setSelectedWorldviewId((current) => current || card.id);
-      }
+      skeletons = Array.from({ length: DRAW_BATCH_SIZE }, (_, index) => createCardSkeleton("worldview", index, replace));
+      setWorldviewCards((cards) => [...cards, ...skeletons]);
+      const batchResult = await loadProgressiveCardBatch({
+        skeletons,
+        replace,
+        requestOne: (replaceExisting) =>
+          loadWorldview.mutateAsync({
+            targetSessionId,
+            replaceExisting,
+            count: 1,
+          }),
+        extractCards: (result) => result.cards ?? [],
+        patchCard: patchWorldviewCard,
+        removeCard: removeWorldviewCard,
+        isCurrent: () => worldviewBatchTokenRef.current === batchToken,
+        onResult: (result) => {
+          setSession(result.session);
+          setPromptSnapshots((current) => ({ ...current, worldview: result.prompt_snapshot ?? {} }));
+        },
+        onCard: (card) => setSelectedWorldviewId((current) => current || card.id || ""),
+      });
+      if (worldviewBatchTokenRef.current !== batchToken) return;
+      const completedCount = batchResult.cards.length;
       if (worldviewBatchTokenRef.current === batchToken && completedCount > 0) {
         message.success(replace ? `已刷新 ${completedCount} 张世界观卡` : `已加载 ${completedCount} 张世界观卡`);
       }
+      if (batchResult.failedCount > 0 && completedCount === 0) {
+        throw batchResult.firstError;
+      }
     } catch (error) {
+      skeletons.forEach((skeleton) => removeWorldviewCard(skeleton.id));
       message.error(error instanceof Error ? error.message : "世界观批量抽卡失败");
     } finally {
       if (worldviewBatchTokenRef.current === batchToken) setWorldviewBatchLoading(false);
@@ -607,126 +1143,147 @@ export function CreationStarWizard({ projectId, open, onClose, onCommitted }: Cr
       resetAfterProtagonistRefresh();
     }
     setProtagonistBatchLoading(true);
-    let completedCount = 0;
+    let skeletons: CreationStarCard[] = [];
     try {
-      for (let index = 0; index < DRAW_BATCH_SIZE; index += 1) {
-        if (protagonistBatchTokenRef.current !== batchToken) break;
-        const skeleton = createCardSkeleton("protagonist", index, replace);
-        setProtagonistCards((cards) => [...cards, skeleton]);
-        const result = await loadProtagonist.mutateAsync({ targetSessionId, replaceExisting: replace && index === 0 });
-        if (protagonistBatchTokenRef.current !== batchToken) {
-          removeProtagonistCard(skeleton.id);
-          break;
-        }
-        setSession(result.session);
-        setPromptSnapshots((current) => ({ ...current, protagonist: result.prompt_snapshot ?? {} }));
-        const card = result.cards?.[0];
-        if (!card) {
-          removeProtagonistCard(skeleton.id);
-          continue;
-        }
-        applyGeneratedCard(card, (patch) => patchProtagonistCard(skeleton.id, patch));
-        completedCount += 1;
-        setSelectedProtagonistId((current) => current || card.id);
-      }
+      skeletons = Array.from({ length: DRAW_BATCH_SIZE }, (_, index) => createCardSkeleton("protagonist", index, replace));
+      setProtagonistCards((cards) => [...cards, ...skeletons]);
+      const batchResult = await loadProgressiveCardBatch({
+        skeletons,
+        replace,
+        requestOne: (replaceExisting) =>
+          loadProtagonist.mutateAsync({
+            targetSessionId,
+            replaceExisting,
+            count: 1,
+          }),
+        extractCards: (result) => result.cards ?? [],
+        patchCard: patchProtagonistCard,
+        removeCard: removeProtagonistCard,
+        isCurrent: () => protagonistBatchTokenRef.current === batchToken,
+        onResult: (result) => {
+          setSession(result.session);
+          setPromptSnapshots((current) => ({ ...current, protagonist: result.prompt_snapshot ?? {} }));
+        },
+        onCard: (card) => setSelectedProtagonistId((current) => current || card.id || ""),
+      });
+      if (protagonistBatchTokenRef.current !== batchToken) return;
+      const completedCount = batchResult.cards.length;
       if (protagonistBatchTokenRef.current === batchToken && completedCount > 0) {
         message.success(replace ? `已刷新 ${completedCount} 张主角卡` : `已加载 ${completedCount} 张主角卡`);
       }
+      if (batchResult.failedCount > 0 && completedCount === 0) {
+        throw batchResult.firstError;
+      }
     } catch (error) {
+      skeletons.forEach((skeleton) => removeProtagonistCard(skeleton.id));
       message.error(error instanceof Error ? error.message : "主角批量抽卡失败");
     } finally {
       if (protagonistBatchTokenRef.current === batchToken) setProtagonistBatchLoading(false);
     }
   };
 
-  const loadMarketPositionBatch = async (targetSessionId: string, replace = false) => {
-    if (!targetSessionId || marketBatchLoading) return;
+  const loadTitlePackagingBatch = async (targetSessionId: string, replace = false) => {
+    if (!targetSessionId || titlePackagingBatchLoading) return;
     if (!selectedProtagonist) {
       message.warning("请先加载并选择主角卡片");
       return;
     }
     if (replace) {
       setTitleCards([]);
-      setMarketCards([]);
       setSelectedTitleId("");
-      setSelectedMarketId("");
-      resetAfterMarketRefresh();
+      resetAfterTitlePackagingRefresh();
     }
-    setMarketBatchLoading(true);
+    const batchToken = titlePackagingBatchTokenRef.current + 1;
+    titlePackagingBatchTokenRef.current = batchToken;
+    setTitlePackagingBatchLoading(true);
+    let skeletons: CreationStarCard[] = [];
     try {
-      for (let index = 0; index < DRAW_BATCH_SIZE; index += 1) {
-        await loadMarketPosition.mutateAsync({ targetSessionId, replaceExisting: replace && index === 0 });
+      skeletons = Array.from({ length: DRAW_BATCH_SIZE }, (_, index) => createCardSkeleton("title", index, replace));
+      setTitleCards((cards) => [...cards, ...skeletons]);
+      const batchResult = await loadProgressiveCardBatch({
+        skeletons,
+        replace,
+        requestOne: (replaceExisting) =>
+          loadTitlePackaging.mutateAsync({
+            targetSessionId,
+            replaceExisting,
+            count: 1,
+          }),
+        extractCards: (result) => result.title_candidates ?? [],
+        patchCard: patchTitleCard,
+        removeCard: removeTitleCard,
+        isCurrent: () => titlePackagingBatchTokenRef.current === batchToken,
+        onResult: (result) => {
+          setSession(result.session);
+          setPromptSnapshots((current) => ({ ...current, title: result.prompt_snapshot ?? {} }));
+        },
+        onCard: (card) => setSelectedTitleId((current) => current || card.id || ""),
+      });
+      if (titlePackagingBatchTokenRef.current !== batchToken) return;
+      const completedCount = batchResult.cards.length;
+      if (completedCount > 0) message.success(replace ? `已刷新 ${completedCount} 张书名包装卡` : `已加载 ${completedCount} 张书名包装卡`);
+      if (batchResult.failedCount > 0 && completedCount === 0) {
+        throw batchResult.firstError;
       }
-      message.success(replace ? "已刷新 3 个标题与卖点方向" : "已加载 3 个标题与卖点方向");
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "标题卖点批量生成失败");
+      skeletons.forEach((skeleton) => removeTitleCard(skeleton.id));
+      message.error(error instanceof Error ? error.message : "标题包装生成失败");
     } finally {
-      setMarketBatchLoading(false);
+      if (titlePackagingBatchTokenRef.current === batchToken) setTitlePackagingBatchLoading(false);
     }
   };
 
-  const startWorldview = async () => {
-    const values = await form.validateFields();
-    resetGeneratedState();
+  const ensureCreationSession = async () => {
+    if (sessionId) return sessionId;
+    const values = withComputedScalePlan(await form.validateFields());
+    form.setFieldsValue(values);
     setBasicInfo(values);
     const result = await createSession.mutateAsync(values);
-    setStep(1);
-    void loadWorldviewBatch(result.session.id);
+    return result.session.id;
   };
 
-  const enterProtagonist = () => {
-    if (!sessionId || !selectedWorldview) {
-      message.warning("请先加载并选择世界观卡片");
-      return;
+  const ensureProjectSeed = async (targetSessionId: string) => {
+    if (Object.keys(projectSeed).length) return projectSeed;
+    if (!selectedWorldview || !selectedProtagonist || !selectedTitle?.title) {
+      message.warning("请先选择世界观、主角和书名包装卡片");
+      throw new Error("missing creation selections");
     }
-    stopWorldviewGeneration();
-    setStep(2);
-    if (!protagonistCards.some(isGeneratedCard)) void loadProtagonistBatch(sessionId);
+    const result = await confirmSeed.mutateAsync(targetSessionId);
+    return result.project_seed;
   };
 
-  const enterMarketPosition = () => {
-    if (!sessionId || !selectedProtagonist) {
-      message.warning("请先加载并选择主角卡片");
-      return;
-    }
-    stopProtagonistGeneration();
-    setStep(3);
-    if (!titleCards.length) void loadMarketPositionBatch(sessionId);
+  const previousCreationStep = () => {
+    if (step === 0) return;
+    setStep((current) => Math.max(0, current - 1));
   };
 
-  const enterSeed = () => {
-    if (!selectedTitle?.title) {
-      message.warning("请先选择或填写一个书名");
+  const nextCreationStep = async () => {
+    if (step === 0) {
+      try {
+        await ensureCreationSession();
+        setStep(1);
+      } catch (error) {
+        message.error(error instanceof Error ? error.message : "创作 Star 会话创建失败");
+      }
       return;
     }
-    setStep(4);
+    if (step < stepItems.length - 1) setStep((current) => Math.min(stepItems.length - 1, current + 1));
   };
 
   const runCoreConstitutionLane = async () => {
-    if (!sessionId) return;
     try {
-      const conflict = await generateCoreConflict.mutateAsync(sessionId);
-      await generateConstitution.mutateAsync(conflict.session.id);
-      setConstitutionReview({});
-      setCanonCandidates({});
+      const targetSessionId = await ensureCreationSession();
+      await ensureProjectSeed(targetSessionId);
+      const conflict = await generateCoreConflict.mutateAsync(targetSessionId);
+      const constitution = await generateConstitution.mutateAsync(conflict.session.id);
+      await reviewConstitution.mutateAsync({
+        targetSessionId: constitution.session.id,
+        coreConflictSystem: conflict.core_conflict_system,
+        novelConstitutionPayload: constitution.novel_constitution,
+      });
       message.success("核心矛盾与小说宪法已生成");
     } catch (error) {
       message.error(error instanceof Error ? error.message : "小说宪法生成失败");
-    }
-  };
-
-  const runConstitutionReview = async () => {
-    if (!sessionId) return;
-    try {
-      const result = await reviewConstitution.mutateAsync(sessionId);
-      const status = text(result.constitution_review.status);
-      if (["passed", "passed_with_notes"].includes(status)) {
-        message.success("小说宪法压力测试已通过");
-      } else {
-        message.warning("压力测试发现问题，请先修订小说宪法");
-      }
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : "压力测试生成失败");
     }
   };
 
@@ -742,17 +1299,14 @@ export function CreationStarWizard({ projectId, open, onClose, onCommitted }: Cr
     setTitleCards((cards) => cards.map((card, itemIndex) => (itemIndex === index ? { ...card, ...patch } : card)));
   };
 
-  const updateMarket = (index: number, patch: Record<string, unknown>) => {
-    setMarketCards((cards) => cards.map((card, itemIndex) => (itemIndex === index ? { ...card, ...patch } : card)));
+  const updateCoreConflictField = (path: string[], value: unknown) => {
+    setCoreConflict((current) => setNestedRecordValue(current, path, value));
+    setConstitutionReview({});
   };
 
-  const useCustomTitle = () => {
-    if (!customTitle.trim()) {
-      message.warning("请先填写自定义书名");
-      return;
-    }
-    setSelectedTitleId("custom_title");
-    message.success("已选择自定义书名");
+  const updateNovelConstitutionField = (path: string[], value: unknown) => {
+    setNovelConstitution((current) => setNestedRecordValue(current, path, value));
+    setConstitutionReview({});
   };
 
   const renderPromptSnapshot = (key: string) => {
@@ -776,7 +1330,7 @@ export function CreationStarWizard({ projectId, open, onClose, onCommitted }: Cr
           <Typography.Text type="secondary">创作种子</Typography.Text>
           <Typography.Title level={3}>先把后续流程需要的输入一次收齐</Typography.Title>
           <Typography.Paragraph>
-            基本信息会进入世界观抽卡、主角人设、标题卖点、核心矛盾、小说宪法和正典预览。每个可选项都提供预设，也可以继续手动补充。
+            基本信息会进入世界观抽卡、主角人设、书名包装、核心矛盾和小说宪法。每个可选项都提供预设，也可以继续手动补充。
           </Typography.Paragraph>
         </div>
         <div className="creation-star-flow-checklist">
@@ -786,12 +1340,28 @@ export function CreationStarWizard({ projectId, open, onClose, onCommitted }: Cr
           ))}
         </div>
       </div>
-      <Alert type="info" showIcon message="先建立创作会话，每次生成三张世界观、主角和标题卖点卡；单张完成即显示。正式设定会在小说宪法通过后写入。" />
+      <Alert type="info" showIcon message="底部只负责上一步和下一步；世界观、主角、书名包装以及核心与宪法，都需要通过本步骤里的生成按钮手动开始。" />
       <Form
         form={form}
         layout="vertical"
-        initialValues={{ channel: "男频", genre: "都市", target_words: 1000000, style: "热血爽快" }}
+        initialValues={{
+          channel: "男频",
+          genre: "都市",
+          volume_count: 10,
+          chapter_count: 400,
+          target_words: 1000000,
+          chapters_per_volume: 40,
+          chapter_word_target: 2500,
+          chapter_word_min: 2500,
+          chapter_word_max: 2500,
+          style: "热血爽快",
+        }}
       >
+        <Form.Item name="target_words" hidden><Input type="hidden" /></Form.Item>
+        <Form.Item name="planned_chapter_count" hidden><Input type="hidden" /></Form.Item>
+        <Form.Item name="chapters_per_volume" hidden><Input type="hidden" /></Form.Item>
+        <Form.Item name="chapter_word_min" hidden><Input type="hidden" /></Form.Item>
+        <Form.Item name="chapter_word_max" hidden><Input type="hidden" /></Form.Item>
         <section className="creation-star-basic-section">
           <div className="creation-star-section-copy">
             <Typography.Text type="secondary">01 基本定位</Typography.Text>
@@ -820,7 +1390,7 @@ export function CreationStarWizard({ projectId, open, onClose, onCommitted }: Cr
           <div className="creation-star-section-copy">
             <Typography.Text type="secondary">02 读者与规模</Typography.Text>
             <Typography.Title level={4}>读者体验会约束爽点密度和长篇容量</Typography.Title>
-            <Typography.Paragraph>目标字数决定后续卷纲和章节规划的空间，叙事风格会写入 story bible。</Typography.Paragraph>
+            <Typography.Paragraph>Scale Planner 会计算总字数，并把卷数、章数和单章字数传入后续大纲议事。</Typography.Paragraph>
           </div>
           <div className="creation-star-form-grid">
             <Form.Item name="target_reader" label="目标读者体验">
@@ -831,12 +1401,31 @@ export function CreationStarWizard({ projectId, open, onClose, onCommitted }: Cr
                 placeholder="选择爽感、压迫感、宿命感、成长感、权谋感、情感拉扯、史诗感"
               />
             </Form.Item>
-            <Form.Item name="target_words" label="目标字数">
-              <Select options={targetWordOptions} placeholder="选择目标字数带" />
+            <Form.Item name="volume_count" label="卷数" rules={[{ required: true, message: "请输入卷数" }]}>
+              <InputNumber min={1} max={30} className="full-width" />
+            </Form.Item>
+            <Form.Item name="chapter_count" label="章数" rules={[{ required: true, message: "请输入章数" }]}>
+              <InputNumber min={1} max={6000} className="full-width" />
+            </Form.Item>
+            <Form.Item name="chapter_word_target" label="每章字数" rules={[{ required: true, message: "请输入每章字数" }]}>
+              <InputNumber min={500} max={20000} step={100} className="full-width" />
             </Form.Item>
             <Form.Item name="style" label="叙事风格">
               <Select options={styleOptions} showSearch optionFilterProp="label" placeholder="选择叙事风格" />
             </Form.Item>
+            <div className="creation-scale-planner">
+              <Typography.Text type="secondary">Scale Planner</Typography.Text>
+              <Typography.Title level={4}>{computedTargetWords.toLocaleString()} 字</Typography.Title>
+              <Typography.Text>总字数不可手动填写，由卷数、章数和每章字数自动计算。</Typography.Text>
+              <Typography.Text type="secondary">
+                每卷约 {scalePlannerValues.chapters_per_volume} 章 · 单章目标 {scalePlannerValues.chapter_word_target} 字
+              </Typography.Text>
+              {targetWordOptions.length ? (
+                <Typography.Text type="secondary">
+                  参考规模带：{targetWordOptions.slice(0, 4).map((item) => item.label).join(" / ")}
+                </Typography.Text>
+              ) : null}
+            </div>
           </div>
         </section>
         <section className="creation-star-basic-section">
@@ -844,13 +1433,16 @@ export function CreationStarWizard({ projectId, open, onClose, onCommitted }: Cr
             <Typography.Text type="secondary">03 初始想法与抽卡约束</Typography.Text>
             <Typography.Title level={4}>把脑洞和禁区提前交给 Agent</Typography.Title>
             <Typography.Paragraph>初始想法会进入基本信息，额外约束会随每轮抽卡传入，不会直接写入正式设定。</Typography.Paragraph>
-            <Button
-              icon={<Sparkles size={15} />}
-              loading={basicSuggestionMutation.isPending}
-              onClick={() => basicSuggestionMutation.mutate()}
-            >
-              {basicSuggestions.length ? "刷新 AI 选项" : "生成 AI 选项"}
-            </Button>
+            <Space wrap className="generation-action-inline">
+              <Button
+                icon={<Sparkles size={15} />}
+                loading={basicSuggestionMutation.isPending}
+                onClick={() => basicSuggestionMutation.mutate()}
+              >
+                {basicSuggestions.length ? "刷新 AI 选项" : "生成 AI 选项"}
+              </Button>
+              <GenerationTimer active={basicSuggestionMutation.isPending} />
+            </Space>
           </div>
           <Form.Item name="initial_idea" label="初始想法">
             <Input.TextArea rows={5} placeholder="写下你已有的脑洞，Agent 会把它揉进抽卡结果。" />
@@ -870,12 +1462,12 @@ export function CreationStarWizard({ projectId, open, onClose, onCommitted }: Cr
       <div className="creation-star-action-row">
         <div>
           <Typography.Text strong>世界观抽卡每次三张，完成一张即可选择并进入下一步</Typography.Text>
-          <Typography.Paragraph type="secondary" className="compact-paragraph">卡片框架会提前出现，接口返回后一次填充完整内容；进入主角抽卡会自动中断后续世界观生成。</Typography.Paragraph>
+          <Typography.Paragraph type="secondary" className="compact-paragraph">卡片框架会提前出现，三张并行生成；不点击刷新时，本项目会一直保留已生成缓存。</Typography.Paragraph>
         </div>
         <Space wrap>
-          {worldviewBatchLoading ? <Button onClick={stopWorldviewGeneration}>中断后续世界观生成</Button> : null}
-          <Button icon={<Sparkles size={15} />} loading={worldviewBatchLoading || loadWorldview.isPending} disabled={!sessionId || worldviewBatchLoading} onClick={() => sessionId && loadWorldviewBatch(sessionId)}>加载三张世界观</Button>
-          <Button icon={<RefreshCw size={15} />} loading={worldviewBatchLoading || loadWorldview.isPending} disabled={!sessionId || !worldviewCards.length || worldviewBatchLoading} onClick={() => sessionId && loadWorldviewBatch(sessionId, true)}>刷新三张世界观</Button>
+          <Button icon={<Sparkles size={15} />} loading={worldviewGenerationActive} disabled={!sessionId || worldviewBatchLoading} onClick={() => sessionId && loadWorldviewBatch(sessionId)}>加载三张世界观</Button>
+          <Button icon={<RefreshCw size={15} />} loading={worldviewGenerationActive} disabled={!sessionId || !worldviewCards.length || worldviewBatchLoading} onClick={() => sessionId && loadWorldviewBatch(sessionId, true)}>刷新三张世界观</Button>
+          <GenerationTimer active={worldviewGenerationActive} />
         </Space>
       </div>
       {renderPromptSnapshot("worldview")}
@@ -927,13 +1519,13 @@ export function CreationStarWizard({ projectId, open, onClose, onCommitted }: Cr
     <div className="creation-star-step">
       <div className="creation-star-action-row">
         <div>
-          <Typography.Text strong>主角人设每次三张，完成一张即可进入标题卖点</Typography.Text>
-          <Typography.Paragraph type="secondary" className="compact-paragraph">主角卡读取已选世界观；接口返回后一次填充完整内容，提前进入下一步会中断后续主角卡生成。</Typography.Paragraph>
+          <Typography.Text strong>主角人设每次三张，完成一张即可继续到书名包装</Typography.Text>
+          <Typography.Paragraph type="secondary" className="compact-paragraph">主角卡读取已选世界观；三张并行生成，返回上一页不会清空已有卡片。</Typography.Paragraph>
         </div>
         <Space wrap>
-          {protagonistBatchLoading ? <Button onClick={stopProtagonistGeneration}>中断后续主角生成</Button> : null}
-          <Button icon={<Sparkles size={15} />} loading={protagonistBatchLoading || loadProtagonist.isPending} disabled={!sessionId || protagonistBatchLoading} onClick={() => sessionId && loadProtagonistBatch(sessionId)}>加载三张主角</Button>
-          <Button icon={<RefreshCw size={15} />} loading={protagonistBatchLoading || loadProtagonist.isPending} disabled={!sessionId || !protagonistCards.length || protagonistBatchLoading} onClick={() => sessionId && loadProtagonistBatch(sessionId, true)}>刷新三张主角</Button>
+          <Button icon={<Sparkles size={15} />} loading={protagonistGenerationActive} disabled={!sessionId || protagonistBatchLoading} onClick={() => sessionId && loadProtagonistBatch(sessionId)}>加载三张主角</Button>
+          <Button icon={<RefreshCw size={15} />} loading={protagonistGenerationActive} disabled={!sessionId || !protagonistCards.length || protagonistBatchLoading} onClick={() => sessionId && loadProtagonistBatch(sessionId, true)}>刷新三张主角</Button>
+          <GenerationTimer active={protagonistGenerationActive} />
         </Space>
       </div>
       {renderPromptSnapshot("protagonist")}
@@ -984,26 +1576,21 @@ export function CreationStarWizard({ projectId, open, onClose, onCommitted }: Cr
     </div>
   );
 
-  const renderMarketPosition = () => (
+  const renderTitlePackaging = () => (
     <div className="creation-star-step">
       <div className="creation-star-action-row">
-        <Typography.Text strong>标题与卖点方向每次三个，完成一个显示一个</Typography.Text>
+        <div>
+          <Typography.Text strong>书名与包装每次三张，完成一个显示一个</Typography.Text>
+          <Typography.Paragraph type="secondary" className="compact-paragraph">书名、广告句、核心卖点、读者期待和风险提示合并在同一张可编辑卡里。</Typography.Paragraph>
+        </div>
         <Space wrap>
-          <Button icon={<Sparkles size={15} />} loading={marketBatchLoading || loadMarketPosition.isPending} disabled={!sessionId || marketBatchLoading} onClick={() => sessionId && loadMarketPositionBatch(sessionId)}>加载三个方向</Button>
-          <Button icon={<RefreshCw size={15} />} loading={marketBatchLoading || loadMarketPosition.isPending} disabled={!sessionId || !titleCards.length || marketBatchLoading} onClick={() => sessionId && loadMarketPositionBatch(sessionId, true)}>刷新三个方向</Button>
+          <Button icon={<Sparkles size={15} />} loading={titlePackagingGenerationActive} disabled={!sessionId || titlePackagingBatchLoading} onClick={() => sessionId && loadTitlePackagingBatch(sessionId)}>加载三张书名包装</Button>
+          <Button icon={<RefreshCw size={15} />} loading={titlePackagingGenerationActive} disabled={!sessionId || !titleCards.length || titlePackagingBatchLoading} onClick={() => sessionId && loadTitlePackagingBatch(sessionId, true)}>刷新三张书名包装</Button>
+          <GenerationTimer active={titlePackagingGenerationActive} />
         </Space>
       </div>
       {renderPromptSnapshot("title")}
-      <Card
-        className={`creation-card custom-title-card ${selectedTitleId === "custom_title" ? "is-selected" : ""}`}
-        title="自定义书名"
-        extra={<Tag color={selectedTitleId === "custom_title" ? "green" : "default"}>{selectedTitleId === "custom_title" ? "已选" : "手写"}</Tag>}
-      >
-        <Input value={customTitle} onChange={(event) => setCustomTitle(event.target.value)} placeholder="直接输入最终书名" />
-        <Input.TextArea rows={2} value={customTitleDescription} onChange={(event) => setCustomTitleDescription(event.target.value)} />
-        <Button type="primary" ghost onClick={useCustomTitle}>使用自定义书名</Button>
-      </Card>
-      {titleCards.length === 0 ? <Empty description="还没有标题卖点卡" /> : (
+      {titleCards.length === 0 ? <Empty description="还没有书名包装卡" /> : (
         <div className="creation-card-grid title-grid">
           {titleCards.map((card, index) => (
             <Card
@@ -1013,140 +1600,61 @@ export function CreationStarWizard({ projectId, open, onClose, onCommitted }: Cr
               title={<Input value={card.title} onChange={(event) => updateTitle(index, { title: event.target.value })} onClick={(event) => event.stopPropagation()} />}
               extra={<Tag color={card.id === selectedTitle?.id ? "green" : "default"}>{card.id === selectedTitle?.id ? "已选" : "可选"}</Tag>}
             >
-              <Input.TextArea value={card.description} rows={3} onChange={(event) => updateTitle(index, { description: event.target.value })} onClick={(event) => event.stopPropagation()} />
-              <Space wrap className="creation-card-tags">{(card.tags ?? []).map((tag) => <Tag key={tag}>{tag}</Tag>)}</Space>
-              <Typography.Paragraph type="secondary">卖点：{card.selling_point}</Typography.Paragraph>
-              <Typography.Paragraph type="secondary">风险：{card.risk}</Typography.Paragraph>
+              <div className="creation-card-field-grid">
+                {renderEditableText("副标题/包装方向", card.subtitle, (value) => updateTitle(index, { subtitle: value }), false)}
+                {renderEditableText("说明", card.description, (value) => updateTitle(index, { description: value }))}
+                {renderEditableText("平台风格", card.platform_style, (value) => updateTitle(index, { platform_style: value }), false)}
+                {renderEditableText("一句话广告", card.one_sentence_ad, (value) => updateTitle(index, { one_sentence_ad: value }))}
+                {renderEditableText("核心卖点", card.core_selling_point ?? card.selling_point, (value) => updateTitle(index, { core_selling_point: value, selling_point: value }))}
+                {renderEditableText("读者期待", card.reader_expectation, (value) => updateTitle(index, { reader_expectation: value }))}
+                {renderEditableText("世界观钩子", card.worldview_hook, (value) => updateTitle(index, { worldview_hook: value }))}
+                {renderEditableText("主角钩子", card.protagonist_hook, (value) => updateTitle(index, { protagonist_hook: value }))}
+                {renderEditableText("风险", card.risk, (value) => updateTitle(index, { risk: value }))}
+                {renderEditableText("修改建议", card.revision_hint, (value) => updateTitle(index, { revision_hint: value }))}
+                {renderEditableList("标签", card.tags, (value) => updateTitle(index, { tags: value }))}
+              </div>
             </Card>
           ))}
         </div>
       )}
-      {marketCards.length ? (
-        <>
-          <Divider />
-          <div className="creation-card-grid title-grid">
-            {marketCards.map((card, index) => (
-              <Card
-                key={String(card.id)}
-                className={`creation-card ${card.id === selectedMarket?.id ? "is-selected" : ""}`}
-                onClick={() => setSelectedMarketId(String(card.id))}
-                title={<Input value={text(card.title)} onChange={(event) => updateMarket(index, { title: event.target.value })} onClick={(event) => event.stopPropagation()} />}
-                extra={<Tag color={card.id === selectedMarket?.id ? "green" : "default"}>{card.id === selectedMarket?.id ? "已选" : "卖点"}</Tag>}
-              >
-                {renderKeyValues(card)}
-              </Card>
-            ))}
-          </div>
-        </>
-      ) : null}
-    </div>
-  );
-
-  const renderSeed = () => (
-    <div className="creation-star-step">
-      <Alert type="info" showIcon message="从这里开始，系统会把候选卡收敛成一个确定的立项种子。" />
-      <div className="creation-star-two-columns">
-        <Card title="已选世界观"><Typography.Title level={4}>{selectedWorldview?.title}</Typography.Title><Typography.Paragraph>{selectedWorldview?.description}</Typography.Paragraph></Card>
-        <Card title="已选主角"><Typography.Title level={4}>{selectedProtagonist?.name}</Typography.Title><Typography.Paragraph>{selectedProtagonist?.summary}</Typography.Paragraph></Card>
-      </div>
-      <Divider />
-      <div className="creation-star-two-columns">
-        <Card title="已选书名"><Typography.Title level={4}>{selectedTitle?.title}</Typography.Title><Typography.Paragraph>{selectedTitle?.description}</Typography.Paragraph></Card>
-        <Card title="市场定位">{renderKeyValues(selectedMarket ?? {})}</Card>
-      </div>
-      {Object.keys(projectSeed).length ? <Alert type="success" showIcon message="立项种子已确认" /> : null}
     </div>
   );
 
   const renderConstitution = () => (
     <div className="creation-star-step">
-      <Alert type="warning" showIcon message="先把立项种子收敛为核心矛盾系统和小说宪法；压力测试将在下一步单独执行。" />
+      <Alert type="warning" showIcon message="请先选择世界观、主角和书名包装卡；核心与宪法只会通过本页按钮生成，底部下一步只负责导航。" />
       <div className="creation-star-action-row">
         <Typography.Text strong>核心与宪法</Typography.Text>
-        <Button icon={<RefreshCw size={15} />} loading={generateCoreConflict.isPending || generateConstitution.isPending} onClick={runCoreConstitutionLane}>生成/刷新核心与宪法</Button>
+        <Space wrap>
+          <Button
+            icon={<RefreshCw size={15} />}
+            loading={coreConstitutionGenerationActive}
+            onClick={runCoreConstitutionLane}
+          >
+            生成/刷新核心与宪法
+          </Button>
+          <GenerationTimer active={coreConstitutionGenerationActive} />
+        </Space>
       </div>
       <div className="creation-star-two-columns">
-        <Card title="核心矛盾系统">{renderKeyValues(coreConflict)}</Card>
-        <Card title="小说宪法摘要">{renderKeyValues(novelConstitution)}</Card>
+        <Card title="核心矛盾系统">{renderEditableKeyValues(coreConflict, updateCoreConflictField, "请先生成核心矛盾系统")}</Card>
+        <Card title="小说宪法">{renderEditableKeyValues(novelConstitution, updateNovelConstitutionField, "请先生成小说宪法")}</Card>
       </div>
-      <Divider />
-      <Card title="小说宪法">{renderKeyValues(novelConstitution)}</Card>
     </div>
   );
-
-  const renderConstitutionReview = () => (
-    <div className="creation-star-step">
-      <Alert
-        type={isConstitutionReady ? "success" : constitutionReviewStatus ? "warning" : "info"}
-        showIcon
-        message={isConstitutionReady ? "压力测试已通过，可以进入正典预览。" : "压力测试必须通过后，才能进入正典预览和最终入库。"}
-      />
-      <div className="creation-star-action-row">
-        <Typography.Text strong>小说宪法压力测试</Typography.Text>
-        <Button icon={<RefreshCw size={15} />} loading={reviewConstitution.isPending} disabled={!Object.keys(novelConstitution).length} onClick={runConstitutionReview}>生成压力测试</Button>
-      </div>
-      {constitutionReviewStatus === "needs_revision" || constitutionReviewStatus === "blocked" ? (
-        <Alert
-          type="error"
-          showIcon
-          message="质量门未通过"
-          description={constitutionBlockingIssues.join("；") || text(constitutionReview.largest_risk) || "请根据修订建议重新生成核心与宪法。"}
-        />
-      ) : null}
-      <Card title="压力测试报告">{renderKeyValues(constitutionReview, "请先生成压力测试")}</Card>
-    </div>
-  );
-
-  const renderCanonPreview = () => {
-    const storyBible = record(canonCandidates.story_bible_candidate);
-    const characters = recordList<Record<string, unknown>>(canonCandidates.character_candidates);
-    const entities = recordList<Record<string, unknown>>(canonCandidates.entity_candidates);
-    const facts = recordList<Record<string, unknown>>(canonCandidates.world_fact_candidates);
-    const graphEdges = recordList<Record<string, unknown>>(canonCandidates.graph_candidate_edges);
-    return (
-      <div className="creation-star-step">
-        <Alert type="info" showIcon message="这里仍是候选正典。点击最终提交前，不会写入正式设定集。" />
-        <div className="creation-star-action-row">
-          <Typography.Text strong>正典候选映射</Typography.Text>
-          <Button icon={<RefreshCw size={15} />} loading={previewCanon.isPending} disabled={!isConstitutionReady} onClick={() => sessionId && previewCanon.mutate(sessionId)}>生成正典预览</Button>
-        </div>
-        <Card
-          title="正典审批项"
-          extra={<Button size="small" onClick={() => setApprovedCanonSections(REQUIRED_CANON_APPROVAL_SECTIONS)}>全部确认</Button>}
-        >
-          <Checkbox.Group value={approvedCanonSections} onChange={(values) => setApprovedCanonSections(values.map(String))}>
-            <Space wrap>
-              {CANON_APPROVAL_OPTIONS.map((item) => (
-                <Checkbox key={item.value} value={item.value}>{item.label}</Checkbox>
-              ))}
-            </Space>
-          </Checkbox.Group>
-        </Card>
-        <Divider />
-        <Card title="Story Bible 候选">{renderKeyValues(storyBible)}</Card>
-        <Divider />
-        <div className="creation-star-two-columns">
-          <Card title="角色候选">{characters.length ? characters.map((item) => <Typography.Paragraph key={text(item.name)}>{renderKeyValues(item)}</Typography.Paragraph>) : <Empty description="暂无角色候选" />}</Card>
-          <Card title="世界事实候选">{facts.length ? facts.map((item) => <Typography.Paragraph key={text(item.title)}>{renderKeyValues(item)}</Typography.Paragraph>) : <Empty description="暂无世界事实候选" />}</Card>
-        </div>
-        <Divider />
-        <div className="creation-star-two-columns">
-          <Card title="实体候选">{entities.length ? entities.map((item) => <Typography.Paragraph key={text(item.name)}>{renderKeyValues(item)}</Typography.Paragraph>) : <Empty description="暂无实体候选" />}</Card>
-          <Card title="图谱关系候选">{graphEdges.length ? graphEdges.map((item) => <Typography.Paragraph key={`${text(item.source)}-${text(item.target)}`}>{renderKeyValues(item)}</Typography.Paragraph>) : <Empty description="暂无图谱关系候选" />}</Card>
-        </div>
-      </div>
-    );
-  };
 
   const renderFinish = () => (
     <div className="creation-star-step">
-      <Alert type={isCanonApproved ? "warning" : "error"} showIcon message={isCanonApproved ? "提交后会更新作品信息、故事圣经、角色、实体、世界事实和图谱，并创建版本快照。" : "请先在正典预览中勾选全部审批项。"} />
+      <Alert type="warning" showIcon message="提交后会更新作品信息、故事圣经、角色、实体、世界事实和图谱，并创建版本快照。" />
       <div className="creation-star-two-columns">
         <Card title="最终书名"><Typography.Title level={4}>{selectedTitle?.title}</Typography.Title></Card>
         <Card title="会话状态">{renderKeyValues({ session_id: session?.id, current_step: session?.current_step, status: session?.status })}</Card>
       </div>
       <Divider />
-      <Card title="即将写入的正典">{renderKeyValues(record(canonCandidates.story_bible_candidate), "请先生成正典预览")}</Card>
+      <div className="creation-star-two-columns">
+        <Card title="核心矛盾系统">{renderKeyValues(coreConflict, "请先生成核心矛盾系统")}</Card>
+        <Card title="小说宪法">{renderKeyValues(novelConstitution, "请先生成小说宪法")}</Card>
+      </div>
     </div>
   );
 
@@ -1154,26 +1662,27 @@ export function CreationStarWizard({ projectId, open, onClose, onCommitted }: Cr
     if (step === 0) return renderBasicInfo();
     if (step === 1) return renderWorldviews();
     if (step === 2) return renderProtagonists();
-    if (step === 3) return renderMarketPosition();
-    if (step === 4) return renderSeed();
-    if (step === 5) return renderConstitution();
-    if (step === 6) return renderConstitutionReview();
-    if (step === 7) return renderCanonPreview();
+    if (step === 3) return renderTitlePackaging();
+    if (step === 4) return renderConstitution();
     return renderFinish();
   };
 
   const footer = (
     <Space className="creation-star-footer">
-      <Button onClick={step === 0 ? onClose : () => setStep(step - 1)}>{step === 0 ? "关闭" : "上一步"}</Button>
-      {step === 0 ? <Button type="primary" icon={<Sparkles size={15} />} loading={createSession.isPending || worldviewBatchLoading || loadWorldview.isPending} onClick={startWorldview}>创建会话并加载世界观</Button> : null}
-      {step === 1 ? <Button type="primary" disabled={!selectedWorldview} onClick={enterProtagonist}>进入主角抽卡</Button> : null}
-      {step === 2 ? <Button type="primary" disabled={!selectedProtagonist} loading={marketBatchLoading || loadMarketPosition.isPending} onClick={enterMarketPosition}>进入标题卖点</Button> : null}
-      {step === 3 ? <Button type="primary" disabled={!selectedTitle?.title} onClick={enterSeed}>进入立项种子</Button> : null}
-      {step === 4 ? <Button type="primary" loading={confirmSeed.isPending} onClick={() => sessionId && confirmSeed.mutate(sessionId)}>确认立项种子</Button> : null}
-      {step === 5 ? <Button type="primary" disabled={!Object.keys(novelConstitution).length} onClick={() => setStep(6)}>进入压力测试</Button> : null}
-      {step === 6 ? <Button type="primary" disabled={!isConstitutionReady} onClick={() => setStep(7)}>进入正典预览</Button> : null}
-      {step === 7 ? <Button type="primary" disabled={!Object.keys(canonCandidates).length || !isCanonApproved} onClick={() => setStep(8)}>进入最终确认</Button> : null}
-      {step === 8 ? <Button type="primary" icon={<Check size={15} />} loading={commit.isPending} disabled={!sessionId || !Object.keys(canonCandidates).length || !isCanonApproved} onClick={() => sessionId && commit.mutate(sessionId)}>完成创建并写入设定</Button> : null}
+      <Button disabled={step === 0} onClick={previousCreationStep}>上一步</Button>
+      {step < stepItems.length - 1 ? (
+        <Button type="primary" onClick={nextCreationStep}>下一步</Button>
+      ) : (
+        <Button
+          type="primary"
+          icon={<Check size={15} />}
+          loading={commit.isPending}
+          disabled={!sessionId || !Object.keys(novelConstitution).length}
+          onClick={() => sessionId && commit.mutate(sessionId)}
+        >
+          完成创建并写入设定
+        </Button>
+      )}
     </Space>
   );
 
@@ -1183,7 +1692,7 @@ export function CreationStarWizard({ projectId, open, onClose, onCommitted }: Cr
       width="92vw"
       open={open}
       onClose={onClose}
-      extra={<Tag color="purple" title={titleStepTrace}>解耦创作 Star</Tag>}
+      extra={<Tag color="purple" title={`${titleStepTrace} · ${creationStarProjectCacheTrace}`}>解耦创作 Star</Tag>}
       footer={footer}
       rootClassName="creation-star-drawer-root"
       className="creation-star-drawer"

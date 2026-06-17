@@ -33,7 +33,11 @@ class UpdateProjectRequest(APIModel):
     style_guide: str | None = None
     language: str | None = None
     planned_chapter_count: int | None = Field(default=None, gt=0)
+    planned_volume_count: int | None = Field(default=None, gt=0)
+    chapters_per_volume: int | None = Field(default=None, gt=0)
     chapter_word_target: int | None = Field(default=None, ge=500, le=10000)
+    chapter_word_min: int | None = Field(default=None, ge=500, le=20000)
+    chapter_word_max: int | None = Field(default=None, ge=500, le=20000)
     status: Literal["draft", "active", "archived"] | None = None
     target_words: int | None = Field(default=None, ge=0)
     current_volume: int | None = Field(default=None, ge=1)
@@ -281,6 +285,8 @@ class CreationSessionSeedRequest(APIModel):
 class CreationSessionRunRequest(APIModel):
     instruction: str = Field(default="", max_length=4000)
     model: str | None = None
+    core_conflict_system: dict[str, Any] = Field(default_factory=dict)
+    novel_constitution: dict[str, Any] = Field(default_factory=dict)
 
 
 class CreationSessionCommitRequest(APIModel):

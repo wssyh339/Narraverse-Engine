@@ -1,5 +1,5 @@
-import { Button, Checkbox, Space, Switch, Tooltip, Typography } from "antd";
-import { FilePlus2, FileText, FolderPlus, Layers, Plus, ScrollText, Trash2 } from "lucide-react";
+import { Button, Checkbox, Space, Tooltip, Typography } from "antd";
+import { Eye, EyeOff, FilePlus2, FileText, FolderPlus, Layers, ListChecks, ScrollText, Trash2 } from "lucide-react";
 import type { Chapter, Volume } from "../../types/api";
 import type { OutlineDirectoryHandlers, OutlineView } from "./types";
 
@@ -23,6 +23,7 @@ interface OutlineDirectoryProps {
   isDeletingVolume: boolean;
   isDeletingSelectedVolumes: boolean;
   hasGeneratedOutline: boolean;
+  detailOpen: boolean;
   handlers: OutlineDirectoryHandlers;
 }
 
@@ -46,6 +47,7 @@ export function OutlineDirectory({
   isDeletingVolume,
   isDeletingSelectedVolumes,
   hasGeneratedOutline,
+  detailOpen,
   handlers,
 }: OutlineDirectoryProps) {
   const selectedChapterIdSet = new Set(selectedChapterIds);
@@ -78,7 +80,7 @@ export function OutlineDirectory({
                 />
               ) : null}
               <button
-                className={`outline-tree-item ${selectedView === "volume" && volume.id === selectedVolumeId ? "is-active" : ""}`}
+                className={`outline-tree-item ${detailOpen && selectedView === "volume" && volume.id === selectedVolumeId ? "is-active" : ""}`}
                 onClick={() => {
                   handlers.setSelectedVolumeId(volume.id);
                   handlers.setSelectedChapterId("");
@@ -130,7 +132,7 @@ export function OutlineDirectory({
                       />
                     ) : null}
                     <button
-                      className={`outline-tree-item is-compact is-nested ${selectedChapterId === chapter.id && selectedView === "chapterOutline" ? "is-active" : ""}`}
+                      className={`outline-tree-item is-compact is-nested ${detailOpen && selectedChapterId === chapter.id && selectedView === "chapterOutline" ? "is-active" : ""}`}
                       onClick={() => {
                         handlers.setSelectedVolumeId(volume.id);
                         handlers.setSelectedChapterId(chapter.id);
@@ -173,23 +175,36 @@ export function OutlineDirectory({
           <span className="outline-title-accent" />
           <Typography.Title level={4}>大纲目录</Typography.Title>
         </div>
-        <Space size={6}>
+        <Space size={4} className="outline-directory-toolbar">
+          <Tooltip title={batchManagementEnabled ? "退出批量管理" : "批量管理"}>
+            <Button
+              type="text"
+              className={`outline-directory-icon-button ${batchManagementEnabled ? "is-active" : ""}`}
+              aria-label={batchManagementEnabled ? "退出批量管理" : "批量管理"}
+              aria-pressed={batchManagementEnabled}
+              icon={<ListChecks size={16} />}
+              onClick={() => handlers.setBatchManagementEnabled(!batchManagementEnabled)}
+            />
+          </Tooltip>
+          <Tooltip title={detailOpen ? "隐藏大纲正文" : "显示大纲正文"}>
+            <Button
+              type="text"
+              className={`outline-directory-icon-button ${detailOpen ? "is-active" : ""}`}
+              aria-label={detailOpen ? "隐藏大纲正文" : "显示大纲正文"}
+              aria-pressed={detailOpen}
+              icon={detailOpen ? <EyeOff size={16} /> : <Eye size={16} />}
+              onClick={() => handlers.setDetailOpen(!detailOpen)}
+            />
+          </Tooltip>
           <Tooltip title="新建分卷"><Button type="text" icon={<FolderPlus size={16} />} onClick={handlers.openCreateVolume} /></Tooltip>
           <Tooltip title="新建章节"><Button type="text" icon={<FilePlus2 size={16} />} disabled={!volumes.length} onClick={handlers.openCreateChapter} /></Tooltip>
-          <Tooltip title="添加"><Button type="primary" icon={<Plus size={17} />} onClick={() => handlers.openGenerationPreview("outline")} /></Tooltip>
         </Space>
-      </div>
-      <div className="outline-batch-toggle">
-        <Space size={8}>
-          <Typography.Text strong>批量管理</Typography.Text>
-          <Typography.Text type="secondary">
-            {batchManagementEnabled ? `已选择 ${selectedChapterIdsAcrossDirectory.length} 章 / ${selectedVolumeIdsAcrossDirectory.length} 卷` : "关闭后隐藏勾选框"}
-          </Typography.Text>
-        </Space>
-        <Switch checked={batchManagementEnabled} onChange={handlers.setBatchManagementEnabled} />
       </div>
       {batchManagementEnabled ? (
         <div className="outline-directory-bulk-actions">
+          <Typography.Text type="secondary" className="outline-bulk-summary">
+            已选 {selectedChapterIdsAcrossDirectory.length}章 / {selectedVolumeIdsAcrossDirectory.length}卷
+          </Typography.Text>
           <div className="outline-bulk-row">
             <Checkbox
               checked={allDirectorySelected}
@@ -197,7 +212,7 @@ export function OutlineDirectory({
               disabled={!chapters.length || isDeletingSelected}
               onChange={(event) => handlers.toggleDirectorySelection(event.target.checked)}
             >
-              全选全部章节
+              全选章节
             </Checkbox>
             <Button
               size="small"
@@ -207,7 +222,7 @@ export function OutlineDirectory({
               loading={isDeletingSelected}
               onClick={handlers.confirmBatchTrashChapters}
             >
-              批量删除选中
+              删章节
             </Button>
           </div>
           <div className="outline-bulk-row">
@@ -217,7 +232,7 @@ export function OutlineDirectory({
               disabled={!volumes.length || isDeletingSelectedVolumes}
               onChange={(event) => handlers.toggleAllVolumeOutlines(event.target.checked)}
             >
-              全选可删除卷纲
+              可删卷纲
             </Checkbox>
             <Button
               size="small"
@@ -227,12 +242,12 @@ export function OutlineDirectory({
               loading={isDeletingSelectedVolumes}
               onClick={handlers.confirmBatchDeleteVolumes}
             >
-              批量删除卷纲
+              删卷纲
             </Button>
           </div>
-          <Space size={6}>
+          <Space size={6} className="outline-bulk-footer">
             <Button size="small" danger icon={<Trash2 size={14} />} disabled={!hasGeneratedOutline} onClick={handlers.confirmClearOutline}>
-              删除总纲
+              删总纲
             </Button>
           </Space>
         </div>
@@ -240,7 +255,7 @@ export function OutlineDirectory({
       <div className="outline-directory-scroll">
         <section className="outline-directory-section">
           <div className="outline-section-label"><FileText size={15} />总纲</div>
-          <button className={`outline-tree-item is-primary ${selectedView === "outline" ? "is-active" : ""}`} onClick={() => handlers.setSelectedView("outline")}>
+          <button className={`outline-tree-item is-primary ${detailOpen && selectedView === "outline" ? "is-active" : ""}`} onClick={() => handlers.setSelectedView("outline")}>
             <ScrollText size={18} />
             <span>总纲</span>
             <small>{hasGeneratedOutline ? "已生成" : "项目概览"}</small>

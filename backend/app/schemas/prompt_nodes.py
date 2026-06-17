@@ -98,6 +98,19 @@ class CreationProtagonistDrawOutput(APIModel):
     generation_notes: list[str] = Field(default_factory=list, description="本轮差异化或风险说明。")
 
 
+class CreationTitlePackagingInput(APIModel):
+    basic_info: dict[str, Any] = Field(description="创作 Star 基本信息，包括频道、类型、标签、读者、风格和初始想法。")
+    selected_worldview: dict[str, Any] = Field(description="作者已选世界观候选卡。")
+    selected_protagonist: dict[str, Any] = Field(description="作者已选主角人设候选卡。")
+    manual_input: str = Field(default="", description="作者本轮额外补充。")
+    count: int = Field(default=1, ge=1, description="本轮需要生成的新增书名包装卡数量。")
+
+
+class CreationTitlePackagingOutput(APIModel):
+    cards: list[dict[str, Any]] = Field(min_length=1, description="书名与包装候选卡，包含标题、广告句、核心卖点、读者期待、平台风格和风险提示。")
+    generation_notes: list[str] = Field(default_factory=list, description="本轮差异化或风险说明。")
+
+
 class CoreConflictSystemInput(APIModel):
     project_seed: dict[str, Any] = Field(description="创作 Star 已确认的立项种子。")
     canon_context: dict[str, Any] = Field(default_factory=dict, description="当前正典上下文。")

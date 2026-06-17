@@ -824,8 +824,17 @@ class AgentWorkflow:
         return NovelStudioState.model_validate(graph.invoke(state.model_dump()))
 
     def run_chapter_draft(self, state: NovelStudioState) -> NovelStudioState:
+        result = state
+        for result in self.stream_chapter_draft(state):
+            pass
+        return result
+
+    def stream_chapter_draft(self, state: NovelStudioState):
         graph = self._compile_draft()
-        return NovelStudioState.model_validate(graph.invoke(state.model_dump()))
+        result = state
+        for payload in graph.stream(state.model_dump(), stream_mode="values"):
+            result = NovelStudioState.model_validate(payload)
+            yield result
 
 
 agent_workflow = AgentWorkflow()

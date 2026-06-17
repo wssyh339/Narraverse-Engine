@@ -38,7 +38,19 @@ class CreationStarAgentService:
 
     def draw(self, studio: Any, db: Session, project_id: str, request: CreationStarDrawRequest, llm_client_instance: Any | None = None) -> dict[str, Any]:
         project = studio._project(db, project_id)
-        model = studio._configured_model_for_agent(db, "creation_star_session", "creation_star", request.model)
+        model_agent = "creation_star"
+        if request.step == "worldview":
+            model_agent = studio._creation_worldview_agent_name()
+        elif request.step == "protagonist":
+            model_agent = studio._creation_protagonist_agent_name()
+        elif request.step == "title":
+            model_agent = studio._creation_title_packaging_agent_name()
+        if hasattr(studio, "_configured_creation_star_model"):
+            model = studio._configured_creation_star_model(db, model_agent, request.model)
+        else:
+            model = studio._configured_model_for_agent(db, "creation_star_session", model_agent, request.model)
+            if model is None and request.model is None and model_agent != "creation_star":
+                model = studio._configured_model_for_agent(db, "creation_star_session", "creation_star", None)
         job = studio._create_job(db, project_id, None, "creation_star_draw", model, request.model_dump(), total_steps=1)
         basic = studio._normalized_creation_basic(project, request.basic_info)
         draw_id = generate_id("draw")
@@ -108,6 +120,11 @@ class CreationStarAgentService:
             role = "主角人设抽卡 Agent"
             system_prompt = studio._creation_protagonist_system_prompt()
             task = "执行创作 Star 主角人设抽卡，只输出候选主角和主角侧 conflict_seed；不要生成核心矛盾系统或小说宪法。"
+        elif request.step == "title":
+            agent_name = studio._creation_title_packaging_agent_name()
+            role = "书名与包装抽卡 Agent"
+            system_prompt = studio._creation_title_packaging_system_prompt()
+            task = "执行创作 Star 书名与包装抽卡，只输出候选标题、广告句、核心卖点、读者期待、平台风格和风险提示；不要生成核心矛盾系统或小说宪法。"
         else:
             agent_name = "creation_star"
             role = AGENT_SPECS_BY_NAME["creation_star"].role
@@ -133,6 +150,8 @@ class CreationStarAgentService:
             payload["cards"] = studio._normalize_creation_worldview_cards(payload.get("cards") if isinstance(payload.get("cards"), list) else [])
         if request.step == "protagonist":
             payload["cards"] = studio._normalize_creation_protagonist_cards(payload.get("cards") if isinstance(payload.get("cards"), list) else [])
+        if request.step == "title":
+            payload["cards"] = studio._normalize_creation_title_packaging_cards(payload.get("cards") if isinstance(payload.get("cards"), list) else [])
         payload["draw_id"] = payload.get("draw_id") or draw_id
         payload["prompt_snapshot"] = payload.get("prompt_snapshot") or prompt_snapshot
         payload["_llm"] = llm_meta
@@ -162,6 +181,12 @@ class CreationStarAgentService:
         project.genre = basic["genre"]
         project.target_reader = basic["target_reader"]
         project.target_words = int(basic.get("target_words") or project.target_words or 0)
+        project.planned_chapter_count = int(basic.get("chapter_count") or basic.get("planned_chapter_count") or project.planned_chapter_count)
+        project.planned_volume_count = int(basic.get("volume_count") or project.planned_volume_count or 1)
+        project.chapters_per_volume = int(basic.get("chapters_per_volume") or project.chapters_per_volume or 1)
+        project.chapter_word_target = int(basic.get("chapter_word_target") or project.chapter_word_target)
+        project.chapter_word_min = int(basic.get("chapter_word_min") or project.chapter_word_min or project.chapter_word_target)
+        project.chapter_word_max = int(basic.get("chapter_word_max") or project.chapter_word_max or project.chapter_word_target)
         project.initial_idea = basic.get("initial_idea", project.initial_idea)
         project.style_guide = basic.get("style", project.style_guide)
         project.premise = studio._join_nonempty(

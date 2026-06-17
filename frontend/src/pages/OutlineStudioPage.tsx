@@ -1,18 +1,18 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, App, Form, Input } from "antd";
-import { useEffect, useMemo, useState } from "react";
+import { Alert, App } from "antd";
+import { createRef, useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import { studioApi } from "../api/studio";
 import type { Chapter, Volume } from "../types/api";
 import { CanonStudioPanel } from "./outline/CanonStudioPanel";
+import { CreateChapterForm, CreateVolumeForm, type ChapterCreateValues, type OutlineCreateFormHandle, type VolumeCreateValues } from "./outline/OutlineCreateForms";
+import { OutlineDebatePanel } from "./outline/OutlineDebatePanel";
 import { OutlineDirectory } from "./outline/OutlineDirectory";
-import { formatOutlineDocument, OutlineEditorPanel } from "./outline/OutlineEditorPanel";
-import { OutlineGenerationModal } from "./outline/OutlineGenerationModal";
-import type { GenerationMode, InferenceStep, LongOutlineForm, OutlineTopology, OutlineView } from "./outline/types";
-import { buildBookOutlineGenerateRequest, buildChapterOutlineBatchGenerateRequest, buildInitialOutlineValues, isOutlinePlanResultReady, mergeOutlinePlanResult } from "./outline/outlineGeneration";
-import { buildRunningInferenceSteps, getProtagonist, resolveCurrentInferenceAgent, sameStringArray, summarizeProtagonist, updateInferenceStepsFromJob } from "./outline/outlineUtils";
+import { OutlineEditorPanel } from "./outline/OutlineEditorPanel";
+import type { OutlineView } from "./outline/types";
+import { buildProjectScalePlan } from "./outline/outlineGeneration";
+import { sameStringArray } from "./outline/outlineUtils";
 import { useOutlineBulkSelection } from "./outline/useOutlineBulkSelection";
-import { useOutlineGenerationJob } from "./outline/useOutlineGenerationJob";
 const EMPTY_CHAPTERS: Chapter[] = [];
 export function OutlineStudioPage() {
   const { projectId = "" } = useParams();
@@ -21,34 +21,20 @@ export function OutlineStudioPage() {
   const volumesQuery = useQuery({ queryKey: ["volumes", projectId], queryFn: () => studioApi.listVolumes(projectId), enabled: !!projectId });
   const stateQuery = useQuery({ queryKey: ["state", projectId], queryFn: () => studioApi.getState(projectId), enabled: !!projectId });
   const [selectedView, setSelectedView] = useState<OutlineView>("outline");
+  const [detailOpen, setDetailOpen] = useState(false);
   const [selectedVolumeId, setSelectedVolumeId] = useState("");
   const [selectedChapterId, setSelectedChapterId] = useState("");
   const [selectedChapterIds, setSelectedChapterIds] = useState<string[]>([]);
   const [selectedVolumeIds, setSelectedVolumeIds] = useState<string[]>([]);
   const [batchManagementEnabled, setBatchManagementEnabled] = useState(false);
-  const [outlinePreviewOpen, setOutlinePreviewOpen] = useState(false);
-  const [generationMode, setGenerationMode] = useState<GenerationMode>("outline");
-  const [pendingGenerationMode, setPendingGenerationMode] = useState<GenerationMode>("outline");
-  const [useTopologyInference, setUseTopologyInference] = useState(true);
-  const [generationStarted, setGenerationStarted] = useState(false);
-  const [inferenceSteps, setInferenceSteps] = useState<InferenceStep[]>([]);
-  const [activeAgentName, setActiveAgentName] = useState("");
   const [lastOutlinePlan, setLastOutlinePlan] = useState<Record<string, unknown> | null>(null);
-  const [pendingOutlinePlan, setPendingOutlinePlan] = useState<Record<string, unknown> | null>(null);
-  const [pendingOutlineJobId, setPendingOutlineJobId] = useState("");
-  const [volumeForm] = Form.useForm<{ title: string; outline: string }>();
-  const [chapterForm] = Form.useForm<{ title: string; outline: string }>();
-  const [generationForm] = Form.useForm<LongOutlineForm>();
-  const watchedVolumeCount = Form.useWatch("volume_count", generationForm);
-  const watchedChaptersPerVolume = Form.useWatch("chapters_per_volume", generationForm);
-  const watchedChapterWordTarget = Form.useWatch("chapter_word_target", generationForm);
+  const useTopologyInference = true;
 
   const volumes = volumesQuery.data?.volumes ?? [];
   const projectState = stateQuery.data?.state;
   const chapters = projectState?.chapters ?? EMPTY_CHAPTERS;
   const project = projectState?.project;
   const storyBible = projectState?.story_bible;
-  const protagonist = getProtagonist(projectState?.characters ?? []);
   const selectedVolume = useMemo(() => volumes.find((item) => item.id === selectedVolumeId) ?? volumes[0], [selectedVolumeId, volumes]);
   const selectedChapter = useMemo(() => chapters.find((item) => item.id === selectedChapterId), [selectedChapterId, chapters]);
   const chaptersByVolumeNo = useMemo(() => {
@@ -71,14 +57,7 @@ export function OutlineStudioPage() {
   } = useOutlineBulkSelection({ volumes, chapters, selectedChapterIds, selectedVolumeIds, chaptersByVolumeNo });
   const hasStoryBibleOutline = Boolean(storyBible?.world_setting || storyBible?.main_conflict || storyBible?.themes?.length || storyBible?.style_guide);
   const hasDeletableOutline = Boolean(lastOutlinePlan || hasStoryBibleOutline);
-  const computedTargetWords = Number(watchedVolumeCount || 0) * Number(watchedChaptersPerVolume || 0) * Number(watchedChapterWordTarget || 0);
-  const generationResultText = useMemo(() => (pendingOutlinePlan ? formatOutlineDocument(pendingOutlinePlan, storyBible ?? undefined, project) : ""), [pendingOutlinePlan, project, storyBible]);
-  const outlineTopology = useMemo(() => (pendingOutlinePlan?.outline_topology && typeof pendingOutlinePlan.outline_topology === "object" ? (pendingOutlinePlan.outline_topology as OutlineTopology) : null), [pendingOutlinePlan]);
-  const isOutlineResultReady = isOutlinePlanResultReady(pendingOutlinePlan);
 
-  useEffect(() => {
-    if (outlinePreviewOpen && computedTargetWords > 0) generationForm.setFieldValue("target_words", computedTargetWords);
-  }, [computedTargetWords, generationForm, outlinePreviewOpen]);
   useEffect(() => {
     setSelectedChapterIds((current) => {
       const next = current.filter((chapterId) => chapters.some((chapter) => chapter.id === chapterId));
@@ -102,7 +81,6 @@ export function OutlineStudioPage() {
     mutationFn: (values: { title: string; outline: string }) => studioApi.createVolume(projectId, values),
     onSuccess: () => {
       messageApi.success("分卷已创建");
-      volumeForm.resetFields();
       invalidate();
     },
     onError: (error) => messageApi.error(error instanceof Error ? error.message : "创建失败"),
@@ -111,24 +89,9 @@ export function OutlineStudioPage() {
     mutationFn: (values: { title: string; outline: string }) => studioApi.createChapter(projectId, { ...values, volume_no: selectedVolume?.volume_no ?? 1 }),
     onSuccess: () => {
       messageApi.success("章节与章纲已创建");
-      chapterForm.resetFields();
       invalidate();
     },
     onError: (error) => messageApi.error(error instanceof Error ? error.message : "创建失败"),
-  });
-  const saveVolume = useMutation({
-    mutationFn: (values: { title: string; outline: string }) => studioApi.updateVolume(projectId, selectedVolume!.id, values),
-    onSuccess: () => {
-      messageApi.success("卷纲已保存");
-      invalidate();
-    },
-  });
-  const saveChapter = useMutation({
-    mutationFn: (values: Partial<Chapter>) => studioApi.updateChapter(projectId, selectedChapter!.id, values),
-    onSuccess: () => {
-      messageApi.success("章纲已保存");
-      invalidate();
-    },
   });
   const trashOneChapter = useMutation({
     mutationFn: (chapterId: string) => studioApi.trashChapter(projectId, chapterId),
@@ -138,6 +101,7 @@ export function OutlineStudioPage() {
       if (selectedChapterId === chapterId) {
         setSelectedChapterId("");
         setSelectedView("outline");
+        setDetailOpen(false);
       }
       invalidate();
     },
@@ -151,6 +115,7 @@ export function OutlineStudioPage() {
       if (selectedChapterId && chapterIds.includes(selectedChapterId)) {
         setSelectedChapterId("");
         setSelectedView("outline");
+        setDetailOpen(false);
       }
       invalidate();
     },
@@ -162,7 +127,7 @@ export function OutlineStudioPage() {
       messageApi.success("卷纲已删除");
       setSelectedVolumeIds((current) => current.filter((id) => id !== volumeId));
       if (selectedVolumeId === volumeId || selectedVolume?.id === volumeId) {
-        setSelectedVolumeId(""); setSelectedChapterId(""); setSelectedView("outline");
+        setSelectedVolumeId(""); setSelectedChapterId(""); setSelectedView("outline"); setDetailOpen(false);
       }
       invalidate();
     },
@@ -174,7 +139,7 @@ export function OutlineStudioPage() {
       messageApi.success(`已删除 ${volumeIds.length} 个卷纲`);
       setSelectedVolumeIds([]);
       if (selectedVolumeId && volumeIds.includes(selectedVolumeId)) {
-        setSelectedVolumeId(""); setSelectedChapterId(""); setSelectedView("outline");
+        setSelectedVolumeId(""); setSelectedChapterId(""); setSelectedView("outline"); setDetailOpen(false);
       }
       invalidate();
     },
@@ -184,127 +149,29 @@ export function OutlineStudioPage() {
     mutationFn: () => studioApi.updateStoryBible(projectId, { world_setting: "", main_conflict: "", themes: [], style_guide: "" }),
     onSuccess: () => {
       setLastOutlinePlan(null);
-      setPendingOutlinePlan(null);
-      setInferenceSteps([]);
       setSelectedView("outline");
+      setDetailOpen(false);
       messageApi.success("总纲已删除");
       invalidate();
     },
     onError: (error) => messageApi.error(error instanceof Error ? error.message : "删除总纲失败"),
   });
-  const plan = useMutation({
-    mutationFn: ({ mode, values, outlineContext }: { mode: GenerationMode; values: LongOutlineForm; outlineContext?: Record<string, unknown> | null }) => {
-      const selectedChaptersForBatch = selectedChapterIdsAcrossDirectory.map((chapterId) => chapters.find((chapter) => chapter.id === chapterId)).filter((chapter): chapter is Chapter => Boolean(chapter));
-      const input = { mode, values, projectId, selectedVolume, selectedChapter, selectedChapters: selectedChaptersForBatch, outlineContext };
-      return mode === "outline" ? studioApi.bookOutlineGenerate(projectId, buildBookOutlineGenerateRequest(input)) : studioApi.chapterOutlineBatchGenerate(projectId, buildChapterOutlineBatchGenerateRequest(input));
-    },
-  });
-  const commitOutline = useMutation<unknown, Error, { mode: GenerationMode; jobId: string; outlinePlan: Record<string, unknown> | null }>({
-    mutationFn: ({ mode, jobId, outlinePlan }: { mode: GenerationMode; jobId: string; outlinePlan: Record<string, unknown> | null }) =>
-      mode === "outline"
-        ? studioApi.bookOutlineCommit(projectId, jobId ? { job_id: jobId } : { outline_plan: outlinePlan ?? {} })
-        : studioApi.chapterOutlineCommit(projectId, jobId ? { job_id: jobId } : { chapter_outlines: ((outlinePlan?.chapter_outlines as Record<string, unknown>[] | undefined) ?? []), overwrite_existing: true }),
-    onSuccess: (_, variables) => {
-      messageApi.success(variables.mode === "outline" ? "总纲和卷纲已确认更新" : "章纲已确认写入");
-      setPendingOutlinePlan(null);
-      setPendingOutlineJobId("");
-      setGenerationStarted(false);
-      setInferenceSteps([]);
-      setActiveAgentName("");
-      setOutlinePreviewOpen(false);
-      invalidate();
-    },
-    onError: (error) => messageApi.error(error instanceof Error ? error.message : "确认更新失败"),
-  });
-  const handleOutlineComplete = (outlinePlan: Record<string, unknown> | null, job?: { id?: string }) => {
-    const hasOutlineSwarm = Boolean(outlinePlan?.["outline_swarm"]);
-    const topologyMode = outlinePlan?.outline_topology && typeof outlinePlan.outline_topology === "object" ? (outlinePlan.outline_topology as { mode?: unknown }).mode : undefined;
-    const fallbackSteps = buildRunningInferenceSteps({ generationMode, useTopologyInference: topologyMode === "topology" || hasOutlineSwarm });
-    const runningSteps = inferenceSteps.length || hasOutlineSwarm ? inferenceSteps : fallbackSteps;
-    const completedSteps = (runningSteps.length ? runningSteps : fallbackSteps).map((step) => ({ ...step, output_key: step.output_key === "等待上游 Agent 交接" ? "已完成" : step.output_key, status: "succeeded" as const }));
-    setPendingGenerationMode(generationMode);
-    setPendingOutlinePlan(outlinePlan);
-    setPendingOutlineJobId(job?.id ?? "");
-    setLastOutlinePlan((current) => mergeOutlinePlanResult(current, generationMode, outlinePlan));
-    setInferenceSteps(completedSteps);
-    setActiveAgentName(completedSteps.at(-1)?.agent_name ?? "");
-    setSelectedView("outline");
-    invalidate();
-  };
-  const { isOutlineGenerating, startOutlineJob, clearOutlineJob } = useOutlineGenerationJob({ generationMode, useTopologyInference, planIsPending: plan.isPending, messageApi, setInferenceSteps, setActiveAgentName, onComplete: handleOutlineComplete });
-
-  const buildInitialValues = (mode: GenerationMode): LongOutlineForm => buildInitialOutlineValues({ mode, project, storyBible: storyBible ?? undefined, protagonistSummary: summarizeProtagonist(protagonist), selectedVolume });
-
-  const openGenerationPreview = (mode: GenerationMode) => {
-    setGenerationMode(mode);
-    setGenerationStarted(false); setPendingOutlinePlan(null); setPendingOutlineJobId(""); setActiveAgentName(""); setUseTopologyInference(true);
-    generationForm.setFieldsValue(buildInitialValues(mode));
-    setOutlinePreviewOpen(true);
-  };
-
-  const confirmGenerate = async () => {
-    const values = await generationForm.validateFields();
-    const runningSteps = buildRunningInferenceSteps({ generationMode, useTopologyInference: Boolean(values.use_topology_inference) });
-    setUseTopologyInference(Boolean(values.use_topology_inference));
-    setSelectedView("outline");
-    setGenerationStarted(true);
-    setPendingOutlinePlan(null);
-    setInferenceSteps(runningSteps);
-    setActiveAgentName(runningSteps[0]?.agent_name ?? "");
-    try {
-      const result = await plan.mutateAsync({ mode: generationMode, values, outlineContext: null });
-      const job = result.job;
-      const completedSteps = Number(job.progress?.completed_steps ?? 0);
-      const currentAgent = job.current_agent || job.progress?.current_step || "";
-      setActiveAgentName(resolveCurrentInferenceAgent(runningSteps, currentAgent, completedSteps));
-      setInferenceSteps(updateInferenceStepsFromJob(runningSteps, currentAgent, completedSteps));
-      if (job.status === "succeeded") {
-        handleOutlineComplete(result.outline_plan ?? null, job);
-        messageApi.success(generationMode === "outline" ? "大纲推演完成，请确认后写入" : "章纲推演完成，请确认后写入");
-      } else {
-        if (result.outline_plan?.outline_topology) setPendingOutlinePlan(result.outline_plan);
-        startOutlineJob(job.id);
-        messageApi.info("推演已进入后台任务，正在持续更新 Agent 进度");
-      }
-    } catch (error) {
-      setInferenceSteps((steps) => steps.map((step) => (step.status === "running" ? { ...step, status: "failed" } : step)));
-      clearOutlineJob();
-      messageApi.error(error instanceof Error ? error.message : "生成失败");
-    }
-  };
-
-  const confirmApplyOutlineUpdate = () => {
-    if (!pendingOutlinePlan || !isOutlineResultReady) {
-      messageApi.warning("请先完成一次推演");
-      return;
-    }
-    setSelectedView(pendingGenerationMode === "outline" ? "outline" : "chapterOutline");
-    commitOutline.mutate({ mode: pendingGenerationMode, jobId: pendingOutlineJobId, outlinePlan: pendingOutlinePlan });
-  };
 
   const openCreateVolume = () => {
+    const formRef = createRef<OutlineCreateFormHandle<VolumeCreateValues>>();
     modal.confirm({
       title: "新建分卷",
-      content: (
-        <Form form={volumeForm} layout="vertical">
-          <Form.Item name="title" label="分卷名称" rules={[{ required: true }]}><Input /></Form.Item>
-          <Form.Item name="outline" label="卷纲"><Input.TextArea rows={4} /></Form.Item>
-        </Form>
-      ),
-      onOk: () => volumeForm.validateFields().then((values) => createVolume.mutateAsync(values)),
+      content: <CreateVolumeForm ref={formRef} />,
+      onOk: () => formRef.current?.validate().then((values) => createVolume.mutateAsync(values)),
     });
   };
 
   const openCreateChapter = () => {
+    const formRef = createRef<OutlineCreateFormHandle<ChapterCreateValues>>();
     modal.confirm({
       title: "新建章节与章纲",
-      content: (
-        <Form form={chapterForm} layout="vertical">
-          <Form.Item name="title" label="章节标题" rules={[{ required: true }]}><Input /></Form.Item>
-          <Form.Item name="outline" label="章纲"><Input.TextArea rows={4} /></Form.Item>
-        </Form>
-      ),
-      onOk: () => chapterForm.validateFields().then((values) => createChapter.mutateAsync(values)),
+      content: <CreateChapterForm ref={formRef} />,
+      onOk: () => formRef.current?.validate().then((values) => createChapter.mutateAsync(values)),
     });
   };
   const confirmDanger = (title: string, content: string, okText: string, loading: boolean, onOk: () => Promise<unknown>, disabled = false) =>
@@ -366,7 +233,7 @@ export function OutlineStudioPage() {
 
   const confirmClearOutline = () => {
     if (!hasDeletableOutline) {
-      messageApi.warning("当前没有可删除的生成大纲");
+      messageApi.warning("当前没有可删除的总纲");
       return;
     }
     confirmDanger("删除总纲", "确认删除当前页面中的总纲、推演链，并清空故事圣经中的世界观、核心冲突、主题和风格字段？此操作不会删除卷纲或章纲。", "删除总纲", clearOutline.isPending, () => clearOutline.mutateAsync());
@@ -375,49 +242,24 @@ export function OutlineStudioPage() {
   if (volumesQuery.isLoading || stateQuery.isLoading) return <div className="outline-studio-grid"><div className="studio-panel loading-panel" /></div>;
   if (volumesQuery.error || stateQuery.error) return <Alert type="error" showIcon message="无法读取大纲数据" />;
 
-  const directoryState = { batchManagementEnabled, selectedView, selectedVolumeId: selectedVolume?.id ?? "", selectedChapterId, selectedChapterIds, selectedChapterIdsAcrossDirectory, selectedVolumeIds, selectedVolumeIdsAcrossDirectory, allDirectorySelected, partialDirectorySelected, allVolumeOutlinesSelected, partialVolumeOutlinesSelected, isDeletingSelected: deleteSelectedChapters.isPending, isDeletingOne: trashOneChapter.isPending, isDeletingVolume: deleteVolume.isPending, isDeletingSelectedVolumes: deleteSelectedVolumes.isPending, hasGeneratedOutline: hasDeletableOutline };
-  const directoryHandlers = { setSelectedView, setSelectedVolumeId, setSelectedChapterId, setBatchManagementEnabled, openCreateVolume, openCreateChapter, openGenerationPreview, confirmClearOutline, confirmDeleteVolume, confirmBatchDeleteVolumes, toggleDirectorySelection, toggleVolumeSelection, toggleVolumeOutlineSelection, toggleAllVolumeOutlines, toggleChapterSelection, confirmTrashChapter, confirmBatchTrashChapters };
+  const openDetailView = (view: OutlineView) => {
+    setSelectedView(view);
+    setDetailOpen(true);
+  };
+  const directoryState = { batchManagementEnabled, selectedView, detailOpen, selectedVolumeId: selectedVolume?.id ?? "", selectedChapterId, selectedChapterIds, selectedChapterIdsAcrossDirectory, selectedVolumeIds, selectedVolumeIdsAcrossDirectory, allDirectorySelected, partialDirectorySelected, allVolumeOutlinesSelected, partialVolumeOutlinesSelected, isDeletingSelected: deleteSelectedChapters.isPending, isDeletingOne: trashOneChapter.isPending, isDeletingVolume: deleteVolume.isPending, isDeletingSelectedVolumes: deleteSelectedVolumes.isPending, hasGeneratedOutline: hasDeletableOutline };
+  const directoryHandlers = { setSelectedView: openDetailView, setSelectedVolumeId, setSelectedChapterId, setDetailOpen, setBatchManagementEnabled, openCreateVolume, openCreateChapter, confirmClearOutline, confirmDeleteVolume, confirmBatchDeleteVolumes, toggleDirectorySelection, toggleVolumeSelection, toggleVolumeOutlineSelection, toggleAllVolumeOutlines, toggleChapterSelection, confirmTrashChapter, confirmBatchTrashChapters };
+  const debateScalePlan = buildProjectScalePlan(project);
+  const debatePanel = <OutlineDebatePanel projectId={projectId} defaultRequirement={[project?.premise, storyBible?.main_conflict, selectedVolume?.outline, selectedChapter?.outline].filter(Boolean).join("\n")} volumeCount={debateScalePlan.volume_count} chaptersPerVolume={debateScalePlan.chapters_per_volume} targetWords={debateScalePlan.target_words} chapterWordTarget={debateScalePlan.chapter_word_target} chapterWordMin={debateScalePlan.chapter_word_min} chapterWordMax={debateScalePlan.chapter_word_max} scalePlan={debateScalePlan} selectedVolumeNo={selectedVolume?.volume_no ?? 1} selectedChapterNo={selectedChapter?.chapter_no ?? 1} useTopologyInference={useTopologyInference} compact={detailOpen} onFormalCommit={() => { invalidate(); setSelectedView("outline"); setDetailOpen(true); }} />;
 
   return (
-    <>
-      <div className="outline-studio-grid">
-        <OutlineDirectory volumes={volumes} chapters={chapters} {...directoryState} handlers={directoryHandlers} />
-        <OutlineEditorPanel
-          selectedView={selectedView}
-          selectedVolume={selectedVolume}
-          selectedChapter={selectedChapter}
-          lastOutlinePlan={lastOutlinePlan}
-          project={project}
-          storyBible={storyBible ?? undefined}
-          isPlanning={isOutlineGenerating}
-          saveVolume={saveVolume}
-          saveChapter={saveChapter}
-          openGenerationPreview={openGenerationPreview}
-        >
+    <div className={`outline-studio-grid ${detailOpen ? "is-detail-open" : "is-debate-focus"}`}>
+      <OutlineDirectory volumes={volumes} chapters={chapters} {...directoryState} handlers={directoryHandlers} />
+      {detailOpen ? (
+        <OutlineEditorPanel selectedView={selectedView} selectedVolume={selectedVolume} selectedChapter={selectedChapter} lastOutlinePlan={lastOutlinePlan} project={project} storyBible={storyBible ?? undefined}>
           <CanonStudioPanel projectId={projectId} project={project} storyBible={storyBible ?? undefined} />
         </OutlineEditorPanel>
-      </div>
-      <OutlineGenerationModal
-        open={outlinePreviewOpen}
-        generationMode={generationMode}
-        generationStarted={generationStarted}
-        form={generationForm}
-        inferenceSteps={inferenceSteps}
-        outlineTopology={outlineTopology}
-        outlinePlan={pendingOutlinePlan}
-        activeAgentName={activeAgentName}
-        isPending={isOutlineGenerating || commitOutline.isPending}
-        hasResult={isOutlineResultReady}
-        resultText={generationResultText}
-        onOk={confirmGenerate}
-        onConfirmUpdate={confirmApplyOutlineUpdate}
-        onCancel={() => {
-          setOutlinePreviewOpen(false);
-          setGenerationStarted(false);
-          setInferenceSteps([]);
-          setActiveAgentName("");
-        }}
-      />
-    </>
+      ) : null}
+      {debatePanel}
+    </div>
   );
 }

@@ -9,7 +9,14 @@ from langgraph.pregel import Pregel
 
 from app.agents.outline_swarm.agent_runner import OutlineSwarmAgentRunner
 from app.agents.outline_swarm.state import OutlineSwarmState
-from app.agents.outline_swarm.tools import create_completion_ticket, create_uncertainty_ticket, record_outline_piece, upsert_canon_candidate
+from app.agents.outline_swarm.tools import (
+    create_character_candidate,
+    create_completion_ticket,
+    create_setting_candidate,
+    create_uncertainty_ticket,
+    record_outline_piece,
+    upsert_canon_candidate,
+)
 from app.agents.outline_swarm.validators import OutlineSwarmStopValidator
 from app.agents.shared.trace import append_trace
 
@@ -20,6 +27,8 @@ OUTLINE_SWARM_AGENT_NAMES = (
     "WorldSettingAgent",
     "CharacterArcAgent",
     "ConflictAgent",
+    "CharacterGeneratorAgent",
+    "SettingGeneratorAgent",
     "PlotArchitectAgent",
     "BeatControllerAgent",
     "ForeshadowingAgent",
@@ -299,7 +308,124 @@ def _conflict(state: OutlineSwarmState, runner: OutlineSwarmAgentRunner) -> Outl
     conflict_matrix = payload.get("conflict_matrix", fallback["conflict_matrix"])
     if isinstance(conflict_matrix, dict):
         state.outline["conflict_matrix"] = conflict_matrix
-    return _advance(state, "ConflictAgent", "PlotArchitectAgent", "把人物欲望转化为升级冲突")
+    return _advance(state, "ConflictAgent", "CharacterGeneratorAgent", "把人物欲望转化为升级冲突，并检查角色缺口")
+
+
+def _generation_stage(state: OutlineSwarmState) -> str:
+    if state.generation_kind == "book_outline":
+        return "book_outline"
+    if state.generation_kind == "chapter_outline_batch":
+        return "chapter_outline"
+    return "legacy_plan_chapters"
+
+
+def _character_generator(state: OutlineSwarmState, runner: OutlineSwarmAgentRunner) -> OutlineSwarmState:
+    protagonist = state.characters[0]["name"] if state.characters else _seed_text(state, "protagonist", "main_character", default="主角")
+    pressure_source = state.outline.get("conflict_matrix", {}).get("core_conflict") if isinstance(state.outline.get("conflict_matrix"), dict) else ""
+    fallback = {
+        "character_candidates": [
+            {
+                "candidate_id": f"char_candidate_{len(state.character_candidates) + 1:03d}",
+                "name": "制度压力代表",
+                "role_type": "antagonist",
+                "importance_level": "major",
+                "activity_status": "candidate",
+                "story_function": "代表世界规则或组织压力，迫使主角付出代价而不是轻易推进主线。",
+                "first_needed_in": {"stage": _generation_stage(state), "volume_no": 1, "chapter_no": None},
+                "identity": "掌握关键规则解释权的阶段性对手",
+                "public_face": "秩序维护者",
+                "hidden_identity": "核心矛盾的执行者或受益者",
+                "external_goal": f"阻止{protagonist}绕开既有秩序完成目标",
+                "inner_need": "证明旧秩序仍然有效",
+                "wound": "曾因规则崩塌付出代价，因此恐惧新的例外",
+                "secret": "知道世界规则中可被主角利用的裂缝",
+                "ability": "调动制度、资源或舆论形成长期压迫",
+                "weakness": "过度依赖旧规则，难以应对主角的新选择",
+                "moral_pressure": "其阻拦并非纯恶，而是维护一套仍保护多数人的秩序",
+                "relationship_hooks": [
+                    {
+                        "target": protagonist,
+                        "relationship_type": "压迫 / 镜像",
+                        "dramatic_function": "用制度压力逼主角明确自己的选择代价",
+                    }
+                ],
+                "arc": {
+                    "start_state": "以规则代表身份登场",
+                    "turning_points": ["发现主角能改写局部规则", "被迫把冲突升级到组织层面"],
+                    "possible_end_state": "被主角证明旧规则需要被改写，或成为更大反派的线索",
+                },
+                "conflict_utility": pressure_source or "补足大纲中的阶段性对抗力量",
+                "reader_experience": ["压迫感", "权谋感", "成长感"],
+                "risks": ["如果动机过薄，会变成工具人反派"],
+                "duplicate_check": {"possible_duplicates": [], "reason": "当前推演未发现可完全复用的既有角色"},
+                "canon_write_suggestion": {"should_create": True, "confidence": 0.78, "requires_user_approval": True},
+            }
+        ]
+    }
+    payload = _run_agent(
+        state,
+        runner,
+        agent_name="CharacterGeneratorAgent",
+        role="大纲角色生成 Agent",
+        task="当大纲推演发现关键角色缺口时，生成候选角色档案卡。优先说明为什么不能复用已有角色；只输出候选，不写入正式正典。",
+        fallback=fallback,
+    )
+    candidates = payload.get("character_candidates", fallback["character_candidates"])
+    if not isinstance(candidates, list):
+        candidates = fallback["character_candidates"]
+    if not state.character_candidates:
+        for item in candidates[:3]:
+            if isinstance(item, dict):
+                create_character_candidate(state, item)
+    return _advance(state, "CharacterGeneratorAgent", "SettingGeneratorAgent", "生成大纲所需候选角色卡")
+
+
+def _setting_generator(state: OutlineSwarmState, runner: OutlineSwarmAgentRunner) -> OutlineSwarmState:
+    worldview = _seed_text(state, "worldview", default="待补全世界规则")
+    fallback = {
+        "setting_candidates": [
+            {
+                "candidate_id": f"setting_candidate_{len(state.setting_candidates) + 1:03d}",
+                "setting_type": "rule",
+                "name": "主线代价规则",
+                "importance_level": "major",
+                "activity_status": "candidate",
+                "definition": f"从世界观中提炼出的长期限制：{worldview}",
+                "story_function": "让主角每次推进都必须付出资源、关系或身份代价。",
+                "first_needed_in": {"stage": _generation_stage(state), "volume_no": 1, "chapter_no": None},
+                "rules": ["越接近主线目标，越会触发更高层级的规则审查或反噬"],
+                "limitations": ["不能无条件解决冲突，必须制造新的代价"],
+                "costs": ["资源损耗", "关系暴露", "身份风险"],
+                "taboos": ["不可让规则变成万能解释"],
+                "public_knowledge": "多数人只知道表层禁令或制度要求",
+                "hidden_truth": "规则背后存在可被主角逐步发现的漏洞或历史原因",
+                "related_characters": [item.get("name") for item in state.character_candidates if item.get("name")],
+                "related_entities": [item.get("name") or item.get("title") for item in state.story_entities if item.get("name") or item.get("title")],
+                "conflict_utility": "支撑总纲、卷纲和章纲中的长期升级压力",
+                "foreshadowing_utility": "可作为早期异常、卷中误导和卷末回收依据",
+                "reader_experience": ["压迫感", "规则探索感", "期待感"],
+                "risks": ["规则过强会压缩主角主动性"],
+                "continuity_check": {"possible_conflicts": [], "uncertain_points": ["需要用户确认该规则是否成为核心正典"]},
+                "canon_write_suggestion": {"should_create": True, "confidence": 0.8, "requires_user_approval": True},
+            }
+        ]
+    }
+    payload = _run_agent(
+        state,
+        runner,
+        agent_name="SettingGeneratorAgent",
+        role="大纲设定生成 Agent",
+        task="当大纲推演发现世界规则、组织、地点、物件、事件或制度缺口时，生成候选设定档案。只输出候选，不写入正式正典。",
+        fallback=fallback,
+    )
+    candidates = payload.get("setting_candidates", fallback["setting_candidates"])
+    if not isinstance(candidates, list):
+        candidates = fallback["setting_candidates"]
+    if not state.setting_candidates:
+        for item in candidates[:3]:
+            if isinstance(item, dict):
+                create_setting_candidate(state, item)
+    return _advance(state, "SettingGeneratorAgent", "PlotArchitectAgent", "生成大纲所需候选设定卡")
 
 
 def _plot_architect(state: OutlineSwarmState, runner: OutlineSwarmAgentRunner) -> OutlineSwarmState:
@@ -537,6 +663,8 @@ _HANDLERS: dict[str, AgentHandler] = {
     "WorldSettingAgent": _world_setting,
     "CharacterArcAgent": _character_arc,
     "ConflictAgent": _conflict,
+    "CharacterGeneratorAgent": _character_generator,
+    "SettingGeneratorAgent": _setting_generator,
     "PlotArchitectAgent": _plot_architect,
     "BeatControllerAgent": _beat_controller,
     "ForeshadowingAgent": _foreshadowing,

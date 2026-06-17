@@ -9,7 +9,11 @@ export interface CreateProjectInput {
   style_guide: string;
   language: string;
   planned_chapter_count: number;
+  planned_volume_count?: number;
+  chapters_per_volume?: number;
   chapter_word_target: number;
+  chapter_word_min?: number;
+  chapter_word_max?: number;
 }
 
 export interface UpdateStoryBibleInput {

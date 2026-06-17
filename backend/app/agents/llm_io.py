@@ -3,13 +3,14 @@ from __future__ import annotations
 from typing import Any
 import json
 import re
+import time
 
 from app.core.json import dumps
 
 
 CRITICAL_AGENT_REQUIRED_OUTPUTS: dict[str, tuple[tuple[str, ...], ...]] = {
     "volume_outline": (("volume_outlines", "volumes"),),
-    "logic_audit": (("passed", "status", "conclusion"), ("issues", "blocking_issues", "revision_suggestions")),
+    "logic_audit": (("passed", "status", "conclusion", "pass_status", "overall_conclusion"), ("issues", "blocking_issues", "revision_suggestions", "revision_plan")),
 }
 
 
@@ -184,6 +185,8 @@ def call_agent_json(
     context: dict[str, Any],
     fallback: dict[str, Any],
     model: str | None,
+    require_remote: bool = False,
+    allow_fallback: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     user_payload = {
         "agent_name": agent_name,
@@ -202,17 +205,24 @@ def call_agent_json(
         f"{rendered_system_prompt}\n\n"
         "你正在作为后端 Agent 节点运行。必须读取用户提供的 context，输出 expected_output_schema 对应的 JSON。"
     )
+    started_at = time.perf_counter()
     result = llm_client.generate(prompt, dumps(user_payload), model)
-    parsed = parse_json_object(result.content)
-    payload = merge_agent_payload(fallback, parsed)
-    validation_warnings = _validate_agent_payload(agent_name, payload, parsed)
+    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
     used_remote_model = bool(getattr(result, "used_remote_model", False))
+    if require_remote and not used_remote_model:
+        raise RuntimeError(f"{agent_name} 真实议事需要远程 LLM 输出，但当前结果来自本地降级。")
+    parsed = parse_json_object(result.content)
+    if parsed is None and not allow_fallback:
+        raise RuntimeError(f"{agent_name} LLM 输出未解析为 JSON object，真实议事路径不允许 fallback。")
+    payload = merge_agent_payload(fallback, parsed) if allow_fallback else {**fallback, **(parsed or {})}
+    validation_warnings = _validate_agent_payload(agent_name, payload, parsed)
     meta = {
         "provider": getattr(result, "provider", ""),
         "model": getattr(result, "model", model or ""),
         "used_remote_model": used_remote_model,
         "parsed": parsed is not None,
         "source": "remote_api" if used_remote_model else "local_fallback",
+        "elapsed_ms": elapsed_ms,
         "schema_valid": not validation_warnings,
         "validation_warnings": validation_warnings,
     }
