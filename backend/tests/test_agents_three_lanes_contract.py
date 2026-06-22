@@ -6,7 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_agents_are_split_into_three_lanes() -> None:
+def test_agents_are_split_into_active_lanes() -> None:
     expected = {
         "backend/app/agents/shared/__init__.py",
         "backend/app/agents/shared/contracts.py",
@@ -17,12 +17,8 @@ def test_agents_are_split_into_three_lanes() -> None:
         "backend/app/agents/creation_star/state.py",
         "backend/app/agents/creation_star/workflow.py",
         "backend/app/agents/creation_star/service.py",
-        "backend/app/agents/outline_swarm/__init__.py",
-        "backend/app/agents/outline_swarm/state.py",
-        "backend/app/agents/outline_swarm/tools.py",
-        "backend/app/agents/outline_swarm/validators.py",
-        "backend/app/agents/outline_swarm/swarm.py",
-        "backend/app/agents/outline_swarm/service.py",
+        "backend/app/api/v1/endpoints/outline_debate.py",
+        "backend/app/services/outline_debate_service.py",
         "backend/app/agents/chapter_writing/__init__.py",
         "backend/app/agents/chapter_writing/state.py",
         "backend/app/agents/chapter_writing/workflow.py",
@@ -32,6 +28,18 @@ def test_agents_are_split_into_three_lanes() -> None:
     assert missing == []
 
 
+def test_legacy_outline_story_state_code_is_removed() -> None:
+    deleted_paths = [
+        "backend/app/agents/outline_llm_client.py",
+        "backend/app/agents/outline_agents.py",
+        "backend/app/agents/outline_models.py",
+        "backend/app/agents/outline_storage.py",
+        "backend/app/agents/outline_workflow.py",
+    ]
+    for path in deleted_paths:
+        assert not (ROOT / path).exists(), f"{path} should stay deleted"
+
+
 def test_langgraph_swarm_dependency_is_declared() -> None:
     backend_requirements = (ROOT / "backend/requirements.txt").read_text(encoding="utf-8")
     root_requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
@@ -39,11 +47,30 @@ def test_langgraph_swarm_dependency_is_declared() -> None:
     assert "langgraph-swarm" in root_requirements
 
 
-def test_docs_describe_three_agent_lanes() -> None:
+def test_docs_describe_active_agent_lanes() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     for doc in [readme, agents]:
         assert "creation_star" in doc
-        assert "outline_swarm" in doc
+        assert "outline_debate" in doc
         assert "chapter_writing" in doc
-        assert "langgraph-swarm" in doc
+        assert "outline_swarm" in doc and "已删除" in doc
+    assert "返回初始化、章节规划" not in agents
+    assert "结构化故事状态、章节规划" not in agents
+
+
+def test_active_readme_uses_outline_debate_not_legacy_swarm_labels() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "大纲议事" in readme
+    assert "outline/debate/sessions" in readme
+    assert "大纲 Swarm" not in readme
+    assert "大纲 Swarm 线" not in readme
+    assert "python main.py plan" not in readme
+
+
+def test_active_architecture_doc_uses_outline_debate_not_legacy_swarm() -> None:
+    architecture = (ROOT / "docs/architecture.md").read_text(encoding="utf-8")
+    assert "outline_debate" in architecture
+    assert "backend/app/services/outline_debate_service.py" in architecture
+    assert "backend/app/agents/outline_swarm/" not in architecture
+    assert "大纲 Swarm" not in architecture

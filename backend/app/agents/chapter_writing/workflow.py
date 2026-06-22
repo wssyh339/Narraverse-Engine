@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Callable
+import re
 
 from langgraph.graph import END, START, StateGraph
 
@@ -35,7 +36,143 @@ def _name_list(items: list[dict[str, Any]], primary_key: str = "name", limit: in
     return "、".join(names) if names else "暂无"
 
 
+def _positive_int(value: Any, default: int = 0) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return number if number > 0 else default
+
+
+def _chapter_word_target(state: NovelStudioState) -> int:
+    chapter = state.current_chapter_outline if isinstance(state.current_chapter_outline, dict) else {}
+    explicit = _positive_int(chapter.get("word_target") or chapter.get("chapter_word_target"))
+    if explicit:
+        return explicit
+    if state.target_words > 0 and state.target_chapters > 0:
+        return max(1, state.target_words // state.target_chapters)
+    return 0
+
+
+def _chapter_word_min(state: NovelStudioState, target: int) -> int:
+    chapter = state.current_chapter_outline if isinstance(state.current_chapter_outline, dict) else {}
+    word_range = chapter.get("word_range")
+    explicit_from_range = word_range[0] if isinstance(word_range, list) and word_range else None
+    chapter_min = _positive_int(chapter.get("word_min") or chapter.get("chapter_word_min") or explicit_from_range)
+    if chapter_min:
+        return chapter_min
+    project_min = _positive_int(state.chapter_word_min)
+    if project_min:
+        return min(project_min, target) if target > 0 else project_min
+    return int(target * 0.85) if target > 0 else 0
+
+
+def _chapter_word_max(state: NovelStudioState) -> int:
+    chapter = state.current_chapter_outline if isinstance(state.current_chapter_outline, dict) else {}
+    word_range = chapter.get("word_range")
+    explicit_from_range = word_range[1] if isinstance(word_range, list) and len(word_range) > 1 else None
+    return _positive_int(
+        chapter.get("word_max")
+        or chapter.get("chapter_word_max")
+        or explicit_from_range
+        or state.chapter_word_max
+    )
+
+
+def _text_length(value: str) -> int:
+    return len(re.sub(r"\s+", "", value or ""))
+
+
+def _length_requirements(state: NovelStudioState) -> dict[str, Any]:
+    target = _chapter_word_target(state)
+    minimum = _chapter_word_min(state, target)
+    maximum = _chapter_word_max(state)
+    chapter_no = _chapter_no(state)
+    chapter_title = _chapter_title(state)
+    ratio = round(minimum / target, 3) if target > 0 and minimum > 0 else 0
+    return {
+        "chapter_no": chapter_no,
+        "chapter_title": chapter_title,
+        "chapter_word_target": target,
+        "minimum_acceptable_words": minimum,
+        "maximum_words": maximum,
+        "length_guard_ratio": ratio,
+        "rule": f"当前只能生成第{chapter_no}章《{chapter_title}》正文，不得续写下一章；正文必须按单章目标字数生成，低于最低可接受字数时需要扩写场景、动作、心理和环境细节，不得只输出摘要。",
+    }
+
+
+def _length_instruction(state: NovelStudioState) -> str:
+    requirements = _length_requirements(state)
+    target = requirements["chapter_word_target"]
+    minimum = requirements["minimum_acceptable_words"]
+    chapter_no = requirements["chapter_no"]
+    chapter_title = requirements["chapter_title"]
+    if not target:
+        return f"当前只能生成第{chapter_no}章《{chapter_title}》完整正文，不得续写下一章，不得只输出摘要。"
+    maximum = requirements["maximum_words"]
+    max_clause = f"，建议不超过 {maximum} 字" if maximum else ""
+    return f"当前只能生成第{chapter_no}章《{chapter_title}》正文，不得续写下一章；本章目标约 {target} 字，最低可接受 {minimum} 字{max_clause}；必须写成完整正文，不得压缩成概要或片段。"
+
+
+def _normalize_chapter_heading(state: NovelStudioState, text: str) -> str:
+    expected = _chapter_title(state).strip()
+    if not expected:
+        return text
+    stripped = text.lstrip()
+    if not stripped:
+        return expected
+    leading_ws_length = len(text) - len(stripped)
+    leading_ws = text[:leading_ws_length]
+    lines = stripped.splitlines()
+    if not lines:
+        return f"{expected}\n\n{stripped}"
+    heading_pattern = r"^\s*#{0,6}\s*第\s*(?:\d+|[零一二三四五六七八九十百千万两]+)\s*章(?:\s*[·:：、. -].*)?$"
+    if re.match(heading_pattern, lines[0].strip()):
+        lines[0] = expected
+        return leading_ws + "\n".join(lines)
+    if lines[0].strip() == expected:
+        return text
+    return text
+
+
+def _reconcile_length_review_notes(
+    review_notes: list[dict[str, Any]],
+    *,
+    target: int,
+    minimum: int,
+    final_length: int,
+    guard_triggered: bool,
+) -> list[dict[str, Any]]:
+    if target <= 0:
+        return review_notes
+    adjusted: list[dict[str, Any]] = []
+    length_terms = ("字数", "低于", "最低可接受", "扩写")
+    for note in review_notes:
+        if not isinstance(note, dict):
+            continue
+        message = f"{note.get('message', '')} {note.get('suggestion', '')}"
+        if final_length >= minimum and any(term in message for term in length_terms):
+            continue
+        adjusted.append(note)
+    if guard_triggered or final_length >= minimum:
+        reached_minimum = minimum <= 0 or final_length >= minimum
+        adjusted.append(
+            {
+                "severity": "info" if reached_minimum else "warning",
+                "category": "length_guard",
+                "message": (
+                    f"最终正文 {final_length} 字，目标 {target} 字，最低可接受 {minimum} 字。"
+                    if reached_minimum
+                    else f"最终正文 {final_length} 字，仍低于最低可接受 {minimum} 字。"
+                ),
+                "suggestion": "字数守门已按最终正文重新校准。" if reached_minimum else "需继续扩写或人工复核后再定稿。",
+            }
+        )
+    return adjusted
+
+
 def _agent_context(state: NovelStudioState, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    length_requirements = _length_requirements(state)
     context = {
         "project": {
             "id": state.project_id,
@@ -46,9 +183,13 @@ def _agent_context(state: NovelStudioState, extra: dict[str, Any] | None = None)
             "style_guide": state.style_guide,
             "target_words": state.target_words,
             "target_chapters": state.target_chapters,
+            "chapter_word_target": length_requirements["chapter_word_target"],
+            "chapter_word_min": length_requirements["minimum_acceptable_words"],
+            "chapter_word_max": length_requirements["maximum_words"],
             "current_volume": state.current_volume,
             "current_chapter": state.current_chapter,
         },
+        "generation_requirements": length_requirements,
         "core_conflict_system": state.core_conflict_system,
         "novel_constitution": state.novel_constitution,
         "constitution_review": state.constitution_review,
@@ -134,6 +275,7 @@ def _card_from_outline(state: NovelStudioState, outline: dict[str, Any] | None =
     return {
         "chapter_no": int(chapter.get("chapter_no") or _chapter_no(state)),
         "chapter_title": title,
+        "word_target": _chapter_word_target(state),
         "chapter_function": str(chapter.get("plot_purpose") or "推进核心矛盾，并制造至少一种状态变化。"),
         "one_sentence": core_event,
         "opening_state": "主角带着上一章遗留压力进入新局面。",
@@ -231,7 +373,7 @@ def chief_architect_node(data: dict[str, Any]) -> dict[str, Any]:
         "status": "passed_with_notes",
         "largest_strength": "核心矛盾可持续制造选择与代价。",
         "largest_risk": "需要持续维护伏笔账本与关系变化，避免章节空转。",
-        "recommended_next_stage": "outline_planning",
+        "recommended_next_stage": "outline_debate",
     }
     characters = state.characters or [
         {
@@ -308,75 +450,6 @@ def chief_architect_node(data: dict[str, Any]) -> dict[str, Any]:
         characters=llm_characters,
         outline=llm_outline,
         agent_llm_results=_llm_results(state, "chief_architect", meta),
-    )
-
-
-def chapter_planner_node(data: dict[str, Any]) -> dict[str, Any]:
-    state = _state(data)
-    start = max(1, state.current_chapter)
-    count = max(1, min(20, state.target_chapters or 3))
-    chapters = []
-    for index in range(count):
-        chapter_no = start + index
-        chapters.append(
-            {
-                "chapter_no": chapter_no,
-                "volume_no": state.current_volume,
-                "title": f"第{chapter_no}章：{state.genre}转折 {chapter_no}",
-                "outline": f"承接《{state.title}》主线，推进第{chapter_no}个关键事件。",
-                "pov_character": state.characters[0]["name"] if state.characters else "待定主角",
-                "core_event": "发现新线索并付出代价。",
-                "conflict": "个人目标与外部压力正面碰撞。",
-                "turn_point": "章节末尾出现改变行动方向的信息。",
-                "emotional_beats": ["压迫", "试探", "失衡", "决断"],
-                "plot_purpose": "推进主线并暴露一个角色选择。",
-                "cliffhanger": "一个旧设定被重新解释。",
-                "word_target": 3000,
-            }
-        )
-    payload, meta = _agent_payload(
-        state,
-        "chapter_planner",
-        "生成章节规划。必须输出 chapters 数组，每章包含标题、POV、核心事件、冲突、转折、情绪节奏、剧情功能、结尾钩子和目标字数。",
-        {"chapters": chapters},
-        {"chapter_count": count, "start_chapter_no": start},
-    )
-    planned_chapters = payload.get("chapters", chapters)
-    if not isinstance(planned_chapters, list) or not planned_chapters:
-        planned_chapters = chapters
-    macro_outline = payload.get("macro_outline")
-    if not isinstance(macro_outline, dict):
-        macro_outline = {
-            "phase_count": max(1, min(8, len(state.outline) or 3)),
-            "phases": state.outline or [{"title": "第一阶段", "core_event": "进入核心矛盾。"}],
-            "core_conflict_escalation": "围绕主角欲望、世界阻力和选择代价逐步升级。",
-        }
-    ending_backcast = payload.get("ending_backcast")
-    if not isinstance(ending_backcast, dict):
-        ending_backcast = {
-            "final_choice": "主角在终局面对个人欲望与世界代价的最终选择。",
-            "required_path": ["犯错", "失去", "被诱惑", "理解更高层规则", "做出不可逆选择"],
-        }
-    volume_outline = payload.get("volume_outline")
-    if not isinstance(volume_outline, dict):
-        volume_outline = {
-            "volume_no": state.current_volume,
-            "title": f"第{state.current_volume}卷",
-            "goal": "完成当前卷目标并打开下一卷压力。",
-            "chapters": planned_chapters,
-        }
-    return _update(
-        data,
-        current_agent="chapter_planner",
-        progress=0.35,
-        outline=state.outline,
-        macro_outline=macro_outline,
-        ending_backcast=ending_backcast,
-        volume_outline=volume_outline,
-        rolling_chapter_outline=planned_chapters,
-        current_chapter_outline=planned_chapters[0],
-        completed_chapters=planned_chapters,
-        agent_llm_results=_llm_results(state, "chapter_planner", meta),
     )
 
 
@@ -538,6 +611,7 @@ def reviewer_node(data: dict[str, Any]) -> dict[str, Any]:
 def integrator_node(data: dict[str, Any]) -> dict[str, Any]:
     state = _state(data)
     title = state.chapter_card.get("chapter_title") or state.current_chapter_outline.get("title", f"第{state.current_chapter}章")
+    length_instruction = _length_instruction(state)
     integrated = (
         f"# {title}\n\n"
         f"{state.plot_draft}\n\n{state.dialogue_draft}\n\n{state.environment_draft}\n\n"
@@ -547,7 +621,7 @@ def integrator_node(data: dict[str, Any]) -> dict[str, Any]:
     payload, meta = _agent_payload(
         state,
         "integrator",
-        "根据正文生成提示词，整合章节卡、场景细纲、情节、对话和环境层，生成 integrated_draft 与 chapter_summary。",
+        f"根据正文生成提示词，整合章节卡、场景细纲、情节、对话和环境层，生成 integrated_draft 与 chapter_summary。{length_instruction}",
         {"integrated_draft": integrated, "chapter_summary": summary},
         {"prompt_id": "draft_generation"},
     )
@@ -657,20 +731,141 @@ def style_unifier_node(data: dict[str, Any]) -> dict[str, Any]:
     text = state.integrated_draft or "\n\n".join([state.plot_draft, state.dialogue_draft, state.environment_draft])
     if state.style_guide:
         text += f"\n\n【风格统一】已按风格约束润色：{state.style_guide}"
+    length_instruction = _length_instruction(state)
     payload, meta = _agent_payload(
         state,
         "style_unifier",
-        "按照 style_guide 统一章节风格。必须输出 style_polished_text 和 final_chapter_text。",
+        f"按照 style_guide 统一章节风格。必须输出 style_polished_text 和 final_chapter_text。{length_instruction} 不得删减关键情节或压缩正文。",
         {"style_polished_text": text, "final_chapter_text": text},
     )
     final_text = str(payload.get("final_chapter_text") or payload.get("style_polished_text") or text)
+    style_polished_text = str(payload.get("style_polished_text", final_text))
+    target = _chapter_word_target(state)
+    minimum = _chapter_word_min(state, target)
+    current_length = _text_length(final_text)
+    length_attempts: list[dict[str, Any]] = []
+    length_meta: dict[str, Any] | None = None
+    max_length_guard_attempts = 5
+    for attempt_no in range(1, max_length_guard_attempts + 1):
+        if target <= 0 or current_length >= minimum:
+            break
+        missing = max(0, minimum - current_length)
+        buffer_words = min(max(120, int(target * 0.05)), max(120, target // 2))
+        guarded_minimum = minimum + buffer_words
+        expansion_payload, expansion_meta = _agent_payload(
+            state,
+            "style_unifier",
+            (
+                f"当前 final_chapter_text 只有 {current_length} 字，低于最低可接受字数 {minimum}。"
+                f"至少还缺 {missing} 字；为避免估字误差，本次扩写后的最终正文必须不低于 {guarded_minimum} 字。"
+                f"请在不改变章纲、人物选择、章节标题“{_chapter_title(state)}”和结尾钩子的前提下扩写为完整章节正文。"
+                "扩写重点放在场景动作、心理反应、对话拉扯、环境压力和选择代价；必须输出 style_polished_text 和 final_chapter_text，不得只小幅润色。"
+            ),
+            {"style_polished_text": final_text, "final_chapter_text": final_text},
+            {
+                "prompt_id": "length_guard",
+                "source_text": final_text,
+                "length_guard": {
+                    "attempt": attempt_no,
+                    "target": target,
+                    "minimum": minimum,
+                    "guarded_minimum": guarded_minimum,
+                    "current": current_length,
+                    "missing": missing,
+                },
+            },
+        )
+        expanded_text = str(expansion_payload.get("final_chapter_text") or expansion_payload.get("style_polished_text") or "")
+        expanded_length = _text_length(expanded_text)
+        attempt_meta = {
+            **expansion_meta,
+            "attempt": attempt_no,
+            "target_words": target,
+            "minimum_acceptable_words": minimum,
+            "before_words": current_length,
+            "after_words": expanded_length,
+            "expanded": expanded_length > current_length,
+        }
+        length_attempts.append(attempt_meta)
+        if expanded_length > current_length:
+            final_text = expanded_text
+            style_polished_text = str(expansion_payload.get("style_polished_text") or expanded_text)
+            current_length = expanded_length
+    if length_attempts:
+        length_meta = {
+            **length_attempts[-1],
+            "attempts": length_attempts,
+            "reached_minimum": current_length >= minimum,
+        }
+    final_text = _normalize_chapter_heading(state, final_text)
+    style_polished_text = _normalize_chapter_heading(state, style_polished_text)
+    final_length = _text_length(final_text)
+    review_notes = _reconcile_length_review_notes(
+        state.review_notes,
+        target=target,
+        minimum=minimum,
+        final_length=final_length,
+        guard_triggered=length_meta is not None,
+    )
+    llm_results = _llm_results(state, "style_unifier", meta)
+    if length_meta is not None:
+        llm_results["style_unifier_length_guard"] = length_meta
     return _update(
         data,
         current_agent="style_unifier",
         progress=0.9,
-        style_polished_text=str(payload.get("style_polished_text", final_text)),
+        style_polished_text=style_polished_text,
         final_chapter_text=final_text,
-        agent_llm_results=_llm_results(state, "style_unifier", meta),
+        review_notes=review_notes,
+        agent_llm_results=llm_results,
+    )
+
+
+def post_length_review_node(data: dict[str, Any]) -> dict[str, Any]:
+    state = _state(data)
+    target = _chapter_word_target(state)
+    minimum = _chapter_word_min(state, target)
+    final_text = state.final_chapter_text or state.style_polished_text
+    final_length = _text_length(final_text)
+    expected_title = _chapter_title(state).strip()
+    first_line = next((line.strip().lstrip("#").strip() for line in final_text.splitlines() if line.strip()), "")
+    heading_ok = not expected_title or first_line == expected_title
+    length_ok = minimum <= 0 or final_length >= minimum
+    status = "passed" if length_ok and heading_ok else "passed_with_notes" if length_ok else "needs_revision"
+    checks = {
+        "status": status,
+        "chapter_no": _chapter_no(state),
+        "chapter_title": expected_title,
+        "final_words": final_length,
+        "target_words": target,
+        "minimum_acceptable_words": minimum,
+        "length_ok": length_ok,
+        "heading_ok": heading_ok,
+        "length_guard_applied": "style_unifier_length_guard" in state.agent_llm_results,
+    }
+    review_notes = list(state.review_notes)
+    severity = "info" if status == "passed" else "warning"
+    message = (
+        f"扩写后复审通过：最终正文 {final_length} 字，目标 {target or '未设置'} 字。"
+        if status == "passed"
+        else f"扩写后复审发现仍需关注：最终正文 {final_length} 字，最低要求 {minimum or '未设置'} 字，标题匹配={heading_ok}。"
+    )
+    review_notes.append(
+        {
+            "severity": severity,
+            "category": "post_length_review",
+            "message": message,
+            "suggestion": "进入章后账本与正典更新。" if status == "passed" else "请人工复核标题、篇幅或后续章节边界。",
+        }
+    )
+    health_check = dict(state.health_check_report)
+    health_check["post_length_review"] = checks
+    return _update(
+        data,
+        current_agent="post_length_review",
+        progress=0.93,
+        review_notes=review_notes,
+        health_check_report=health_check,
     )
 
 
@@ -759,6 +954,21 @@ def narrative_ledger_node(data: dict[str, Any]) -> dict[str, Any]:
 
 
 class AgentWorkflow:
+    @staticmethod
+    def _draft_progress_agent(node_name: str) -> str:
+        if node_name == "build_context":
+            return "canon_context"
+        if node_name == "revise_draft":
+            return "reviewer"
+        return node_name
+
+    def _running_state(self, data: dict[str, Any], node_name: str) -> NovelStudioState:
+        current = dict(data)
+        agent_name = self._draft_progress_agent(node_name)
+        current["current_agent"] = agent_name
+        current["progress_event"] = {"status": "running", "node": node_name, "agent_name": agent_name}
+        return NovelStudioState.model_validate(current)
+
     def _compile(self, nodes: list[tuple[str, Callable[[dict[str, Any]], dict[str, Any]]]]):
         graph = StateGraph(dict)
         for name, node in nodes:
@@ -785,6 +995,7 @@ class AgentWorkflow:
             ("quality_gate", quality_gate_node),
             ("revise_draft", revise_draft_node),
             ("style_unifier", style_unifier_node),
+            ("post_length_review", post_length_review_node),
             ("narrative_ledger", narrative_ledger_node),
             ("canon_curator", canon_curator_node),
         ]
@@ -810,17 +1021,14 @@ class AgentWorkflow:
 
         graph.add_conditional_edges("quality_gate", route_after_quality_gate, {"revise": "revise_draft", "pass": "style_unifier"})
         graph.add_edge("revise_draft", "style_unifier")
-        graph.add_edge("style_unifier", "narrative_ledger")
+        graph.add_edge("style_unifier", "post_length_review")
+        graph.add_edge("post_length_review", "narrative_ledger")
         graph.add_edge("narrative_ledger", "canon_curator")
         graph.add_edge("canon_curator", END)
         return graph.compile()
 
     def run_initialization(self, state: NovelStudioState) -> NovelStudioState:
         graph = self._compile([("chief_architect", chief_architect_node), ("canon_curator", canon_curator_node)])
-        return NovelStudioState.model_validate(graph.invoke(state.model_dump()))
-
-    def run_chapter_plan(self, state: NovelStudioState) -> NovelStudioState:
-        graph = self._compile([("chapter_planner", chapter_planner_node), ("reviewer", reviewer_node), ("canon_curator", canon_curator_node)])
         return NovelStudioState.model_validate(graph.invoke(state.model_dump()))
 
     def run_chapter_draft(self, state: NovelStudioState) -> NovelStudioState:
@@ -830,10 +1038,49 @@ class AgentWorkflow:
         return result
 
     def stream_chapter_draft(self, state: NovelStudioState):
-        graph = self._compile_draft()
+        nodes: list[tuple[str, Callable[[dict[str, Any]], dict[str, Any]]]] = [
+            ("build_context", build_context_node),
+            ("chapter_card", chapter_card_node),
+            ("scene_outline", scene_outline_node),
+            ("plot_narrator", plot_narrator_node),
+            ("dialogue_writer", dialogue_writer_node),
+            ("environment_writer", environment_writer_node),
+            ("integrator", integrator_node),
+            ("reviewer", reviewer_node),
+            ("fact_checker", fact_checker_node),
+            ("draft_rewrite", draft_rewrite_node),
+            ("quality_gate", quality_gate_node),
+        ]
+        data = state.model_dump()
+
+        def run_node(node_name: str, node: Callable[[dict[str, Any]], dict[str, Any]]) -> NovelStudioState:
+            nonlocal data
+            data = dict(data)
+            data["progress_event"] = {}
+            result_data = node(data)
+            data = dict(result_data)
+            data["progress_event"] = {}
+            return NovelStudioState.model_validate(data)
+
         result = state
-        for payload in graph.stream(state.model_dump(), stream_mode="values"):
-            result = NovelStudioState.model_validate(payload)
+        for node_name, node in nodes:
+            yield self._running_state(data, node_name)
+            result = run_node(node_name, node)
+            yield result
+
+        if result.quality_gate.get("status") == "needs_revision" and result.revision_count < result.max_revisions:
+            yield self._running_state(data, "revise_draft")
+            result = run_node("revise_draft", revise_draft_node)
+            yield result
+
+        for node_name, node in [
+            ("style_unifier", style_unifier_node),
+            ("post_length_review", post_length_review_node),
+            ("narrative_ledger", narrative_ledger_node),
+            ("canon_curator", canon_curator_node),
+        ]:
+            yield self._running_state(data, node_name)
+            result = run_node(node_name, node)
             yield result
 
 

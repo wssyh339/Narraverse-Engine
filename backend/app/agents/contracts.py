@@ -11,6 +11,8 @@ class NovelStudioState(BaseModel):
     genre: str = ""
     target_words: int = 0
     target_chapters: int = 0
+    chapter_word_min: int = 0
+    chapter_word_max: int = 0
     current_volume: int = 1
     current_chapter: int = 1
     target_reader: str = ""
@@ -78,6 +80,7 @@ class NovelStudioState(BaseModel):
     requested_model: str | None = None
     agent_llm_results: dict[str, dict[str, Any]] = Field(default_factory=dict)
     current_agent: str = ""
+    progress_event: dict[str, Any] = Field(default_factory=dict)
     current_stage: str = "S0_PROJECT_INIT"
     version: str = "outline-v1"
     progress: float = 0

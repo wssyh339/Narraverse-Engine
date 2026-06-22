@@ -109,7 +109,7 @@ def test_deep_agent_session_stream_creates_pending_approved_tool_call() -> None:
     tool_calls = refreshed["state"]["tool_calls"]
     assert tool_calls
     tool_call = tool_calls[-1]
-    assert tool_call["tool_name"] in {"run_outline_workflow", "read_canon_context", "create_candidate_canon_update"}
+    assert tool_call["tool_name"] in {"run_outline_debate", "read_canon_context", "create_candidate_canon_update"}
     assert tool_call["status"] == "pending_approval"
     assert tool_call["requires_approval"] is True
 

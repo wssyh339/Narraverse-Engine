@@ -29,6 +29,24 @@ interface BatchJobResult {
 
 const activeStatuses = new Set(["queued", "running"]);
 const terminalStatuses = new Set(["succeeded", "failed", "cancelled"]);
+const batchStepLabels: Record<string, string> = {
+  canon_context: "读取正典",
+  build_context: "读取正典",
+  chapter_card: "章节卡",
+  scene_outline: "场景细纲",
+  plot_narrator: "情节叙事",
+  dialogue_writer: "人物对话",
+  environment_writer: "环境描写",
+  integrator: "整合草稿",
+  reviewer: "审核修改",
+  fact_checker: "事实核查",
+  draft_rewrite: "草稿改写",
+  quality_gate: "质量门",
+  style_unifier: "风格统一",
+  post_length_review: "扩写后复审",
+  narrative_ledger: "章后账本",
+  canon_curator: "正典整理",
+};
 
 function asBatchResult(value: unknown): BatchJobResult {
   if (!value || typeof value !== "object") return {};
@@ -58,6 +76,17 @@ function saveJobId(projectId: string, nextJobId: string) {
   } catch {
     // localStorage can be disabled in private browsing; polling still works in memory.
   }
+}
+
+function formatDuration(seconds?: number | null) {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds)) return "计算中";
+  const safe = Math.max(0, Math.round(seconds));
+  const hours = Math.floor(safe / 3600);
+  const minutes = Math.floor((safe % 3600) / 60);
+  const rest = safe % 60;
+  if (hours > 0) return `${hours}小时${minutes}分`;
+  if (minutes > 0) return `${minutes}分${rest}秒`;
+  return `${rest}秒`;
 }
 
 export function BatchPage() {
@@ -104,7 +133,7 @@ export function BatchPage() {
     queryKey: ["recent-batch-jobs", projectId],
     queryFn: () => studioApi.listJobs({ project_id: projectId, job_type: "batch_generate", limit: 8 }),
     enabled: Boolean(projectId),
-    refetchInterval: job && activeStatuses.has(job.status) ? 5000 : false,
+    refetchInterval: 5000,
   });
 
   useEffect(() => {
@@ -112,6 +141,24 @@ export function BatchPage() {
       setJob(jobQuery.data.job);
     }
   }, [jobQuery.data?.job]);
+
+  useEffect(() => {
+    if (!projectId) return;
+    const recentJobs = recentJobsQuery.data?.jobs ?? [];
+    const latestActiveJob = recentJobs.find((item) => activeStatuses.has(item.status));
+    if (latestActiveJob && latestActiveJob.id !== jobId) {
+      setJob(latestActiveJob);
+      setJobId(latestActiveJob.id);
+      saveJobId(projectId, latestActiveJob.id);
+      return;
+    }
+    if (jobId || job) return;
+    const latestRecentJob = recentJobs[0];
+    if (!latestRecentJob) return;
+    setJob(latestRecentJob);
+    setJobId(latestRecentJob.id);
+    saveJobId(projectId, latestRecentJob.id);
+  }, [job, jobId, projectId, recentJobsQuery.data?.jobs]);
 
   const mutation = useMutation({
     mutationFn: (values: { chapter_start: number; chapter_end: number }) => studioApi.batchGenerate(projectId, values.chapter_start, values.chapter_end),
@@ -159,10 +206,15 @@ export function BatchPage() {
   const failedChapters = batchResult.failed_chapters ?? [];
   const totalSteps = Math.max(job?.progress.total_steps ?? 0, 1);
   const completedSteps = job?.progress.completed_steps ?? completedChapters.length;
-  const percent = job?.status === "succeeded" ? 100 : Math.round((completedSteps / totalSteps) * 100);
   const childTotalSteps = job?.progress.child_total_steps ?? 0;
   const childCompletedSteps = job?.progress.child_completed_steps ?? 0;
   const childPercent = childTotalSteps > 0 ? Math.round((childCompletedSteps / childTotalSteps) * 100) : 0;
+  const childFraction = childTotalSteps > 0 ? childCompletedSteps / childTotalSteps : 0;
+  const fallbackOverallPercent = Math.round(((completedSteps + childFraction) / totalSteps) * 100);
+  const overallPercent = job?.status === "succeeded" ? 100 : job?.progress.overall_percent ?? fallbackOverallPercent;
+  const childStepLabel = job?.progress.child_step_label || (job?.progress.child_current_step ? batchStepLabels[job.progress.child_current_step] ?? job.progress.child_current_step : "");
+  const retryableChapters = job?.progress.retryable_failed_chapters ?? failedChapters.map((item) => item.chapter_no);
+  const longTaskAdvice = job?.progress.long_task_advice ?? [];
   const canPause = Boolean(job && activeStatuses.has(job.status));
   const canResume = job?.status === "paused";
   const canCancel = Boolean(job && !terminalStatuses.has(job.status));
@@ -280,21 +332,37 @@ export function BatchPage() {
         title="任务进度"
         extra={job ? <Tag color={job.status === "succeeded" ? "success" : job.status === "cancelled" || job.status === "failed" ? "error" : "processing"}>{job.status}</Tag> : null}
       >
-        <Progress percent={percent} status={job?.status === "failed" ? "exception" : activeStatuses.has(job?.status ?? "") ? "active" : undefined} />
+        <Progress percent={overallPercent} status={job?.status === "failed" ? "exception" : activeStatuses.has(job?.status ?? "") ? "active" : undefined} />
         <Space direction="vertical" size={6} style={{ width: "100%", marginBottom: 12 }}>
           <Typography.Text type="secondary">{job?.progress.message || (jobId ? "正在读取任务状态..." : "尚未创建批量任务")}</Typography.Text>
-          {job?.progress.current_chapter_no ? (
-            <Typography.Text type="secondary">当前章节：第{job.progress.current_chapter_no}章</Typography.Text>
-          ) : null}
+          <Space wrap>
+            <Typography.Text type="secondary">
+              章节进度：{job?.progress.completed_chapters ?? completedSteps}/{job?.progress.total_chapters ?? totalSteps}
+            </Typography.Text>
+            {job?.progress.current_chapter_no ? (
+              <Typography.Text type="secondary">当前章节：第{job.progress.current_chapter_no}章</Typography.Text>
+            ) : null}
+            <Typography.Text type="secondary">已用：{formatDuration(job?.progress.elapsed_seconds)}</Typography.Text>
+            <Typography.Text type="secondary">预计剩余：{formatDuration(job?.progress.eta_seconds)}</Typography.Text>
+            {job?.progress.average_chapter_seconds ? (
+              <Typography.Text type="secondary">单章均值：{formatDuration(job.progress.average_chapter_seconds)}</Typography.Text>
+            ) : null}
+          </Space>
           {job?.progress.child_current_step ? (
             <Space direction="vertical" size={4} style={{ width: "100%" }}>
               <Typography.Text type="secondary">
-                当前 Agent：{job.progress.child_current_step}（{childCompletedSteps}/{childTotalSteps || "?"}）
+                当前章节进度：{childStepLabel}（{childCompletedSteps}/{childTotalSteps || "?"}）
               </Typography.Text>
               <Progress percent={childPercent} size="small" status={activeStatuses.has(job?.status ?? "") ? "active" : undefined} />
             </Space>
           ) : null}
           {job?.error?.message ? <Alert type="error" showIcon message={job.error.message} /> : null}
+          {retryableChapters.length > 0 ? (
+            <Alert type="warning" showIcon message={`可重试章节：${retryableChapters.map((item) => `第${item}章`).join("、")}`} />
+          ) : null}
+          {longTaskAdvice.length > 0 ? (
+            <Alert type="info" showIcon message="长篇任务建议" description={longTaskAdvice.join("；")} />
+          ) : null}
         </Space>
         <Space wrap style={{ marginBottom: 12 }}>
           <Button disabled={!canPause || isBusy} loading={controlMutation.isPending} onClick={() => control("pause")}>暂停</Button>

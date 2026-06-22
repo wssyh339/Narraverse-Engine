@@ -7,13 +7,14 @@ import { useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import { studioApi } from "../api/studio";
 import { SettingsSectionNav } from "../components/SettingsSectionNav";
-import type { CanonChangeProposal, CanonImpact, CanonNode, CanonRefType, CanonVersion } from "../types/api";
+import type { CanonChangeProposal, CanonImpact, CanonNode, CanonRefType, CanonSourceChapter, CanonTimelineChapter, CanonTimelineEvent, CanonVersion } from "../types/api";
 
 const refTypeLabels: Record<string, string> = {
   character: "人物",
   entity: "实体",
   world_fact: "世界观",
   foreshadowing: "伏笔",
+  graph_edge: "关系",
   folder: "目录",
 };
 
@@ -119,6 +120,23 @@ function proposalTitle(proposal: CanonChangeProposal): string {
 
 function versionTitle(version: CanonVersion): string {
   return formatValue(version.content.name ?? version.content.title ?? version.content.content ?? `版本 ${version.version_no}`);
+}
+
+function chapterLabel(chapter?: CanonSourceChapter | null, fallbackId?: string | null): string {
+  if (!chapter) return fallbackId ? `章节 ${fallbackId}` : "未绑定章节";
+  return `第${chapter.chapter_no}章 · ${chapter.title}`;
+}
+
+function timelineEventLabel(event: CanonTimelineEvent): string {
+  if (event.event_type === "version") return `v${event.version_no ?? ""} ${event.change_reason || event.title || "版本更新"}`.trim();
+  if (event.event_type === "proposal") return `${event.operation || "候选"} · ${event.reason || event.title || "待审批变更"}`;
+  return event.title || "章节快照";
+}
+
+function timelineEventColor(event: CanonTimelineEvent): string {
+  if (event.event_type === "version") return "blue";
+  if (event.event_type === "proposal") return event.approval_status === "pending" ? "orange" : "green";
+  return "default";
 }
 
 function downloadTextFile(filename: string, content: string, mime = "text/plain;charset=utf-8") {
@@ -283,6 +301,10 @@ function buildTreeData(nodes: CanonNode[]): DataNode[] {
         };
       });
   return build(null);
+}
+
+function collectTreeKeys(nodes: DataNode[]): Key[] {
+  return nodes.flatMap((node) => [node.key, ...collectTreeKeys(node.children ?? [])]);
 }
 
 function diffContent(previous: Record<string, unknown> | undefined, current: Record<string, unknown>): DiffRow[] {
@@ -478,6 +500,7 @@ export function SettingsWorkbenchPage() {
   const { projectId = "" } = useParams();
   const queryClient = useQueryClient();
   const [selectedKey, setSelectedKey] = useState<string>("");
+  const [expandedKeys, setExpandedKeys] = useState<Key[]>([]);
   const [folderModalOpen, setFolderModalOpen] = useState(false);
   const [folderTitle, setFolderTitle] = useState("");
   const treeQuery = useQuery({ queryKey: ["settings-tree", projectId], queryFn: () => studioApi.getSettingsTree(projectId), enabled: !!projectId });
@@ -500,18 +523,38 @@ export function SettingsWorkbenchPage() {
   });
   const versions = useMemo(() => [...(versionsQuery.data?.versions ?? [])].sort((left, right) => left.version_no - right.version_no), [versionsQuery.data?.versions]);
   const latestVersion = versions[versions.length - 1];
+  const timelineQuery = useQuery({
+    queryKey: ["canon-version-timeline", projectId, itemNode?.ref_type, itemNode?.ref_id],
+    queryFn: () =>
+      studioApi.getCanonVersionTimeline(
+        projectId,
+        itemNode ? { ref_type: itemNode.ref_type, ref_id: itemNode.ref_id } : undefined,
+      ),
+    enabled: !!projectId,
+  });
+  const timelineChapters = useMemo(
+    () => (timelineQuery.data?.chapters ?? []).filter((chapter) => chapter.events.length > 0),
+    [timelineQuery.data?.chapters],
+  );
 
   useEffect(() => {
     if (!selectedKey && displayNodes.length) {
-      const firstItem = displayNodes.find((node) => node.node_type === "item" && !isVirtualProposal(node)) ?? displayNodes[0];
-      setSelectedKey(firstItem.id);
+      const rootNode = displayNodes.find((node) => node.id === "folder:root") ?? displayNodes[0];
+      setSelectedKey(rootNode.id);
     }
   }, [displayNodes, selectedKey]);
+
+  useEffect(() => {
+    if (treeData.length && expandedKeys.length === 0) {
+      setExpandedKeys(collectTreeKeys(treeData));
+    }
+  }, [expandedKeys.length, treeData]);
 
   const invalidateWorkbench = () => {
     queryClient.invalidateQueries({ queryKey: ["settings-tree", projectId] });
     queryClient.invalidateQueries({ queryKey: ["canon-proposals", projectId] });
     queryClient.invalidateQueries({ queryKey: ["canon-versions", projectId] });
+    queryClient.invalidateQueries({ queryKey: ["canon-version-timeline", projectId] });
     queryClient.invalidateQueries({ queryKey: ["canon-impact", projectId] });
     queryClient.invalidateQueries({ queryKey: ["characters", projectId] });
     queryClient.invalidateQueries({ queryKey: ["entities", projectId] });
@@ -617,9 +660,10 @@ export function SettingsWorkbenchPage() {
     onError: (error) => message.error(error instanceof Error ? error.message : "导出失败"),
   });
 
+  const selectedSourceChapterId = selectedNode?.content?.source_chapter_id as string | null | undefined;
   const sourceRows = [
     ["当前版本", latestVersion ? `v${latestVersion.version_no}` : "未版本化"],
-    ["来源章节", selectedNode?.content?.source_chapter_id ?? latestVersion?.source_chapter_id],
+    ["来源章节", chapterLabel(latestVersion?.source_chapter, selectedSourceChapterId ?? latestVersion?.source_chapter_id)],
     ["首次出现", selectedNode?.content?.first_appearance_chapter_id],
     ["最近出现", selectedNode?.content?.last_seen_chapter_id],
     ["来源任务", selectedNode?.content?.source_job_id ?? latestVersion?.source_job_id],
@@ -704,10 +748,11 @@ export function SettingsWorkbenchPage() {
               <Tree
                 blockNode
                 draggable={{ icon: false }}
-                defaultExpandAll
+                expandedKeys={expandedKeys}
                 selectedKeys={selectedKey ? [selectedKey] : []}
                 treeData={treeData}
                 onDrop={handleTreeDrop}
+                onExpand={(keys) => setExpandedKeys(keys)}
                 onSelect={(keys) => setSelectedKey(String(keys[0] ?? ""))}
               />
             ) : (
@@ -766,7 +811,7 @@ export function SettingsWorkbenchPage() {
                             description={
                               <Space direction="vertical" size={6} className="full-width">
                                 <Typography.Text>{versionTitle(version)}</Typography.Text>
-                                <Typography.Text type="secondary">来源章节：{version.source_chapter_id || "未绑定"} · {version.change_reason || "无说明"}</Typography.Text>
+                                <Typography.Text type="secondary">来源章节：{chapterLabel(version.source_chapter, version.source_chapter_id)} · {version.change_reason || "无说明"}</Typography.Text>
                                 <DiffList changes={changes} />
                               </Space>
                             }
@@ -797,17 +842,52 @@ export function SettingsWorkbenchPage() {
               },
               {
                 key: "evolution",
-                label: "状态演进",
+                label: "章节轴",
                 children: (
                   <List
-                    dataSource={versions}
-                    locale={{ emptyText: itemNode ? "暂无状态演进记录" : "请选择一个正式设定节点" }}
-                    renderItem={(version) => (
+                    loading={timelineQuery.isLoading}
+                    dataSource={timelineChapters}
+                    locale={{ emptyText: itemNode ? "当前设定暂无章节轴记录" : "暂无章节轴记录" }}
+                    renderItem={(chapterRow: CanonTimelineChapter) => (
                       <List.Item>
                         <List.Item.Meta
                           avatar={<History size={18} />}
-                          title={`第 ${version.source_chapter_id || "未知"} 章 · v${version.version_no}`}
-                          description={version.change_reason || versionTitle(version)}
+                          title={chapterLabel(chapterRow.chapter)}
+                          description={
+                            <Space direction="vertical" size={8} className="full-width">
+                              {chapterRow.events.map((event) => {
+                                const version = event.event_type === "version" ? versions.find((item) => item.id === event.id) : undefined;
+                                const proposal = event.event_type === "proposal" ? (proposalsQuery.data?.proposals ?? []).find((item) => item.id === event.id) : undefined;
+                                return (
+                                  <div key={`${event.event_type}-${event.id}`} className="settings-timeline-event">
+                                    <Space wrap size={6}>
+                                      <Tag color={timelineEventColor(event)}>{event.event_type === "version" ? "版本" : event.event_type === "proposal" ? "候选" : "快照"}</Tag>
+                                      <Tag>{refTypeLabels[event.ref_type] ?? event.ref_type}</Tag>
+                                      <Typography.Text>{timelineEventLabel(event)}</Typography.Text>
+                                      {typeof event.confidence === "number" ? <Typography.Text type="secondary">置信度 {Math.round(event.confidence * 100)}%</Typography.Text> : null}
+                                    </Space>
+                                    <Space size={6}>
+                                      {version ? (
+                                        <Button size="small" icon={<RotateCcw size={13} />} loading={rollbackMutation.isPending} onClick={() => rollbackMutation.mutate(version)}>
+                                          回滚
+                                        </Button>
+                                      ) : null}
+                                      {proposal && proposal.approval_status === "pending" ? (
+                                        <>
+                                          <Button size="small" type="primary" icon={<Check size={13} />} loading={approveMutation.isPending} onClick={() => approveMutation.mutate(proposal)}>
+                                            通过
+                                          </Button>
+                                          <Button size="small" icon={<X size={13} />} loading={rejectMutation.isPending} onClick={() => rejectMutation.mutate(proposal)}>
+                                            驳回
+                                          </Button>
+                                        </>
+                                      ) : null}
+                                    </Space>
+                                  </div>
+                                );
+                              })}
+                            </Space>
+                          }
                         />
                       </List.Item>
                     )}

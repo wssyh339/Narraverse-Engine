@@ -13,6 +13,8 @@ backend/artifacts/
 backend/backend/
 backend/.pytest_cache/
 outputs/
+output/
+logs/
 
 .env
 

@@ -195,3 +195,71 @@ def test_canon_settings_tree_versions_proposals_health_and_rollback() -> None:
     assert "正典包" in markdown_export["content"]
     json_export = assert_success(client.get(f"/api/v1/projects/{project_id}/settings/export?format=json").json())
     assert json_export["package"]["health"]["official_count"] >= 1
+
+
+def test_canon_version_timeline_groups_versions_proposals_and_snapshots_by_chapter() -> None:
+    reset_database()
+    client = TestClient(app)
+    project_id = create_project(client)
+    chapter_1 = assert_success(
+        client.post(
+            f"/api/v1/projects/{project_id}/chapters",
+            json={"volume_no": 1, "title": "第一章：血检", "outline": "陆沉被血脉评级压制。", "word_target": 3000},
+        ).json()
+    )["chapter"]
+    chapter_2 = assert_success(
+        client.post(
+            f"/api/v1/projects/{project_id}/chapters",
+            json={"volume_no": 1, "title": "第二章：漏洞", "outline": "陆沉发现血检漏洞。", "word_target": 3000},
+        ).json()
+    )["chapter"]
+
+    character = assert_success(
+        client.post(
+            f"/api/v1/projects/{project_id}/characters",
+            json={
+                "name": "陆沉",
+                "role_type": "protagonist",
+                "importance_level": "core",
+                "importance_score": 96,
+                "summary": "低血统复仇者。",
+                "source_chapter_id": chapter_1["id"],
+                "updated_reason": "第1章登场。",
+            },
+        ).json()
+    )["character"]
+    assert_success(
+        client.put(
+            f"/api/v1/projects/{project_id}/characters/{character['id']}",
+            json={
+                "summary": "低血统复仇者，已经掌握血检漏洞。",
+                "source_chapter_id": chapter_2["id"],
+                "updated_reason": "第2章发现血检漏洞。",
+            },
+        ).json()
+    )
+    generated = assert_success(
+        client.post(
+            f"/api/v1/projects/{project_id}/settings/generate",
+            json={"target": "world_facts", "instruction": "生成血脉等级制度规则", "count": 1, "preview_only": True},
+        ).json()
+    )
+    proposal_id = generated["proposals"][0]["id"]
+
+    versions = assert_success(client.get(f"/api/v1/projects/{project_id}/settings/characters/{character['id']}/versions").json())["versions"]
+    assert versions[0]["source_chapter"]["chapter_no"] == 1
+    assert versions[1]["source_chapter"]["chapter_no"] == 2
+
+    timeline = assert_success(client.get(f"/api/v1/projects/{project_id}/settings/version-timeline").json())
+    assert timeline["summary"]["version_count"] >= 2
+    assert timeline["summary"]["proposal_count"] >= 1
+    chapter_1_row = next(row for row in timeline["chapters"] if row["chapter"]["id"] == chapter_1["id"])
+    chapter_2_row = next(row for row in timeline["chapters"] if row["chapter"]["id"] == chapter_2["id"])
+    assert chapter_1_row["versions"][0]["source_chapter"]["title"] == "第一章：血检"
+    assert chapter_2_row["versions"][0]["change_reason"] == "第2章发现血检漏洞。"
+    assert any(event["event_type"] == "version" and event["chapter"]["chapter_no"] == 2 for event in timeline["events"])
+    assert any(event["event_type"] == "proposal" and event["id"] == proposal_id for event in timeline["unbound"]["events"])
+
+    filtered = assert_success(client.get(f"/api/v1/projects/{project_id}/settings/version-timeline?ref_type=character&ref_id={character['id']}").json())
+    assert filtered["summary"]["version_count"] == 2
+    assert all(event["ref_type"] == "character" for event in filtered["events"])

@@ -37,16 +37,19 @@ flowchart TD
 
 这一条线在卡片生成阶段不得直接覆盖用户正典。
 
-### 大纲 Swarm
+### 大纲议事引擎
 
-路径：`backend/app/agents/outline_swarm/`
+路径：`backend/app/services/outline_debate_service.py`
+
+接口：`backend/app/api/v1/endpoints/outline_debate.py`
 
 职责：
 
-- 推演长篇总纲和卷纲；
-- 使用 `langgraph-swarm` 做 active-agent 动态交接；
-- 从 `backend/app/prompts/` 加载提示词任务；
-- 生成可预览、可确认的大纲和章纲。
+- 以回合制实时议事推演长篇总纲、逐卷卷纲和逐章章纲；
+- 让多个大纲 Agent 逐条发言、交接、接收用户插话和打断；
+- 从项目状态、故事圣经、canon context 和已确认大纲读取上下文；
+- 每个阶段都产出可确认候选，用户确认后才写入正式大纲与正典。
+- 长篇章纲可通过 `chapters/autopilot` 创建后台 parent job，按单章讨论、单章确认、单章正典更新的顺序推进，并由任务接口显示进度。
 
 大纲线应该读取立项种子、故事圣经、canon context、角色、实体、世界观事实和已有大纲。
 

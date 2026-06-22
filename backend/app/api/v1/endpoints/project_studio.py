@@ -1,12 +1,8 @@
 from __future__ import annotations
 
 from app.api.v1.endpoints.studio import (
-    commit_book_outline,
-    commit_chapter_outlines,
     draft_chapter,
     duplicate_project,
-    generate_book_outline,
-    generate_chapter_outlines_batch,
     generate_story_bible,
     get_chapter,
     get_project,
@@ -15,7 +11,6 @@ from app.api.v1.endpoints.studio import (
     list_chapters,
     list_projects,
     partial_rewrite_chapter,
-    plan_chapters,
     put_project_state,
     rewrite_chapter,
     stream_chapter_chat,

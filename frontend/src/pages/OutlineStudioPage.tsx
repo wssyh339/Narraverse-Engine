@@ -4,13 +4,12 @@ import { createRef, useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import { studioApi } from "../api/studio";
 import type { Chapter, Volume } from "../types/api";
-import { CanonStudioPanel } from "./outline/CanonStudioPanel";
 import { CreateChapterForm, CreateVolumeForm, type ChapterCreateValues, type OutlineCreateFormHandle, type VolumeCreateValues } from "./outline/OutlineCreateForms";
 import { OutlineDebatePanel } from "./outline/OutlineDebatePanel";
 import { OutlineDirectory } from "./outline/OutlineDirectory";
 import { OutlineEditorPanel } from "./outline/OutlineEditorPanel";
 import type { OutlineView } from "./outline/types";
-import { buildProjectScalePlan } from "./outline/outlineGeneration";
+import { buildProjectScalePlan, nextMissingChapterNo } from "./outline/scalePlan";
 import { sameStringArray } from "./outline/outlineUtils";
 import { useOutlineBulkSelection } from "./outline/useOutlineBulkSelection";
 const EMPTY_CHAPTERS: Chapter[] = [];
@@ -242,22 +241,20 @@ export function OutlineStudioPage() {
   if (volumesQuery.isLoading || stateQuery.isLoading) return <div className="outline-studio-grid"><div className="studio-panel loading-panel" /></div>;
   if (volumesQuery.error || stateQuery.error) return <Alert type="error" showIcon message="无法读取大纲数据" />;
 
-  const openDetailView = (view: OutlineView) => {
+  const openDirectoryView = (view: OutlineView) => {
     setSelectedView(view);
-    setDetailOpen(true);
   };
   const directoryState = { batchManagementEnabled, selectedView, detailOpen, selectedVolumeId: selectedVolume?.id ?? "", selectedChapterId, selectedChapterIds, selectedChapterIdsAcrossDirectory, selectedVolumeIds, selectedVolumeIdsAcrossDirectory, allDirectorySelected, partialDirectorySelected, allVolumeOutlinesSelected, partialVolumeOutlinesSelected, isDeletingSelected: deleteSelectedChapters.isPending, isDeletingOne: trashOneChapter.isPending, isDeletingVolume: deleteVolume.isPending, isDeletingSelectedVolumes: deleteSelectedVolumes.isPending, hasGeneratedOutline: hasDeletableOutline };
-  const directoryHandlers = { setSelectedView: openDetailView, setSelectedVolumeId, setSelectedChapterId, setDetailOpen, setBatchManagementEnabled, openCreateVolume, openCreateChapter, confirmClearOutline, confirmDeleteVolume, confirmBatchDeleteVolumes, toggleDirectorySelection, toggleVolumeSelection, toggleVolumeOutlineSelection, toggleAllVolumeOutlines, toggleChapterSelection, confirmTrashChapter, confirmBatchTrashChapters };
+  const directoryHandlers = { setSelectedView: openDirectoryView, setSelectedVolumeId, setSelectedChapterId, setDetailOpen, setBatchManagementEnabled, openCreateVolume, openCreateChapter, confirmClearOutline, confirmDeleteVolume, confirmBatchDeleteVolumes, toggleDirectorySelection, toggleVolumeSelection, toggleVolumeOutlineSelection, toggleAllVolumeOutlines, toggleChapterSelection, confirmTrashChapter, confirmBatchTrashChapters };
   const debateScalePlan = buildProjectScalePlan(project);
-  const debatePanel = <OutlineDebatePanel projectId={projectId} defaultRequirement={[project?.premise, storyBible?.main_conflict, selectedVolume?.outline, selectedChapter?.outline].filter(Boolean).join("\n")} volumeCount={debateScalePlan.volume_count} chaptersPerVolume={debateScalePlan.chapters_per_volume} targetWords={debateScalePlan.target_words} chapterWordTarget={debateScalePlan.chapter_word_target} chapterWordMin={debateScalePlan.chapter_word_min} chapterWordMax={debateScalePlan.chapter_word_max} scalePlan={debateScalePlan} selectedVolumeNo={selectedVolume?.volume_no ?? 1} selectedChapterNo={selectedChapter?.chapter_no ?? 1} useTopologyInference={useTopologyInference} compact={detailOpen} onFormalCommit={() => { invalidate(); setSelectedView("outline"); setDetailOpen(true); }} />;
+  const nextDebateChapterNo = nextMissingChapterNo(selectedVolume?.volume_no ?? 1, debateScalePlan.chapters_per_volume, chapters);
+  const debatePanel = <OutlineDebatePanel projectId={projectId} defaultRequirement={[project?.premise, storyBible?.main_conflict, selectedVolume?.outline, selectedChapter?.outline].filter(Boolean).join("\n")} volumeCount={debateScalePlan.volume_count} chaptersPerVolume={debateScalePlan.chapters_per_volume} targetWords={debateScalePlan.target_words} chapterWordTarget={debateScalePlan.chapter_word_target} chapterWordMin={debateScalePlan.chapter_word_min} chapterWordMax={debateScalePlan.chapter_word_max} scalePlan={debateScalePlan} selectedVolumeNo={selectedVolume?.volume_no ?? 1} selectedChapterNo={selectedChapter?.chapter_no ?? nextDebateChapterNo} selectedView={selectedView} useTopologyInference={useTopologyInference} compact={detailOpen} onPhaseComplete={invalidate} onFormalCommit={() => { invalidate(); setSelectedView("outline"); setDetailOpen(true); }} />;
 
   return (
     <div className={`outline-studio-grid ${detailOpen ? "is-detail-open" : "is-debate-focus"}`}>
       <OutlineDirectory volumes={volumes} chapters={chapters} {...directoryState} handlers={directoryHandlers} />
       {detailOpen ? (
-        <OutlineEditorPanel selectedView={selectedView} selectedVolume={selectedVolume} selectedChapter={selectedChapter} lastOutlinePlan={lastOutlinePlan} project={project} storyBible={storyBible ?? undefined}>
-          <CanonStudioPanel projectId={projectId} project={project} storyBible={storyBible ?? undefined} />
-        </OutlineEditorPanel>
+        <OutlineEditorPanel selectedView={selectedView} selectedVolume={selectedVolume} selectedChapter={selectedChapter} lastOutlinePlan={lastOutlinePlan} project={project} storyBible={storyBible ?? undefined} />
       ) : null}
       {debatePanel}
     </div>

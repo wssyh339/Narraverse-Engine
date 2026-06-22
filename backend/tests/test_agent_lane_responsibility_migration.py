@@ -14,7 +14,7 @@ def test_chapter_writing_lane_owns_workflow_implementation() -> None:
     assert "class AgentWorkflow" in source
     assert "from app.agents.workflow import" not in source
     assert hasattr(chapter_workflow.agent_workflow, "run_chapter_draft")
-    assert hasattr(chapter_workflow.agent_workflow, "run_chapter_plan")
+    assert not hasattr(chapter_workflow.agent_workflow, "run_chapter_plan")
 
 
 def test_legacy_workflow_is_compatibility_wrapper() -> None:
@@ -41,5 +41,4 @@ def test_studio_service_delegates_to_agent_lanes() -> None:
     assert "creation_star_agent_service.draw" in source
     assert "creation_star_agent_service.commit" in source
     assert "chapter_writing_service.run_initialization" in source
-    assert "chapter_writing_service.run_chapter_plan" in source
     assert "chapter_writing_service.run_chapter_draft" in source

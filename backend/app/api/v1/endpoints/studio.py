@@ -12,14 +12,6 @@ from sqlalchemy.orm import Session
 from app.core.responses import success_response
 from app.db import models
 from app.db.session import SessionLocal, get_db
-from app.schemas.chapter import PlanChaptersRequest
-from app.schemas.canon import CanonRunRequest
-from app.schemas.outline import (
-    BookOutlineCommitRequest,
-    BookOutlineGenerateRequest,
-    ChapterOutlineBatchGenerateRequest,
-    ChapterOutlineCommitRequest,
-)
 from app.schemas.studio import (
     AgentPromptUpdateRequest,
     BatchGenerateRequest,
@@ -71,8 +63,6 @@ from app.schemas.studio import (
 )
 from app.services.project_service import project_service
 from app.services.serializers import serialize_job
-from app.services.canon_service import get_canon_store as load_canon_store
-from app.services.canon_service import get_final_outline, run_canon_workflow
 from app.services.studio_service import studio_service
 
 
@@ -112,26 +102,6 @@ def generate_story_bible(project_id: str, request: GenerateStoryBibleRequest, db
     return success_response(studio_service.generate_story_bible(db, project_id, request))
 
 
-def plan_chapters(project_id: str, request: PlanChaptersRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    return success_response(studio_service.plan_chapters(db, project_id, request, background_tasks=background_tasks))
-
-
-def generate_book_outline(project_id: str, request: BookOutlineGenerateRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    return success_response(studio_service.generate_book_outline(db, project_id, request, background_tasks=background_tasks))
-
-
-def commit_book_outline(project_id: str, request: BookOutlineCommitRequest, db: Session = Depends(get_db)):
-    return success_response(studio_service.commit_book_outline(db, project_id, request))
-
-
-def generate_chapter_outlines_batch(project_id: str, request: ChapterOutlineBatchGenerateRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    return success_response(studio_service.generate_chapter_outlines_batch(db, project_id, request, background_tasks=background_tasks))
-
-
-def commit_chapter_outlines(project_id: str, request: ChapterOutlineCommitRequest, db: Session = Depends(get_db)):
-    return success_response(studio_service.commit_chapter_outlines(db, project_id, request))
-
-
 def list_chapters(project_id: str, db: Session = Depends(get_db)):
     return success_response(studio_service.list_chapters(db, project_id))
 
@@ -144,8 +114,8 @@ def update_chapter(project_id: str, chapter_id: str, request: UpdateChapterReque
     return success_response(studio_service.update_chapter(db, project_id, chapter_id, request))
 
 
-def draft_chapter(project_id: str, chapter_id: str, request: DraftChapterRequest, db: Session = Depends(get_db)):
-    return success_response(studio_service.draft_chapter(db, project_id, chapter_id, request))
+def draft_chapter(project_id: str, chapter_id: str, request: DraftChapterRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    return success_response(studio_service.draft_chapter(db, project_id, chapter_id, request, background_tasks=background_tasks))
 
 
 def rewrite_chapter(project_id: str, chapter_id: str, request: RewriteChapterRequest, db: Session = Depends(get_db)):
@@ -188,6 +158,10 @@ def get_creation_session(project_id: str, session_id: str, db: Session = Depends
     return success_response(studio_service.get_creation_session(db, project_id, session_id))
 
 
+def get_creation_profile(project_id: str, db: Session = Depends(get_db)):
+    return success_response(studio_service.get_creation_profile(db, project_id))
+
+
 def creation_session_worldviews(project_id: str, session_id: str, request: CreationSessionCardRequest, db: Session = Depends(get_db)):
     return success_response(studio_service.creation_session_worldviews(db, project_id, session_id, request))
 
@@ -222,22 +196,6 @@ def creation_session_canon_preview(project_id: str, session_id: str, request: Cr
 
 def creation_session_commit(project_id: str, session_id: str, request: CreationSessionCommitRequest, db: Session = Depends(get_db)):
     return success_response(studio_service.creation_session_commit(db, project_id, session_id, request))
-
-
-def run_canon_studio(project_id: str, request: CanonRunRequest, db: Session = Depends(get_db)):
-    project_service.get_project(db, project_id)
-    payload = request.model_copy(update={"project_id": project_id})
-    return success_response(run_canon_workflow(payload).model_dump(mode="json"))
-
-
-def get_canon_studio_store(project_id: str, db: Session = Depends(get_db)):
-    project_service.get_project(db, project_id)
-    return success_response({"store": load_canon_store(project_id)})
-
-
-def get_canon_studio_final_outline(project_id: str, db: Session = Depends(get_db)):
-    project_service.get_project(db, project_id)
-    return success_response(get_final_outline(project_id))
 
 
 def list_workflows(db: Session = Depends(get_db)):

@@ -82,7 +82,7 @@ API Key 只能来自环境变量。缺少 API Key 时，工作流允许本地降
 ### 0.5 LangGraph 工作流
 
 - 初始化项目：总策划 Agent → 设定整理 Agent。
-- 章节规划：章节规划 Agent → 审核修改 Agent → 设定整理 Agent。
+- 旧独立章节规划工作流已删除；章纲只能由大纲议事流逐章确认后写入。章节规划 Agent 仅在单章正文链路中读取已确认章纲，生成章节卡和场景细纲输入。
 - 单章正文：构建 `canon_context` → 情节叙事 Agent → 人物对话 Agent → 环境描写 Agent → 整合输出 Agent 生成 `integrated_draft` → 审核修改 Agent → 事实核查 Agent → `quality_gate` → 必要时进入修订回路 → 风格统一 Agent → 设定整理 Agent。
 - 批量生成：按章节循环运行单章正文工作流，并保存版本快照与 Agent 轨迹。
 
@@ -125,7 +125,7 @@ MVP 阶段已有表继续保留；1.0 通过运行时 SQLite 轻量迁移补齐�
 - 项目：`POST/GET /api/projects`，`GET/PUT/DELETE /api/projects/{id}`，`POST /api/projects/{id}/duplicate`
 - 状态：`GET/PUT /api/projects/{id}/state`
 - Story Bible：`GET/PUT /api/projects/{id}/story-bible`，`POST /api/projects/{id}/story-bible/generate`
-- 章节：`POST /api/projects/{id}/chapters/plan`，`GET /api/projects/{id}/chapters`，`GET/PUT /api/projects/{id}/chapters/{chapter_id}`，`POST draft/rewrite/partial-rewrite`，`POST /api/projects/{id}/chapters/{chapter_id}/chat/stream`
+- 章节：`POST /api/projects/{id}/chapters`，`GET /api/projects/{id}/chapters`，`GET/PUT /api/projects/{id}/chapters/{chapter_id}`，`POST draft/rewrite/partial-rewrite`，`POST /api/projects/{id}/chapters/{chapter_id}/chat/stream`
 - Agent：`GET /api/agents`，`GET /api/agents/{agent_name}`，`PUT /api/agents/{agent_name}/prompt`，`/api/agents/templates`
 - LLM 模型：`GET /api/llm/models`，`GET/PUT /api/agent-model-configs`，`DELETE /api/agent-model-configs/{workflow_id}/{agent_name}`
 - Deep Agent：`GET/PUT /api/deep-agent/config`，`POST/GET /api/projects/{id}/deep-agent/sessions`，`GET /api/projects/{id}/deep-agent/sessions/{session_id}`，`POST /api/projects/{id}/deep-agent/sessions/{session_id}/chat/stream`，`POST /api/projects/{id}/deep-agent/tool-calls/{tool_call_id}/approve`，`POST /api/projects/{id}/deep-agent/tool-calls/{tool_call_id}/reject`
@@ -135,7 +135,7 @@ MVP 阶段已有表继续保留；1.0 通过运行时 SQLite 轻量迁移补齐�
 - 图谱/设定集：`GET/POST /api/projects/{id}/characters`，`GET/PUT/DELETE /api/projects/{id}/characters/{character_id}`，`GET/POST /api/projects/{id}/entities`，`PUT/DELETE /api/projects/{id}/entities/{entity_id}`，`GET/POST /api/projects/{id}/world-facts`，`PUT/DELETE /api/projects/{id}/world-facts/{fact_id}`，`GET /api/projects/{id}/graph`，`GET /api/projects/{id}/canon/context`
 - Agent 辅助生成设定：`POST /api/projects/{id}/settings/generate`，支持 `target=characters/entities/world_facts/all`；前端默认传 `preview_only=true` 仅生成候选预览，不写入角色/实体/世界观事实和图谱，用户确认后再调用对应创建接口正式入库。
 - 创作 Star：`GET /api/creation-star/options`，`POST /api/projects/{id}/creation-star/draw`，`POST /api/projects/{id}/creation-star/commit`
-- 工作流结构：`GET /api/workflows`，返回初始化、章节规划、单章正文、批量生成四套可视化节点和边。
+- 工作流结构：`GET /api/workflows`，返回初始化、大纲议事、单章正文、批量生成等当前可视化节点和边；不得再暴露旧独立章节规划工作流。
 - 伏笔：`GET/POST /api/projects/{id}/foreshadowing`，`PUT/DELETE /api/projects/{id}/foreshadowing/{item_id}`，`POST /api/projects/{id}/foreshadowing/{item_id}/payoff`
 - 工具：summary、foreshadowing、cliffhanger、fact-check、consistency-check、learn-style、query-knowledge
 - 导出：`POST /api/export`，`GET/POST /api/export/templates`
@@ -264,23 +264,23 @@ MVP 阶段已有表继续保留；1.0 通过运行时 SQLite 轻量迁移补齐�
 
 旧版 `POST /api/projects/{id}/creation-star/draw` 与 `POST /api/projects/{id}/creation-star/commit` 暂时保留兼容，但新版前端默认走 `creation/sessions` 分步接口。
 
-### 0.12 大纲拓扑推演开关修订（2026-06-11）
+### 0.12 大纲议事拓扑记录修订（2026-06-21）
 
-大纲工作室必须支持“拓扑推演”作为可选开关，不得把拓扑图做成纯前端装饰。
+大纲工作室的大纲生成入口统一收敛为“回合制实时议事”。旧大纲生成接口、旧生成弹窗和旧推演图组件已删除，不得重新挂载。
 
 接口约束：
 
-- `POST /api/projects/{id}/outline/book/generate` 和 `POST /api/projects/{id}/outline/chapters/batch-generate` 请求体新增 `use_topology_inference: boolean`。
-- 无论开关开启或关闭，生成结果都必须返回 `outline_topology`，结构至少包含 `mode`、`nodes`、`edges`、`events`、`artifacts` 和 `metrics`。
-- `use_topology_inference=true` 时，后端可以运行 LangGraph Swarm / trace 驱动拓扑推演；`outline_topology.mode` 必须为 `topology`。
-- `use_topology_inference=false` 时，后端仍必须从线性 Agent 执行链构造等价的 `outline_topology`；`outline_topology.mode` 必须为 `linear`。
-- 开关只能改变推演组织方式、trace 形态和可解释性视图，不得明显减少正式输出内容量；总纲/卷纲/章纲的字段完整度、章节数量、卷数量和确认写入流程必须基本一致。
+- `POST /api/projects/{id}/outline/debate/sessions` 创建议事会话。
+- `POST /api/projects/{id}/outline/debate/sessions/{session_id}/{phase}/run` 与同路径 `stream` 运行 `book`、`volumes`、`chapters` 阶段。
+- 议事运行请求继续支持 `use_topology_inference: boolean`，但该开关只影响 `phase_run.outline_topology` 的解释组织方式，不再切换到旧生成流程。
+- 每个 `phase_run` 必须保存 `turns`、`decisions`、`artifacts`、`outline_topology` 和结构化 `result`。
+- `outline_topology` 至少包含 `mode`、`nodes`、`edges`、`events`、`artifacts` 和 `metrics`，用于解释 Agent 交接、候选产物、审查、阻塞、确认和正典写入来源。
 
 前端约束：
 
-- 大纲生成弹窗必须提供单一开关控制是否使用拓扑推演。
-- 推演图必须优先读取 `outline_topology.nodes` 与 `outline_topology.edges`；缺少时才回退到旧 `inferenceSteps`。
-- 拓扑图节点和边必须表示 Agent 交接、依赖、产物、审查、阻塞或修订关系，不得引入无语义动画、装饰性粒子或伪 3D。
+- 大纲页不得再提供旧“生成大纲/批量生成章纲”弹窗入口。
+- 前端只能通过 `OutlineDebatePanel` 展示议事流、逐字流式输出、用户加入讨论、`@` 指定角色、打断和确认。
+- 拓扑信息作为议事流的结构化证据展示，不得恢复旧推演图组件或旧前端推演步骤回退链。
 
 ### 0.13 结构拆分与三线架构合并约束（2026-06-14）
 
@@ -294,7 +294,7 @@ MVP 阶段已有表继续保留；1.0 通过运行时 SQLite 轻量迁移补齐�
 - `backend/app/api/v1/endpoints/foreshadowing.py`：伏笔预埋、编辑、删除和回收。
 - `backend/app/api/v1/endpoints/writing.py`：写作任务、批量任务、暂停恢复取消和 Agent 轨迹。
 - `backend/app/api/v1/endpoints/versions.py`：版本列表、diff、回滚和分支。
-- `backend/app/api/v1/endpoints/canon.py`：正典补全、canon context、final_outline 与 canon_store 的旧兼容入口。
+- `backend/app/api/v1/endpoints/canon.py`：canon context 与正典刷新入口。
 - `backend/app/api/v1/endpoints/tools.py`：摘要、事实核查、一致性检查、风格学习和知识查询。
 - `backend/app/api/v1/endpoints/exporting.py`：导出和导出模板。
 - `backend/app/api/v1/endpoints/websockets.py`：WebSocket 进度和任务连接。
@@ -306,47 +306,31 @@ MVP 阶段已有表继续保留；1.0 通过运行时 SQLite 轻量迁移补齐�
 - `frontend/src/pages/OutlineStudioPage.tsx` 只负责 URL 参数、React Query、选择状态、mutation 编排和子组件组合。
 - `frontend/src/pages/outline/OutlineDirectory.tsx` 负责大纲目录、卷章层级、删除和批量删除。
 - `frontend/src/pages/outline/OutlineEditorPanel.tsx` 负责总纲、卷纲、章节、章纲编辑区。
-- `frontend/src/pages/outline/OutlineGenerationModal.tsx` 负责长篇大纲/卷纲/章纲生成参数弹窗。
-- `frontend/src/pages/outline/OutlineInferenceGraph.tsx` 负责实时推演过程和拓扑图。
-- 正典补全如果保留前端入口，必须作为独立小组件或独立工作区，不得重新堆回 `OutlineStudioPage.tsx`。
+- `frontend/src/pages/outline/OutlineDebatePanel.tsx` 负责实时议事流、用户加入讨论、`@` 角色插话、打断、逐字输出、分阶段运行与确认。
+- `frontend/src/pages/outline/scalePlan.ts` 负责从项目规模字段构建可传入议事流的 Scale Planner 参数。
+- 旧正典辅助面板已删除，不得重新堆回 `OutlineStudioPage.tsx` 或作为大纲生成入口。
 
 结构拆分原则：功能入口增加时优先新增小组件或领域 endpoint；只有共享状态和跨组件编排可以留在页面级文件。若单文件超过约 450 行，继续开发前必须先评估拆分。
 
-`backend/app/agents` 必须按三条独立产品线组织：
+`backend/app/agents` 与服务层必须按三条独立产品线组织：
 
 - `backend/app/agents/creation_star/`：抽卡式立项，只生成候选设定，用户确认后写入正式项目；抽卡与提交编排由 `creation_star/service.py` 承担。
-- `backend/app/agents/outline_swarm/`：大纲生成与世界构建，使用 `langgraph-swarm` 做动态 handoff 和有限循环；每个 Swarm 节点必须通过 `OutlineSwarmAgentRunner` 加载提示词并调用统一 `llm_client`，无 API Key 时使用同 schema 的本地降级结果。
+- `outline_debate`：大纲生成与世界构建统一走 `backend/app/services/outline_debate_service.py` 与 `backend/app/api/v1/endpoints/outline_debate.py`；旧 `backend/app/agents/outline_swarm/` 已删除，不得恢复。
 - `backend/app/agents/chapter_writing/`：章节正文生成，使用稳定 LangGraph StateGraph 和质量门修订循环；真实 `AgentWorkflow` 必须归属本目录。
 
-共享能力放入 `backend/app/agents/shared/`，包括 canon context、trace、prompt loader 和 lane contract。`backend/app/agents/workflow.py` 仅作为 `chapter_writing.workflow` 的旧导入兼容转发；`outline_workflow.py`、`canon_workflow.py` 暂时作为 legacy compatibility 入口保留；新增 Agent 能力不得继续堆入这些旧文件。
+共享能力放入 `backend/app/agents/shared/`，包括 canon context、trace、prompt loader 和 lane contract。`backend/app/agents/workflow.py` 仅作为 `chapter_writing.workflow` 的旧导入兼容转发；旧 `outline_workflow.py`、`outline_models.py`、`outline_storage.py` 与 `outline_agents.py` 已删除，不得恢复。
 
 大纲生成线必须消除示例故事硬编码。世界观、势力、物品、地点、秘密、角色和规则必须来自用户输入、项目正典、数据库上下文或 LLM 结构化输出，不得在代码中写死类似“龙骨能源”“最后真龙封印”“帝国能源署”等样例内容。
 
-项目内新大纲工作台必须走两段式接口：`outline/book/generate` 只生成“总纲 + 卷纲”候选，不创建章节；`outline/book/commit` 才写入 Story Bible 与 Volumes。章纲必须通过 `outline/chapters/batch-generate` 独立生成，读取已确认总纲、卷纲和正典上下文；`outline/chapters/commit` 才写入 Chapters。`POST /api/projects/{id}/chapters/plan` 仅作为旧兼容接口保留，兼容请求可接收 `target_words`、`volume_count`、`chapters_per_volume` 和 `chapter_word_target` 等长篇规划参数。
+项目内大纲工作台必须走议事接口：先创建 `outline_debate session`，再按 `book`、逐卷 `volumes`、逐章 `chapters` 阶段运行、确认和写入。旧两段式大纲生成、章纲批量生成接口和 `POST /api/projects/{id}/chapters/plan` 均已删除，不得恢复。
 
 卷纲生成不得固定套用 5 Phase 或 50 章模板。每卷必须先选择 `rhythm_model`，可在三幕推进、五段升级、单元案串联、多线群像、战役推进、地图探索、规则试炼、权谋拉扯、情感递进、真相逐层揭示等模型中动态选择，并说明 `why_this_model`、`phase_count` 和 `chapter_distribution`。五段升级只是可选模型之一。
 
-### 0.14 旧 13-Agent 与正典补全兼容边界（2026-06-14）
+### 0.14 旧 13-Agent 大纲流程删除边界（2026-06-22）
 
-旧规范文档中的 13-Agent 长篇大纲推演和正典补全系统作为兼容能力保留，但不得覆盖 0.10 的提示词库驱动架构和 0.12 的拓扑推演约束。实现上优先映射为 `outline_swarm`、Prompt Catalog 节点、workflow node 或兼容 CLI/API，而不是新增对外稳定 Agent 角色。
+旧规范文档中的 13-Agent 长篇大纲推演不再作为兼容能力保留。旧 CLI 本地 `StoryState` 大纲流程、旧 `/chapters/plan` API、旧 `outline_generation` workflow、旧 `outline_swarm` 包、旧 `PlanChaptersRequest` schema、旧独立 `run_chapter_plan` 工作流和旧大纲模块文件已删除。正式大纲生成只能通过 `outline_debate` 议事流完成。
 
-旧 13-Agent 大纲推演的兼容输出可包含：
-
-1. 故事核心
-2. 类型卖点定位
-3. 世界圣经
-4. 主角成长线
-5. 人物树
-6. 势力冲突表
-7. 金手指升级体系
-8. 全书总纲
-9. 逐卷大纲
-10. 章节节拍表
-11. 伏笔账本
-12. 逻辑审计报告
-13. 最终修订版纲要
-
-旧正典补全能力的核心规则仍然有效：
+正典完整性规则仍然有效：
 
 - 多问为什么：关键设定、行动、冲突、危机、高潮必须说明为什么现在发生、为什么必须由此人经历、为什么不能逃避、为什么会增加代价、为什么读者在意、为什么推动主线、为什么不破坏已有设定。
 - 不确定不硬编：无法确认的设定、规则、动机、因果或时间线必须创建不确定项或待确认候选。
@@ -391,7 +375,7 @@ LangSmith 是可选观测与 Prompt/Eval 管理层：
 - 严格区分危机、高潮、结果：危机是不可逆选择，高潮是执行选择，结果是承担后果。
 - 每次 Agent 输出后必须经过实体抽取、正典候选、正典合并和连续性检查；不得直接覆盖已完成正典。
 
-旧本地 JSON 正典库、`final_outline.md` 导出和 `canon_store.json` 下载只作为兼容路径保留。新版持久化应优先写入 SQLite 表、版本快照、Agent 轨迹和候选正典审批流。
+旧本地 JSON 正典导出不再作为前台或公开 API 大纲生成路径。新版持久化应优先写入 SQLite 表、正典文件树、版本快照、Agent 轨迹和候选正典审批流。
 
 文档版本：2026-06-14
 
@@ -446,7 +430,7 @@ LangSmith 是可选观测与 Prompt/Eval 管理层：
 
 ### 0.19 大纲议事引擎修订（2026-06-15）
 
-大纲线可以新增“议事引擎”作为 `outline_swarm` 的上层交互式编排方式，用于把大纲生成拆成三个互相独立、可重跑、可追踪的讨论阶段：
+大纲线只保留“议事引擎”作为交互式编排方式，用于把大纲生成拆成三个互相独立、可重跑、可追踪的讨论阶段：
 
 1. 讨论总纲：围绕全书核心承诺、终局方向、主线压力、读者体验和长期伏笔形成总纲候选。
 2. 讨论卷纲：围绕分卷功能、节奏模型、阶段目标、卷末钩子和卷间因果形成卷纲候选。
@@ -458,13 +442,13 @@ LangSmith 是可选观测与 Prompt/Eval 管理层：
 - 前端必须展示实时 Agent 讨论流，不得用纯前端假动画替代后端事件；流式事件至少包含 `meta`、`turn`、`decision`、`artifact`、`done`。
 - 议事中的角色生成与设定生成仅限大纲线，输出为 `character_candidate` 与 `setting_candidate` artifact，并标记 `status=candidate`、`source=outline_debate`、`requires_user_approval=true`；讨论生成阶段不得直接写库，用户确认对应总纲、卷纲或章纲候选后必须由服务层同步物化。
 - 议事结果确认写入仍复用既有两段式“生成候选 → 用户确认 → commit 写入”边界；对角色/设定候选而言，确认总纲/本卷/本章即为审批点，但服务层仍必须执行重复项扫描、设定锁定保护、来源记录和正典版本审计。
-- `/api/workflows` 和 Agent 轨迹中应能区分 `outline_swarm` 与 `outline_debate`，便于用户理解是动态推演还是议事讨论。
+- `/api/workflows` 和 Agent 轨迹只能暴露 `outline_debate` 大纲议事线；旧 `outline_swarm` 动态推演线已删除，不得继续展示或调用。
 
 文档版本：2026-06-17
 
 ### 0.20 回合制实时议事体验修订（2026-06-16）
 
-大纲议事引擎必须从“一次性生成后回放”升级为回合制实时议事。该能力仍属于 `outline_debate`，不得替代 `outline_swarm`、两段式大纲提交或正典审批边界。
+大纲议事引擎必须从“一次性生成后回放”升级为回合制实时议事。该能力属于 `outline_debate`，并替代旧 `outline_swarm` 和旧两段式大纲生成入口，但不得绕过正典审批边界。
 
 交互约束：
 
@@ -485,7 +469,7 @@ LangSmith 是可选观测与 Prompt/Eval 管理层：
 
 - 第一版采用 SSE + 控制 POST，不引入 WebSocket 新协议；如未来支持多人同时在线，再新增 WebSocket 议事通道。
 - 会话状态优先保存在现有 `generation_jobs.result_json` 中，不新增表；若后续需要跨设备长期检索，再评估独立 `outline_debate_sessions` 表。
-- 前端可复用 `assistant-ui`、Ant Design `Mentions`、现有 SSE 读取器和 `OutlineInferenceGraph`，不得引入新的聊天 UI 重依赖。
+- 前端可复用 `assistant-ui`、Ant Design `Mentions` 和现有 SSE 读取器；不得恢复旧大纲生成图组件或引入新的聊天 UI 重依赖。
 
 文档版本：2026-06-16
 
@@ -514,7 +498,7 @@ LangSmith 是可选观测与 Prompt/Eval 管理层：
 
 确认接口必须支持可选 `item_key`。`book/confirm` 标记总纲候选为已确认，并把本阶段未冲突的角色/设定候选物化入正式正典；`volumes/confirm` 与 `chapters/confirm` 必须确认单个 `item_key`，将结构化结果写入议事 session 的 `confirmed_candidates`，立即写入对应正式 Volume/Chapter 与正典版本，并把本阶段未物化的角色/设定候选同步入库。重复确认不得重复创建同名正式记录。
 
-提交接口用于最终整理已确认候选，必须同时满足总纲、所有已生成卷纲条目、所有已生成章纲条目均已确认。提交时只能把 `book_outline_candidate` 与已确认 `volume_outline_candidates` 合并后复用 `outline/book/commit` 的正式写入语义，把已确认 `chapter_outline_candidates` 复用 `outline/chapters/commit` 的正式写入语义；角色候选、设定候选和世界观正典变更应已在各确认点物化，提交不得重复创建。
+提交接口用于最终整理已确认候选，必须同时满足总纲、所有已生成卷纲条目、所有已生成章纲条目均已确认。提交时只能从 `book_outline_candidate`、已确认 `volume_outline_candidates` 和已确认 `chapter_outline_candidates` 直接写入 Story Bible、Volumes、Chapters 与正典引用；角色候选、设定候选和世界观正典变更应已在各确认点物化，提交不得重复创建。
 
 议事运行请求允许 `local_preview=true`，用于前端快速本地推演和浏览器闭环验证。该模式必须返回与远程模型一致的事件、候选包和确认/提交流程，但每个 Agent turn 的 `_llm.source` 必须标记为 `local_fallback`，不得伪装为远程模型调用。
 
@@ -553,7 +537,7 @@ LangSmith 是可选观测与 Prompt/Eval 管理层：
 
 旧 MVP 目录树中未挂载、未实现或已被新版领域路由替代的兼容 stub 不再保留。当前已删除：
 
-- `backend/app/api/v1/endpoints/chapters.py`：未挂载旧章节规划 endpoint；正式入口统一走 `project_studio.plan_chapters` 与新版 `outline/chapters/*`。
+- `backend/app/api/v1/endpoints/chapters.py`：未挂载旧章节规划 endpoint；正式大纲入口统一走 `outline/debate/sessions/*` 议事流。
 - `backend/app/api/v1/endpoints/jobs.py`：未挂载旧任务 endpoint；正式入口统一走 `writing.get_job` 与 `writing.get_agent_runs`。
 - `backend/app/api/v1/endpoints/memory.py`：未挂载且仅返回 404 的旧记忆概览 stub。
 - `backend/app/api/v1/endpoints/runtime.py`：未挂载且仅返回 404 的旧章节追踪 stub。
@@ -566,11 +550,10 @@ LangSmith 是可选观测与 Prompt/Eval 管理层：
 仍需保留的兼容边界：
 
 - `/api` 与 `/api/v1` 双前缀仍属于 1.0 API 合约，不得删除。
-- `/api/projects/{id}/chapters/plan` 仍作为旧兼容入口保留，但实现必须走 `studio_service.plan_chapters`，不得重新引入旧 `chapter_service`。
 - `/api/creation-star/*` 仍作为旧创作 Star 客户端兼容入口保留，新版前端默认走 `creation/sessions`。
-- `/api/projects/{id}/canon-studio/*`、`final_outline.md` 与 `canon_store.json` 仍作为旧正典补全兼容出口保留，正式持久化优先写入 SQLite、正典文件树和版本审计。
+- 旧正典辅助公开路由和前端入口已删除；正式持久化优先写入 SQLite、正典文件树和版本审计。
 - `backend/app/api/v1/endpoints/studio.py` 仍仅作为 legacy compatibility facade，不得继续新增业务分支。
-- `backend/app/agents/workflow.py`、`outline_workflow.py`、`canon_workflow.py` 仍按 0.13/0.14 作为兼容入口保留，新增能力不得继续堆入。
+- `backend/app/agents/workflow.py` 仍按 0.13 作为章节正文 workflow 旧导入兼容转发；旧大纲 workflow 文件不得恢复。
 
 文档版本：2026-06-17
 
@@ -580,7 +563,7 @@ LangSmith 是可选观测与 Prompt/Eval 管理层：
 
 当前版本：0.2.0
 
-一句话描述：一个面向长篇小说创作者的本地优先 AI 写作工作台，用结构化故事状态、章节规划、记忆检索和人工审稿来辅助持续创作。
+一句话描述：一个面向长篇小说创作者的本地优先 AI 写作工作台，用结构化故事状态、大纲议事、记忆检索和人工审稿来辅助持续创作。
 
 目标用户：
 
@@ -591,7 +574,7 @@ LangSmith 是可选观测与 Prompt/Eval 管理层：
 核心功能：
 
 1. 项目与故事圣经管理：维护题材、受众、世界观、主线冲突、叙事视角、风格约束和禁用元素。
-2. 章节规划与正文生成：基于故事圣经、人物设定、已有章节和用户指令生成章节大纲与正文草稿。
+2. 章纲确认与正文生成：基于故事圣经、人物设定、已确认章纲、已有章节和用户指令生成正文草稿。
 3. 记忆检索与生成审计：把故事设定、角色、章节摘要和用户笔记写入记忆库，并记录每次 AI 生成任务、模型调用和结果状态。
 
 ## 2. 技术栈表
@@ -617,7 +600,7 @@ LangSmith 是可选观测与 Prompt/Eval 管理层：
 | HTTP 客户端 | httpx | 0.28.1 | 调用 OpenAI 兼容 API |
 | LLM SDK | openai | 2.40.0 | 使用 OpenAI 兼容协议接入通义千问与 DeepSeek |
 | Agent 编排 | langgraph | 1.2.4 | 章节生成、审稿、重试和状态流 |
-| Swarm 编排 | langgraph-swarm | 0.1.0 | 大纲生成线的动态 Agent handoff 与有限循环 |
+| Swarm 编排 | langgraph-swarm | 0.1.0 | 依赖版本锁定保留；旧 `outline_swarm` 大纲线已删除，当前大纲生成只走 `outline_debate` 议事引擎 |
 | Agent 基础框架 | langchain | 1.3.9 | deepagents 与 langgraph-swarm 运行依赖 |
 | Agent 基础库 | langchain-core | 1.4.7 | 消息、工具、提示模板基础类型 |
 | 配置加载 | python-dotenv | 1.2.2 | 本地 `.env` |
@@ -656,11 +639,9 @@ LangSmith 是可选观测与 Prompt/Eval 管理层：
 │       ├── api
 │       │   ├── client.ts
 │       │   ├── projects.ts
-│       │   ├── chapters.ts
 │       │   ├── jobs.ts
 │       │   └── studio.ts
 │       ├── components
-│       │   ├── AppShell.tsx
 │       │   ├── ProjectNav.tsx
 │       │   ├── ChapterEditor.tsx
 │       │   ├── ContextInspector.tsx
@@ -668,7 +649,8 @@ LangSmith 是可选观测与 Prompt/Eval 管理层：
 │       │   └── QualityReportPanel.tsx
 │       ├── pages
 │       │   ├── ProjectListPage.tsx
-│       │   ├── ProjectWorkspacePage.tsx
+│       │   ├── WorkspacePage.tsx
+│       │   ├── OutlineStudioPage.tsx
 │       │   ├── ChapterEditorPage.tsx
 │       │   ├── MemoryPage.tsx
 │       │   └── JobDetailPage.tsx
@@ -748,7 +730,6 @@ LangSmith 是可选观测与 Prompt/Eval 管理层：
     │   │   ├── workflow.py
     │   │   ├── contracts.py
     │   │   └── nodes
-    │   │       ├── plan_chapters.py
     │   │       ├── draft_chapter.py
     │   │       ├── review_chapter.py
     │   │       ├── revise_chapter.py
@@ -871,50 +852,16 @@ LangSmith 是可选观测与 Prompt/Eval 管理层：
 }
 ```
 
-### 4.3 生成章节规划任务
+### 4.3 大纲议事确认章纲
 
-`POST /api/v1/projects/{project_id}/chapters/plan`
+旧 `POST /api/v1/projects/{project_id}/chapters/plan` 已删除。新版章纲生成必须通过：
 
-请求体：
+- `POST /api/projects/{id}/outline/debate/sessions` 创建议事会话。
+- `POST /api/projects/{id}/outline/debate/sessions/{session_id}/chapters/stream` 流式讨论章纲。
+- `POST /api/projects/{id}/outline/debate/sessions/{session_id}/chapters/confirm` 逐章确认并写入正式章节。
+- `POST /api/projects/{id}/outline/debate/sessions/{session_id}/chapters/autopilot` 可创建章纲议事后台推进任务；该任务必须按章节顺序执行“讨论单章章纲 -> 确认单章章纲 -> 写入章节与正典更新”，并通过 `generation_jobs` 暴露 parent job 进度、暂停、取消和失败状态。
 
-```json
-{
-  "volume_title": "第一卷：失落星门",
-  "start_chapter_no": 1,
-  "chapter_count": 10,
-  "outline_requirement": "建立主角身份谜团、星门遗迹、第一位主要反派和舰队内部矛盾。",
-  "overwrite_existing": false,
-  "idempotency_key": "plan:prj_01JZ0000000000000000000000:volume-1:chapters-1-10:v1",
-  "model": "qwen-plus"
-}
-```
-
-成功响应 `data`：
-
-```json
-{
-  "job": {
-    "id": "job_01JZ0000000000000000000000",
-    "project_id": "prj_01JZ0000000000000000000000",
-    "chapter_id": null,
-    "job_type": "plan_chapters",
-    "status": "queued",
-    "idempotency_key": "plan:prj_01JZ0000000000000000000000:volume-1:chapters-1-10:v1",
-    "model": "qwen-plus",
-    "progress": {
-      "current_step": "queued",
-      "total_steps": 4,
-      "completed_steps": 0,
-      "message": "章节规划任务已入队"
-    },
-    "result": null,
-    "error": null,
-    "created_at": "2026-06-02T13:20:00Z",
-    "started_at": null,
-    "finished_at": null
-  }
-}
-```
+批量正文生成只允许处理已经存在且已确认/已创建的章节，不得自动创建“批量生成占位章节规划”。
 
 ### 4.4 生成章节正文任务
 
@@ -1278,7 +1225,7 @@ MVP 阶段关系数据库只使用 SQLite。所有主键均为文本 ID，格式
 | id | TEXT | PRIMARY KEY，前缀 `job_` |
 | project_id | TEXT | NOT NULL，FK `projects.id`，ON DELETE CASCADE |
 | chapter_id | TEXT | 可为空，FK `chapters.id`，ON DELETE SET NULL |
-| job_type | TEXT | NOT NULL，枚举：`plan_chapters`、`draft_chapter`、`review_chapter`、`revise_chapter`、`refresh_memory` |
+| job_type | TEXT | NOT NULL，枚举：`draft_chapter`、`review_chapter`、`revise_chapter`、`batch_generate`、`refresh_memory` |
 | status | TEXT | NOT NULL，枚举：`queued`、`running`、`succeeded`、`failed`、`canceled` |
 | run_id | TEXT | NOT NULL，UNIQUE，前缀 `run_` |
 | idempotency_key | TEXT | NOT NULL，防重复提交 |
@@ -1934,3 +1881,39 @@ MVP 必须覆盖以下测试：
 | `test_chapters_api.py` | 创建章节、生成任务、trace 查询 |
 
 不要求 MVP 覆盖真实 LLM 集成测试。所有默认测试必须使用 fake LLM client，真实通义千问调用只放在手动 smoke test。
+
+### 0.18 设定版本章节轴与正文候选更新修订（2026-06-21）
+
+设定工作台必须提供项目级章节轴，用于查看每一章触发的正典版本、候选变更与章节生成快照。
+
+新增 API：
+
+- `GET /api/projects/{id}/settings/version-timeline`：返回按章节聚合的设定版本、候选变更、章节/Agent 快照和未绑定章节的更新事件；支持 `ref_type`、`ref_id` 和 `chapter_id` 过滤。
+
+行为约束：
+
+- `CanonVersion` 和 `CanonChangeProposal` 返回结果必须补充 `source_chapter` 摘要，包含 `id`、`volume_no`、`chapter_no` 和 `title`，前端不得再把 `source_chapter_id` 当作“第几章”显示。
+- 已确认的大纲/章纲提交可以直接写入正式设定，并记录 `canon_versions`；生成预览阶段不得写入正式设定。
+- 章节正文生成后的 `canon_updates` 默认只创建 `canon_change_proposals`，不得直接写入正式角色、实体、世界观事实、伏笔或关系图谱；用户审批通过后才写入正式设定并生成对应版本。
+- `relation_updates` 必须进入 `target_type=graph_edge` 的候选变更，审批通过后写入 `graph_edges` 并生成关系版本。
+- `foreshadowing_updates` 必须进入 `target_type=foreshadowing` 的候选变更，审批通过后写入 `foreshadowing_items`、同步图谱并生成伏笔版本。
+- 设定工作台章节轴必须按卷/章展示更新节点，支持从节点继续审批候选、回滚版本和定位对应设定。
+
+文档版本：2026-06-21
+
+### 0.19 作品资料创作 Star 档案修订（2026-06-21）
+
+设定工作台的“作品资料”必须从单纯表单升级为作品级立项档案，完整体现创作 Star 已生成并确认的关键信息。
+
+新增 API：
+
+- `GET /api/projects/{id}/creation/profile`：返回当前项目、Story Bible、最新创作 Star 会话，以及可展示的 `basic_info`、`selected_worldview`、`selected_protagonist`、`selected_title`、`market_position`、`project_seed`、`core_conflict_system`、`novel_constitution`、`constitution_review`、`canon_candidates` 和 `confirmed_canon`。接口只读，不触发生成或写入。
+
+前端约束：
+
+- 作品资料页必须优先展示“创作 Star 立项档案”，再提供可编辑作品信息和故事圣经表单。
+- 档案必须覆盖基本定位、世界观抽卡、主角人设抽卡、书名与包装、核心矛盾系统、小说宪法、压力测试和正典入库摘要。
+- 复杂对象必须转换为中文字段、摘要卡、标签或结构化列表展示，不得出现 `[object Object]` 或裸 JSON 充当主 UI。
+- 页面视觉应保持工作室工具属性：信息密度适中、层级清晰、卡片边界统一、移动端可读，不做营销式 Hero 或装饰性大背景。
+
+文档版本：2026-06-21
