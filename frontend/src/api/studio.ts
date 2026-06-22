@@ -8,6 +8,7 @@ import type {
   CanonImpact,
   CanonNode,
   CanonVersion,
+  CanonVersionTimeline,
   Chapter,
   Character,
   EditorProposal,
@@ -27,9 +28,8 @@ import type {
   CreationStarCard,
   CreationStarOptions,
   CreationBasicSuggestion,
+  CreationProjectProfile,
   CreationSession,
-  CanonRunPayload,
-  CanonRunResult,
   AgentConfig,
   AgentModelConfig,
   DeepAgentConfig,
@@ -264,6 +264,7 @@ export interface OutlineDebatePayload {
   target_agent_name?: string;
   user_message?: string;
   finish_phase?: boolean;
+  force_refresh_confirmed?: boolean;
   model?: string;
 }
 
@@ -519,26 +520,6 @@ export const studioApi = {
     ),
   updateStoryBible: (projectId: string, payload: Partial<StoryBible>) =>
     unwrap<{ story_bible: StoryBible }>(api.put(`/projects/${projectId}/story-bible`, payload)),
-  planChapters: (projectId: string, payload: Record<string, unknown>) =>
-    unwrap<{ job: GenerationJob; chapters: Chapter[]; outline_plan: Record<string, unknown> | null }>(
-      api.post(`/projects/${projectId}/chapters/plan`, payload),
-    ),
-  bookOutlineGenerate: (projectId: string, payload: Record<string, unknown>) =>
-    unwrap<{ job: GenerationJob; outline_plan: Record<string, unknown> | null }>(
-      api.post(`/projects/${projectId}/outline/book/generate`, payload),
-    ),
-  bookOutlineCommit: (projectId: string, payload: { job_id?: string; outline_plan?: Record<string, unknown> }) =>
-    unwrap<{ project: Project; story_bible: StoryBible; volumes: Volume[]; outline_plan: Record<string, unknown> }>(
-      api.post(`/projects/${projectId}/outline/book/commit`, payload),
-    ),
-  chapterOutlineBatchGenerate: (projectId: string, payload: Record<string, unknown>) =>
-    unwrap<{ job: GenerationJob; chapter_outlines: Record<string, unknown>[]; outline_plan: Record<string, unknown> | null }>(
-      api.post(`/projects/${projectId}/outline/chapters/batch-generate`, payload),
-    ),
-  chapterOutlineCommit: (projectId: string, payload: { job_id?: string; chapter_outlines?: Record<string, unknown>[]; overwrite_existing?: boolean }) =>
-    unwrap<{ chapters: Chapter[]; chapter_outlines: Record<string, unknown>[] }>(
-      api.post(`/projects/${projectId}/outline/chapters/commit`, payload),
-    ),
   createOutlineDebateSession: (projectId: string, payload: { idempotency_key?: string; brief?: string; model?: string }) =>
     unwrap<{ session: OutlineDebateSession; job: GenerationJob }>(
       api.post(`/projects/${projectId}/outline/debate/sessions`, payload),
@@ -619,7 +600,13 @@ export const studioApi = {
     unwrap<{ proposal: EditorProposal }>(api.post(`/projects/${projectId}/proposals/${proposalId}/reject`)),
   backupProject: (projectId: string) => unwrap<{ backup: Record<string, unknown> }>(api.get(`/projects/${projectId}/backup`)),
   draftChapter: (projectId: string, chapterId: string, user_instruction = "") =>
-    unwrap<{ job: GenerationJob; chapter: Chapter }>(api.post(`/projects/${projectId}/chapters/${chapterId}/draft`, { user_instruction })),
+    unwrap<{ job: GenerationJob; chapter: Chapter }>(
+      api.post(`/projects/${projectId}/chapters/${chapterId}/draft`, {
+        user_instruction,
+        async_mode: true,
+        idempotency_key: `draft:${chapterId}:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+      }),
+    ),
   listAgents: () => unwrap<{ agents: AgentConfig[] }>(api.get("/agents")),
   getCreationStarOptions: () => unwrap<{ options: CreationStarOptions }>(api.get("/creation-star/options")),
   drawCreationStar: (projectId: string, payload: CreationStarDrawPayload) =>
@@ -646,6 +633,8 @@ export const studioApi = {
     unwrap<{ suggestions: CreationBasicSuggestion[]; prompt_snapshot?: Record<string, unknown>; llm: Record<string, unknown> }>(
       api.post(`/projects/${projectId}/creation/basic-suggestions`, payload),
     ),
+  getCreationProfile: (projectId: string) =>
+    unwrap<CreationProjectProfile>(api.get(`/projects/${projectId}/creation/profile`)),
   createCreationSession: (projectId: string, payload: { basic_info: CreationStarBasicInfo; model?: string }) =>
     unwrap<{ session: CreationSession }>(api.post(`/projects/${projectId}/creation/sessions`, payload)),
   getCreationSession: (projectId: string, sessionId: string) =>
@@ -697,12 +686,6 @@ export const studioApi = {
       world_facts: WorldFact[];
       version: VersionSnapshot;
     }>(api.post(`/projects/${projectId}/creation/sessions/${sessionId}/commit`, payload)),
-  runCanonStudio: (projectId: string, payload: CanonRunPayload) =>
-    unwrap<CanonRunResult>(api.post(`/projects/${projectId}/canon-studio/run`, payload)),
-  getCanonStore: (projectId: string) =>
-    unwrap<{ store: Record<string, unknown> }>(api.get(`/projects/${projectId}/canon-studio/store`)),
-  getCanonFinalOutline: (projectId: string) =>
-    unwrap<{ path: string; markdown: string }>(api.get(`/projects/${projectId}/canon-studio/final-outline`)),
   listWorkflows: () => unwrap<{ workflows: WorkflowDefinition[] }>(api.get("/workflows")),
   listLlmModels: () =>
     unwrap<{
@@ -798,6 +781,13 @@ export const studioApi = {
     unwrap<CanonExportPackage>(api.get(`/projects/${projectId}/settings/export`, { params: { format } })),
   listCanonVersions: (projectId: string, refType: string, refId: string) =>
     unwrap<{ versions: CanonVersion[] }>(api.get(`/projects/${projectId}/settings/${refType}/${refId}/versions`)),
+  getCanonVersionTimeline: (
+    projectId: string,
+    params?: { ref_type?: string | null; ref_id?: string | null; chapter_id?: string | null },
+  ) =>
+    unwrap<CanonVersionTimeline>(
+      api.get(`/projects/${projectId}/settings/version-timeline`, { params }),
+    ),
   rollbackCanonVersion: (projectId: string, refType: string, refId: string, versionId: string, user_note = "") =>
     unwrap<{ rolled_back: boolean; item: Record<string, unknown>; version: CanonVersion }>(
       api.post(`/projects/${projectId}/settings/${refType}/${refId}/versions/${versionId}/rollback`, { user_note }),

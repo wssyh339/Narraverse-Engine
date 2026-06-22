@@ -41,6 +41,12 @@ def test_catalog_loads_prompt_text_and_metadata() -> None:
     assert "本章核心功能" in text
 
 
+def test_outline_prompt_assets_are_classified_as_debate_support_not_legacy_flow() -> None:
+    for prompt_id in ["macro_outline", "ending_backcast", "volume_outline", "rolling_chapter_outline"]:
+        entry = get_prompt_entry(prompt_id)
+        assert entry.workflow == "outline_debate_support"
+
+
 def test_agent_bindings_route_new_prompt_library_to_existing_agents() -> None:
     assert "novel_constitution" in AGENT_PROMPT_BINDINGS["chief_architect"]
     assert "chapter_card" in AGENT_PROMPT_BINDINGS["chapter_planner"]
@@ -172,7 +178,7 @@ def test_agent_spec_prompt_bodies_live_in_markdown_files() -> None:
     prompt_root = Path(__file__).resolve().parents[1] / "app" / "prompts"
 
     assert "creation_star" in AGENT_SPEC_PROMPT_FILES
-    assert "editor_orchestrator" in AGENT_SPEC_PROMPT_FILES
+    assert "editor_orchestrator" not in AGENT_SPEC_PROMPT_FILES
     for agent_name, relative_path in AGENT_SPEC_PROMPT_FILES.items():
         prompt_path = prompt_root / relative_path
 
@@ -180,6 +186,8 @@ def test_agent_spec_prompt_bodies_live_in_markdown_files() -> None:
         prompt_text = prompt_path.read_text(encoding="utf-8").strip()
         assert load_agent_spec_prompt(agent_name) == prompt_text
         assert prompt_text in AGENT_SPECS_BY_NAME[agent_name].prompt
+    remaining_files = {path.stem for path in (prompt_root / "agent_specs").glob("*.md")}
+    assert remaining_files == set(AGENT_SPEC_PROMPT_FILES)
 
 
 def test_agent_prompts_module_does_not_embed_long_prompt_bodies() -> None:
@@ -190,17 +198,19 @@ def test_agent_prompts_module_does_not_embed_long_prompt_bodies() -> None:
     assert "你是专业网文立项与灵感抽卡 Agent" not in source
 
 
-def test_studio_workflows_expose_five_long_novel_lanes() -> None:
+def test_studio_workflows_do_not_expose_legacy_outline_lanes() -> None:
     workflows = studio_service.list_workflows()["workflows"]
     keys = {item["key"] for item in workflows}
 
     assert {
         "conception",
-        "outline_planning",
         "chapter_production",
         "serial_maintenance",
         "special_design",
     }.issubset(keys)
+    assert "outline_planning" not in keys
+    assert "book_structure_lifecycle" not in keys
+    assert "volume_rolling_lifecycle" not in keys
     chapter = next(item for item in workflows if item["key"] == "chapter_production")
     assert chapter["prompt_ids"][:3] == ["chapter_card", "scene_outline", "draft_generation"]
     assert chapter["agents"][:2] == ["chapter_planner", "plot_narrator"]
@@ -270,14 +280,12 @@ def test_list_agents_exposes_prompt_binding_metadata() -> None:
 from app.agents.shared.prompt_catalog import list_prompt_lifecycle_workflows
 
 
-def test_prompt_lifecycle_workflows_expose_six_story_lanes() -> None:
+def test_prompt_lifecycle_workflows_exclude_legacy_outline_generation_lanes() -> None:
     workflows = list_prompt_lifecycle_workflows()
     keys = [workflow["key"] for workflow in workflows]
 
     assert keys == [
         "story_foundation_lifecycle",
-        "book_structure_lifecycle",
-        "volume_rolling_lifecycle",
         "chapter_closed_loop_lifecycle",
         "serial_maintenance_lifecycle",
         "special_booster_lifecycle",

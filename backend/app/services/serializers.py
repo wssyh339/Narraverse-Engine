@@ -13,6 +13,25 @@ def isoformat(value: datetime | None) -> str | None:
     return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+def duration_ms(started_at: datetime | None, finished_at: datetime | None) -> int | None:
+    if started_at is None or finished_at is None:
+        return None
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
+    if finished_at.tzinfo is None:
+        finished_at = finished_at.replace(tzinfo=timezone.utc)
+    return max(0, int((finished_at - started_at).total_seconds() * 1000))
+
+
+def agent_run_duration_ms(started_at: datetime | None, finished_at: datetime | None, output_payload: dict[str, Any]) -> int | None:
+    llm_meta = output_payload.get("_llm") if isinstance(output_payload, dict) else None
+    if isinstance(llm_meta, dict):
+        elapsed = llm_meta.get("elapsed_ms")
+        if isinstance(elapsed, (int, float)) and elapsed >= 0:
+            return int(elapsed)
+    return duration_ms(started_at, finished_at)
+
+
 def serialize_project(project: models.Project) -> dict[str, Any]:
     return {
         "id": project.id,
@@ -338,6 +357,8 @@ def serialize_canon_proposal(proposal: models.CanonChangeProposal) -> dict[str, 
 
 
 def serialize_agent_run(run: models.AgentRun) -> dict[str, Any]:
+    input_payload = loads(run.input_payload_json, {})
+    output_payload = loads(run.output_payload_json, {})
     return {
         "id": run.id,
         "job_id": run.job_id,
@@ -346,12 +367,15 @@ def serialize_agent_run(run: models.AgentRun) -> dict[str, Any]:
         "agent_name": run.agent_name,
         "agent_role": run.agent_role,
         "status": run.status,
-        "input_payload": loads(run.input_payload_json, {}),
-        "output_payload": loads(run.output_payload_json, {}),
+        "input_payload": input_payload,
+        "output_payload": output_payload,
+        "input": input_payload,
+        "output": output_payload,
         "error_message": run.error_message,
         "langsmith_run_id": getattr(run, "langsmith_run_id", ""),
         "langsmith_url": getattr(run, "langsmith_url", ""),
         "trace_mode": getattr(run, "trace_mode", "local"),
+        "duration_ms": agent_run_duration_ms(run.started_at, run.finished_at, output_payload),
         "started_at": isoformat(run.started_at),
         "finished_at": isoformat(run.finished_at),
         "created_at": isoformat(run.created_at),

@@ -251,6 +251,12 @@ def test_creation_session_decoupled_steps_and_single_card_loading() -> None:
     assert session["basic_info"]["chapter_count"] == 400
     assert session["basic_info"]["chapter_word_target"] == 3000
     assert session["basic_info"]["chapters_per_volume"] == 40
+    project_after_session = assert_success(client.get(f"/api/projects/{project_id}"))["project"]
+    assert project_after_session["target_words"] == 1200000
+    assert project_after_session["planned_volume_count"] == 10
+    assert project_after_session["planned_chapter_count"] == 400
+    assert project_after_session["chapters_per_volume"] == 40
+    assert project_after_session["chapter_word_target"] == 3000
 
     first_worldview = assert_success(
         client.post(
@@ -382,6 +388,30 @@ def test_creation_session_decoupled_steps_and_single_card_loading() -> None:
     assert committed["story_bible"]["main_conflict"]
     assert committed["version"]["agent_name"] == "canon_curator"
     assert committed["session"]["status"] == "committed"
+    state_after_commit = assert_success(client.get(f"/api/projects/{project_id}/state"))["state"]
+    character_names = [character["name"] for character in state_after_commit["characters"]]
+    assert selected_protagonist["name"] in character_names
+    assert "待定主角" not in character_names
+    assert len([name for name in character_names if name == selected_protagonist["name"]]) == 1
+
+    profile = assert_success(client.get(f"/api/projects/{project_id}/creation/profile"))
+    assert profile["project"]["title"] == selected_title["title"]
+    assert profile["story_bible"]["main_conflict"]
+    assert profile["creation_session"]["id"] == session_id
+    assert profile["creation_session"]["status"] == "committed"
+    creation_profile = profile["creation_profile"]
+    assert creation_profile["basic_info"]["genre"] == "都市"
+    assert creation_profile["basic_info"]["target_words"] == 1200000
+    assert creation_profile["selected_worldview"]["title"] == selected_worldview["title"]
+    assert creation_profile["selected_protagonist"]["name"] == selected_protagonist["name"]
+    assert creation_profile["selected_title"]["title"] == selected_title["title"]
+    assert creation_profile["market_position"]["source"] == "title_packaging"
+    assert creation_profile["project_seed"]["selected_title"]["title"] == selected_title["title"]
+    assert creation_profile["core_conflict_system"]["core_conflict"]
+    assert creation_profile["novel_constitution"]["core_narrative_engine"]
+    assert creation_profile["constitution_review"]["status"] == "passed_with_notes"
+    assert creation_profile["canon_candidates"]["story_bible_candidate"]["main_conflict"]
+    assert creation_profile["confirmed_canon"]["core_conflict_system"]["core_conflict"]
 
 
 def test_creation_star_draw_calls_llm_client(monkeypatch) -> None:
@@ -790,6 +820,8 @@ def test_creation_session_title_uses_dedicated_packaging_prompt(monkeypatch) -> 
     assert "榜单回应世界" in snapshot["context_summary"]
     assert payload["title_candidates"][0]["title"] == "榜单误删后我让全城重排"
     assert payload["title_candidates"][0]["core_selling_point"] == "规则压迫 + 申诉反杀 + 高武升级。"
+    assert payload["cards"] == payload["title_candidates"]
+    assert payload["_llm"]["used_remote_model"] is True
     assert payload["market_position_candidates"] == []
     assert payload["session"]["state"]["market_position_source"] == "title_packaging"
     assert payload["session"]["state"]["title_candidates_count"] == 1

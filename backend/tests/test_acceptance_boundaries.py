@@ -76,31 +76,6 @@ def test_oversized_project_title_is_rejected_without_server_error() -> None:
     assert_error_envelope(response.json(), "VALIDATION_ERROR")
 
 
-def test_duplicate_chapter_plan_with_same_idempotency_key_creates_one_job() -> None:
-    reset_database()
-    client = TestClient(app)
-    project_id = create_project(client)
-    payload = {
-        "volume_title": "第一卷",
-        "start_chapter_no": 1,
-        "chapter_count": 2,
-        "outline_requirement": "建立空间站谜团。",
-        "overwrite_existing": False,
-        "idempotency_key": f"acceptance-plan:{project_id}:1-2",
-    }
-
-    first = client.post(f"/api/projects/{project_id}/chapters/plan", json=payload)
-    second = client.post(f"/api/projects/{project_id}/chapters/plan", json=payload)
-
-    assert first.status_code == 200
-    assert second.status_code == 200
-    assert_success_envelope(first.json())
-    assert_success_envelope(second.json())
-    assert first.json()["data"]["job"]["id"] == second.json()["data"]["job"]["id"]
-    chapters = client.get(f"/api/projects/{project_id}/chapters").json()["data"]["chapters"]
-    assert len(chapters) == 2
-
-
 def test_batch_generation_rejects_missing_confirmed_chapters_without_placeholders() -> None:
     reset_database()
     client = TestClient(app)
@@ -119,17 +94,8 @@ def test_repeated_batch_generation_creates_fresh_async_parent_jobs() -> None:
     reset_database()
     client = TestClient(app)
     project_id = create_project(client)
-    client.post(
-        f"/api/projects/{project_id}/chapters/plan",
-        json={
-            "volume_title": "第一卷",
-            "start_chapter_no": 1,
-            "chapter_count": 2,
-            "outline_requirement": "建立空间站谜团。",
-            "overwrite_existing": False,
-            "idempotency_key": f"acceptance-batch-plan:{project_id}:1-2",
-        },
-    )
+    client.post(f"/api/projects/{project_id}/chapters", json={"volume_no": 1, "title": "第1章：报告", "outline": "建立空间站谜团。"})
+    client.post(f"/api/projects/{project_id}/chapters", json={"volume_no": 1, "title": "第2章：回声", "outline": "推进空间站谜团。"})
 
     first = client.post("/api/write/batch-generate", json={"project_id": project_id, "chapter_start": 1, "chapter_end": 2})
     second = client.post("/api/write/batch-generate", json={"project_id": project_id, "chapter_start": 1, "chapter_end": 2})

@@ -30,8 +30,8 @@ function payloadJson(value: unknown) {
   }
 }
 
-function isOutlineSwarmRun(run: AgentRun) {
-  return run.agent_name.startsWith("outline_swarm/") || asRecord(run.input_payload).source === "outline_swarm";
+function isOutlineDebateRun(run: AgentRun) {
+  return run.agent_name.startsWith("outline_debate/") || asRecord(run.input_payload).source === "outline_debate";
 }
 
 function llmFallbackLabel(meta: JsonRecord) {
@@ -69,12 +69,12 @@ function renderAgentRunDetails(run: AgentRun) {
   const llm = asRecord(output._llm);
   const source = textValue(llm.source, "unknown");
   const traceEvents = asArray(output.trace_events);
-  const swarmRun = isOutlineSwarmRun(run);
+  const debateRun = isOutlineDebateRun(run);
 
   return (
     <Space direction="vertical" size={12} className="agent-run-details">
       <Space wrap>
-        <Tag color={swarmRun ? "purple" : "blue"}>{swarmRun ? "outline_swarm" : "agent"}</Tag>
+        <Tag color={debateRun ? "purple" : "blue"}>{debateRun ? "outline_debate" : "agent"}</Tag>
         <Tag color={llmSourceColor(source)}>LLM 来源：{source}</Tag>
         <Tag color={llmFallbackLabel(llm) === "是" ? "gold" : "green"}>本地降级：{llmFallbackLabel(llm)}</Tag>
       </Space>
@@ -84,16 +84,16 @@ function renderAgentRunDetails(run: AgentRun) {
         <Descriptions.Item label="Provider">{textValue(llm.provider)}</Descriptions.Item>
         <Descriptions.Item label="模型">{textValue(llm.model)}</Descriptions.Item>
         <Descriptions.Item label="解析结果">{textValue(llm.parsed)}</Descriptions.Item>
-        {swarmRun ? <Descriptions.Item label="迭代次数">{textValue(output.iteration_count)}</Descriptions.Item> : null}
-        {swarmRun ? <Descriptions.Item label="活动 Agent">{textValue(output.active_agent)}</Descriptions.Item> : null}
+        {debateRun ? <Descriptions.Item label="回合数">{textValue(output.turn_count ?? output.iteration_count)}</Descriptions.Item> : null}
+        {debateRun ? <Descriptions.Item label="当前角色">{textValue(output.active_agent ?? output.agent_name)}</Descriptions.Item> : null}
         <Descriptions.Item label="输入来源">{textValue(input.source, "standard_agent_run")}</Descriptions.Item>
       </Descriptions>
 
-      {swarmRun ? (
+      {debateRun ? (
         <div className="agent-run-trace">
-          <Typography.Text strong>Swarm Trace</Typography.Text>
+          <Typography.Text strong>议事轨迹</Typography.Text>
           {traceEvents.length === 0 ? (
-            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无 Swarm Trace 事件" />
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无议事轨迹事件" />
           ) : (
             <List
               size="small"

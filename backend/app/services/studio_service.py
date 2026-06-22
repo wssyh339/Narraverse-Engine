@@ -8,7 +8,7 @@ import random
 import re
 import threading
 import zipfile
-from typing import Any, Callable, Iterator
+from typing import Any, Iterator
 
 from fastapi import HTTPException
 from sqlalchemy import func, or_
@@ -18,9 +18,7 @@ from app.agents.contracts import NovelStudioState
 from app.agents.chapter_writing.service import chapter_writing_service
 from app.agents.creation_star.service import creation_star_agent_service
 from app.agents.llm_io import call_agent_json
-from app.agents.outline_swarm.service import run_outline_swarm
-from app.agents.outline_swarm.swarm import OUTLINE_SWARM_AGENT_NAMES
-from app.agents.prompts import AGENT_PROMPT_BINDINGS, AGENT_SPECS_BY_NAME, DEFAULT_AGENT_SPECS, OUTLINE_AGENT_SEQUENCE
+from app.agents.prompts import AGENT_PROMPT_BINDINGS, AGENT_SPECS_BY_NAME, DEFAULT_AGENT_SPECS
 from app.agents.shared.prompt_catalog import get_prompt_entry, list_prompt_lifecycle_workflows, list_prompt_workflows, load_catalog_prompt
 from app.core.config import LLMProviderResolver, get_settings
 from app.core.ids import generate_id
@@ -28,13 +26,6 @@ from app.core.json import dumps, loads
 from app.db import models
 from app.db.models import utcnow
 from app.db.session import SessionLocal
-from app.schemas.chapter import PlanChaptersRequest
-from app.schemas.outline import (
-    BookOutlineCommitRequest,
-    BookOutlineGenerateRequest,
-    ChapterOutlineBatchGenerateRequest,
-    ChapterOutlineCommitRequest,
-)
 from app.schemas.studio import (
     AgentModelConfigRequest,
     AgentPromptUpdateRequest,
@@ -113,37 +104,8 @@ from app.services.serializers import (
 from app.services.llm_client import llm_client
 
 
-BOOK_OUTLINE_AGENT_SEQUENCE = tuple(agent for agent in OUTLINE_AGENT_SEQUENCE if agent != "beat_control")
-BOOK_OUTLINE_SWARM_AGENT_NAMES = tuple(agent for agent in OUTLINE_SWARM_AGENT_NAMES if agent != "BeatControllerAgent")
-CHAPTER_OUTLINE_AGENT_SEQUENCE = ("beat_control", "foreshadowing_manager", "logic_audit")
-CHAPTER_OUTLINE_SEGMENT_SIZE = 10
-CHAPTER_OUTLINE_MAX_REVISION_ATTEMPTS = 2
-CHAPTER_OUTLINE_REQUIRED_FIELDS = (
-    "chapter_no",
-    "volume_no",
-    "title",
-    "core_event",
-    "crisis",
-    "climax",
-    "outcome",
-    "conflict",
-    "pov_character",
-    "foreshadowing_plants",
-    "foreshadowing_payoffs",
-    "canon_updates",
-    "continuity_risks",
-    "chapter_hook",
-)
-CHAPTER_OUTLINE_GENERIC_PHRASES = (
-    "围绕本卷核心目标",
-    "主角目标与本卷阻力",
-    "留下下一章钩子",
-    "推进本章剧情节点",
-    "服务本批章纲因果链",
-    "承接卷纲",
-    "本章中段出现新信息或误判",
-    "以未解决选择、反常线索或敌方动作收束",
-)
+DEFAULT_CHAPTER_WORD_TARGET = 8000
+
 CHAPTER_OUTLINE_STATUS_PROTECTED = {"drafted", "completed", "finalized"}
 CHAPTER_DRAFT_PROGRESS_STEPS = (
     "canon_context",
@@ -158,24 +120,30 @@ CHAPTER_DRAFT_PROGRESS_STEPS = (
     "draft_rewrite",
     "quality_gate",
     "style_unifier",
+    "post_length_review",
     "narrative_ledger",
     "canon_curator",
 )
-CREATION_CANON_APPROVAL_SECTIONS = ("project", "story_bible", "characters", "entities", "world_facts", "graph")
-TOPOLOGY_ARTIFACT_EVENT_TYPES = {
-    "outline_piece",
-    "canon_candidate",
-    "character_candidate",
-    "setting_candidate",
-    "completion_ticket",
-    "uncertainty_ticket",
+CHAPTER_DRAFT_STEP_LABELS = {
+    "canon_context": "读取正典",
+    "build_context": "读取正典",
+    "chapter_card": "章节卡",
+    "scene_outline": "场景细纲",
+    "plot_narrator": "情节叙事",
+    "dialogue_writer": "人物对话",
+    "environment_writer": "环境描写",
+    "integrator": "整合草稿",
+    "reviewer": "审核修改",
+    "fact_checker": "事实核查",
+    "draft_rewrite": "草稿改写",
+    "quality_gate": "质量门",
+    "style_unifier": "风格统一",
+    "post_length_review": "扩写后复审",
+    "narrative_ledger": "章后账本",
+    "canon_curator": "正典整理",
 }
-
-
-def _outline_swarm_agent_names_for_generation_kind(generation_kind: str) -> tuple[str, ...]:
-    if generation_kind == "book_outline":
-        return BOOK_OUTLINE_SWARM_AGENT_NAMES
-    return OUTLINE_SWARM_AGENT_NAMES
+CREATION_CANON_APPROVAL_SECTIONS = ("project", "story_bible", "characters", "entities", "world_facts", "graph")
+RUNNING_JOB_STALE_SECONDS = 30 * 60
 
 
 def _not_found(message: str) -> HTTPException:
@@ -455,6 +423,7 @@ class StudioService:
     def create_creation_session(self, db: Session, project_id: str, request: CreationSessionCreateRequest) -> dict:
         project = self._project(db, project_id)
         basic = self._normalized_creation_basic(project, request.basic_info)
+        self._apply_creation_basic_to_project(project, basic)
         state = {
             "worldview_candidates": [],
             "protagonist_candidates": [],
@@ -482,6 +451,38 @@ class StudioService:
 
     def get_creation_session(self, db: Session, project_id: str, session_id: str) -> dict:
         return {"session": serialize_creation_session(self._creation_session(db, project_id, session_id))}
+
+    def get_creation_profile(self, db: Session, project_id: str) -> dict:
+        project = self._project(db, project_id)
+        story_bible = db.query(models.StoryBible).filter(models.StoryBible.project_id == project_id).first()
+        session = (
+            db.query(models.CreationSession)
+            .filter(models.CreationSession.project_id == project_id, models.CreationSession.status == "committed")
+            .order_by(models.CreationSession.updated_at.desc())
+            .first()
+        )
+        if session is None:
+            session = (
+                db.query(models.CreationSession)
+                .filter(models.CreationSession.project_id == project_id)
+                .order_by(models.CreationSession.updated_at.desc())
+                .first()
+            )
+        creation_profile = self._creation_profile_from_session(session) if session else self._empty_creation_profile()
+        return {
+            "project": serialize_project(project),
+            "story_bible": serialize_story_bible(story_bible) if story_bible else None,
+            "creation_session": serialize_creation_session(session) if session else None,
+            "creation_profile": creation_profile,
+            "profile_summary": {
+                "has_creation_star": bool(session),
+                "session_status": session.status if session else "",
+                "session_step": session.current_step if session else "",
+                "session_updated_at": session.updated_at.isoformat() if session else None,
+                "canon_sections": sorted(creation_profile.get("canon_candidates", {}).keys()) if isinstance(creation_profile.get("canon_candidates"), dict) else [],
+                "confirmed": bool(creation_profile.get("confirmed_canon")),
+            },
+        }
 
     def creation_session_worldviews(self, db: Session, project_id: str, session_id: str, request: CreationSessionCardRequest) -> dict:
         project = self._project(db, project_id)
@@ -621,9 +622,13 @@ class StudioService:
         return {
             "session": self._serialize_creation_session_compact(session),
             "job": serialize_job(job),
+            "cards": title_cards,
             "title_candidates": title_cards,
             "market_position_candidates": [],
+            "step": payload.get("step") or "title",
+            "draw_id": payload.get("draw_id"),
             "prompt_snapshot": payload.get("prompt_snapshot", {}),
+            "_llm": payload.get("_llm", {}),
         }
 
     def creation_session_seed(self, db: Session, project_id: str, session_id: str, request: CreationSessionSeedRequest) -> dict:
@@ -809,17 +814,7 @@ class StudioService:
         )
 
         project.title = str(selected_title.get("title") or project.title)
-        project.genre = basic.get("genre", project.genre)
-        project.target_reader = basic.get("target_reader", project.target_reader)
-        project.target_words = int(basic.get("target_words") or project.target_words or 0)
-        project.planned_chapter_count = int(basic.get("chapter_count") or basic.get("planned_chapter_count") or project.planned_chapter_count)
-        project.planned_volume_count = int(basic.get("volume_count") or project.planned_volume_count or 1)
-        project.chapters_per_volume = int(basic.get("chapters_per_volume") or project.chapters_per_volume or 1)
-        project.chapter_word_target = int(basic.get("chapter_word_target") or project.chapter_word_target)
-        project.chapter_word_min = int(basic.get("chapter_word_min") or project.chapter_word_min or project.chapter_word_target)
-        project.chapter_word_max = int(basic.get("chapter_word_max") or project.chapter_word_max or project.chapter_word_target)
-        project.initial_idea = basic.get("initial_idea", project.initial_idea)
-        project.style_guide = basic.get("style", project.style_guide)
+        self._apply_creation_basic_to_project(project, basic)
         project.premise = story_candidate.get("main_conflict") or project_bible.get("核心矛盾") or project.premise
 
         story_bible.version += 1
@@ -943,507 +938,6 @@ class StudioService:
             "canon_updates": result.canon_updates,
         }
 
-    def plan_chapters(self, db: Session, project_id: str, request: PlanChaptersRequest, background_tasks: Any | None = None) -> dict:
-        project = self._project(db, project_id)
-        existing = (
-            db.query(models.GenerationJob)
-            .filter(models.GenerationJob.project_id == project_id, models.GenerationJob.idempotency_key == request.idempotency_key)
-            .first()
-        )
-        if existing:
-            return {"job": serialize_job(existing)}
-        end = request.start_chapter_no + request.chapter_count - 1
-        existing_chapters = (
-            db.query(models.Chapter)
-            .filter(models.Chapter.project_id == project_id, models.Chapter.chapter_no >= request.start_chapter_no, models.Chapter.chapter_no <= end)
-            .all()
-        )
-        if existing_chapters and not request.overwrite_existing:
-            raise _conflict("章节范围已存在，且 overwrite_existing=false")
-        job = self._create_job(
-            db,
-            project_id,
-            None,
-            "plan_chapters",
-            request.model,
-            request.model_dump(),
-            request.idempotency_key,
-            total_steps=len(OUTLINE_AGENT_SEQUENCE) + len(OUTLINE_SWARM_AGENT_NAMES),
-            queued=request.async_mode,
-        )
-        if request.async_mode:
-            db.commit()
-            db.refresh(job)
-            if background_tasks is not None:
-                background_tasks.add_task(self.run_plan_chapters_job, job.id)
-            return {"job": serialize_job(job), "chapters": [], "outline_plan": None}
-
-        return self._execute_plan_chapters(db, project, request, job)
-
-    def _book_outline_should_queue(self, request: BookOutlineGenerateRequest) -> bool:
-        chapter_count = max(1, int(request.volume_count or 1)) * max(1, int(request.chapters_per_volume or 1))
-        target_words = int(request.target_words or 0)
-        return chapter_count >= 300 or target_words >= 500000
-
-    def _chapter_outline_batch_should_queue(self, request: ChapterOutlineBatchGenerateRequest) -> bool:
-        chapter_count = len(self._chapter_numbers_from_ranges(request))
-        return chapter_count > CHAPTER_OUTLINE_SEGMENT_SIZE
-
-    def generate_book_outline(self, db: Session, project_id: str, request: BookOutlineGenerateRequest, background_tasks: Any | None = None) -> dict:
-        project = self._project(db, project_id)
-        existing = (
-            db.query(models.GenerationJob)
-            .filter(models.GenerationJob.project_id == project_id, models.GenerationJob.idempotency_key == request.idempotency_key)
-            .first()
-        )
-        if existing:
-            result = loads(existing.result_json, {}) if existing.result_json else {}
-            return {"job": serialize_job(existing), "outline_plan": result.get("outline_plan")}
-        should_queue = request.async_mode or (background_tasks is not None and self._book_outline_should_queue(request))
-        total_steps = len(BOOK_OUTLINE_AGENT_SEQUENCE) + (len(BOOK_OUTLINE_SWARM_AGENT_NAMES) if request.use_topology_inference else 0)
-        job = self._create_job(
-            db,
-            project_id,
-            None,
-            "book_outline",
-            request.model,
-            request.model_dump(),
-            request.idempotency_key,
-            total_steps=total_steps,
-            queued=should_queue,
-        )
-        if should_queue:
-            outline_plan = self._build_initial_book_outline_plan(db, project, request)
-            job.result_json = dumps({"outline_plan": outline_plan, "chapters": [], "status": "skeleton"})
-            db.commit()
-            db.refresh(job)
-            if background_tasks is not None:
-                background_tasks.add_task(self.run_book_outline_job, job.id)
-            return {"job": serialize_job(job), "outline_plan": outline_plan}
-        return self._execute_book_outline(db, project, request, job)
-
-    def run_book_outline_job(self, job_id: str) -> None:
-        db = SessionLocal()
-        try:
-            job = db.get(models.GenerationJob, job_id)
-            if job is None or job.status == "succeeded":
-                return
-            request = self._book_outline_request_from_job(job)
-            project = self._project(db, job.project_id)
-            self._start_job(db, job)
-            self._execute_book_outline(db, project, request, job)
-        except Exception as exc:  # pragma: no cover - API level verifies failed state
-            db.rollback()
-            job = db.get(models.GenerationJob, job_id)
-            if job is not None:
-                self._fail_job(db, job, exc)
-                db.commit()
-        finally:
-            db.close()
-
-    def commit_book_outline(self, db: Session, project_id: str, request: BookOutlineCommitRequest) -> dict:
-        project = self._project(db, project_id)
-        outline_plan = request.outline_plan
-        if request.job_id:
-            job = db.get(models.GenerationJob, request.job_id)
-            if job is None or job.project_id != project_id:
-                raise _not_found("大纲推演任务不存在")
-            result = loads(job.result_json, {}) if job.result_json else {}
-            outline_plan = result.get("outline_plan") or outline_plan
-        if not outline_plan:
-            raise _bad_request("没有可写入的大纲结果")
-        self._apply_book_outline(db, project, outline_plan)
-        db.commit()
-        story_bible = self._story_bible(db, project_id)
-        volumes = (
-            db.query(models.Volume)
-            .filter(models.Volume.project_id == project_id)
-            .order_by(models.Volume.sort_order.asc(), models.Volume.volume_no.asc())
-            .all()
-        )
-        return {
-            "project": serialize_project(project),
-            "story_bible": serialize_story_bible(story_bible),
-            "volumes": [serialize_volume(item) for item in volumes],
-            "outline_plan": outline_plan,
-        }
-
-    def generate_chapter_outlines_batch(self, db: Session, project_id: str, request: ChapterOutlineBatchGenerateRequest, background_tasks: Any | None = None) -> dict:
-        self._project(db, project_id)
-        existing = (
-            db.query(models.GenerationJob)
-            .filter(models.GenerationJob.project_id == project_id, models.GenerationJob.idempotency_key == request.idempotency_key)
-            .first()
-        )
-        if existing:
-            result = loads(existing.result_json, {}) if existing.result_json else {}
-            return {"job": serialize_job(existing), "chapter_outlines": result.get("chapter_outlines", [])}
-        self._ensure_batch_can_generate(db, project_id, request)
-        should_queue = request.async_mode or (background_tasks is not None and self._chapter_outline_batch_should_queue(request))
-        job = self._create_job(
-            db,
-            project_id,
-            None,
-            "chapter_outline_batch",
-            request.model,
-            request.model_dump(),
-            request.idempotency_key,
-            total_steps=len(CHAPTER_OUTLINE_AGENT_SEQUENCE),
-            queued=should_queue,
-        )
-        if should_queue:
-            db.commit()
-            db.refresh(job)
-            if background_tasks is not None:
-                background_tasks.add_task(self.run_chapter_outline_batch_job, job.id)
-            return {"job": serialize_job(job), "chapter_outlines": []}
-        project = self._project(db, project_id)
-        return self._execute_chapter_outline_batch(db, project, request, job)
-
-    def run_chapter_outline_batch_job(self, job_id: str) -> None:
-        db = SessionLocal()
-        try:
-            job = db.get(models.GenerationJob, job_id)
-            if job is None or job.status == "succeeded":
-                return
-            request = self._chapter_outline_batch_request_from_job(job)
-            project = self._project(db, job.project_id)
-            self._start_job(db, job)
-            self._execute_chapter_outline_batch(db, project, request, job)
-        except Exception as exc:  # pragma: no cover - API level verifies failed state
-            db.rollback()
-            job = db.get(models.GenerationJob, job_id)
-            if job is not None:
-                self._fail_job(db, job, exc)
-                db.commit()
-        finally:
-            db.close()
-
-    def commit_chapter_outlines(self, db: Session, project_id: str, request: ChapterOutlineCommitRequest) -> dict:
-        project = self._project(db, project_id)
-        chapter_outlines = request.chapter_outlines
-        overwrite_existing = request.overwrite_existing
-        job_id: str | None = None
-        if request.job_id:
-            job = db.get(models.GenerationJob, request.job_id)
-            if job is None or job.project_id != project_id:
-                raise _not_found("章纲生成任务不存在")
-            result = loads(job.result_json, {}) if job.result_json else {}
-            outline_quality_gate = result.get("outline_quality_gate") or (result.get("outline_plan", {}) if isinstance(result.get("outline_plan"), dict) else {}).get("outline_quality_gate")
-            if job.status != "succeeded":
-                raise _bad_request("章纲生成任务尚未成功，不能提交正式章纲")
-            if isinstance(outline_quality_gate, dict) and outline_quality_gate.get("status") != "passed":
-                raise _bad_request(f"章纲质量门未通过，不能提交：{outline_quality_gate.get('summary', '')}")
-            chapter_outlines = result.get("chapter_outlines") or chapter_outlines
-            overwrite_existing = bool(loads(job.request_json, {}).get("overwrite_existing", overwrite_existing))
-            job_id = job.id
-        if not chapter_outlines:
-            raise _bad_request("没有可写入的章纲结果")
-        chapters = self._persist_chapter_outline_candidates(db, project, chapter_outlines, job_id, overwrite_existing)
-        db.commit()
-        for chapter in chapters:
-            db.refresh(chapter)
-        return {"chapters": [serialize_chapter(chapter) for chapter in chapters], "chapter_outlines": chapter_outlines}
-
-    def run_plan_chapters_job(self, job_id: str) -> None:
-        db = SessionLocal()
-        try:
-            job = db.get(models.GenerationJob, job_id)
-            if job is None or job.status == "succeeded":
-                return
-            request = self._plan_request_from_job(job)
-            project = self._project(db, job.project_id)
-            self._start_job(db, job)
-            self._execute_plan_chapters(db, project, request, job)
-        except Exception as exc:  # pragma: no cover - exercised through API level failure state
-            db.rollback()
-            job = db.get(models.GenerationJob, job_id)
-            if job is not None:
-                self._fail_job(db, job, exc)
-                db.commit()
-        finally:
-            db.close()
-
-    def _execute_plan_chapters(self, db: Session, project: models.Project, request: PlanChaptersRequest, job: models.GenerationJob) -> dict:
-        project_id = project.id
-        state = self._state_from_project(db, project, job.id)
-        state.requested_model = request.model
-        state.agent_model_configs = self._model_configs_for_workflow(db, "chapter_planning")
-        state.current_chapter = request.start_chapter_no
-        state.target_chapters = request.chapter_count
-        result = chapter_writing_service.run_chapter_plan(state)
-        outline_plan = self._build_long_novel_outline_plan(db, project, request, state)
-        project_snapshot = serialize_project(project)
-        db.commit()
-        total_steps = len(OUTLINE_AGENT_SEQUENCE) + len(OUTLINE_SWARM_AGENT_NAMES)
-
-        def on_outline_agent(agent_name: str, completed_steps: int) -> None:
-            self._update_job_progress(db, job, agent_name, completed_steps, total_steps, f"{agent_name} 已完成")
-
-        outline_plan = self._run_outline_agents_with_llm(db, project_snapshot, request, outline_plan, progress_callback=on_outline_agent)
-        project = self._project(db, project_id)
-
-        def on_swarm_progress(swarm_state: dict[str, Any]) -> None:
-            completed_steps = min(total_steps - 1, len(OUTLINE_AGENT_SEQUENCE) + int(swarm_state.get("iteration_count") or 0))
-            active_agent = str(swarm_state.get("active_agent") or "outline_swarm")
-            self._update_job_progress(db, job, f"outline_swarm/{active_agent}", completed_steps, total_steps, f"{active_agent} 正在推演")
-
-        outline_plan = self._attach_outline_swarm_plan(db, project, request, outline_plan, progress_callback=on_swarm_progress)
-        planned_chapters = outline_plan["chapters"]
-        if request.target_words is not None:
-            project.target_words = request.target_words
-        if request.volume_count is not None and request.chapters_per_volume is not None:
-            project.planned_chapter_count = request.volume_count * request.chapters_per_volume
-            project.planned_volume_count = request.volume_count
-            project.chapters_per_volume = request.chapters_per_volume
-        if request.chapter_word_target is not None:
-            project.chapter_word_target = request.chapter_word_target
-            project.chapter_word_min = project.chapter_word_min or request.chapter_word_target
-            project.chapter_word_max = project.chapter_word_max or request.chapter_word_target
-        if request.chapter_word_min is not None:
-            project.chapter_word_min = request.chapter_word_min
-        if request.chapter_word_max is not None:
-            project.chapter_word_max = request.chapter_word_max
-        self._sync_outline_volumes(db, project, outline_plan["10卷单元总表"])
-        outline_agent_outputs = outline_plan.get("agent_outputs", {})
-        previous_outputs: list[str] = []
-        for agent_name in OUTLINE_AGENT_SEQUENCE:
-            self._record_agent_run(
-                db,
-                job,
-                agent_name,
-                outline_agent_outputs.get(agent_name, {}),
-                {
-                    "request": request.model_dump(),
-                    "structured_prompt": outline_plan["structured_prompt"],
-                    "story_state": outline_plan.get("story_state", {}),
-                    "previous_agents": previous_outputs,
-                },
-            )
-            previous_outputs.append(agent_name)
-        self._record_outline_swarm_agent_runs(db, job, request, outline_plan)
-        chapters = self._persist_planned_chapters(db, project, planned_chapters, request, job.id)
-        self._finish_job(
-            db,
-            job,
-            {
-                "chapters": [serialize_chapter(chapter) for chapter in chapters],
-                "outline_plan": {key: value for key, value in outline_plan.items() if key != "chapters"},
-                "canon_updates": result.canon_updates,
-            },
-        )
-        db.commit()
-        return {
-            "job": serialize_job(job),
-            "chapters": [serialize_chapter(chapter) for chapter in chapters],
-            "outline_plan": {key: value for key, value in outline_plan.items() if key != "chapters"},
-        }
-
-    def _execute_book_outline(self, db: Session, project: models.Project, request: BookOutlineGenerateRequest, job: models.GenerationJob) -> dict:
-        plan_request = self._book_outline_to_plan_request(project, request)
-        state = self._state_from_project(db, project, job.id)
-        state.requested_model = request.model
-        state.agent_model_configs = self._model_configs_for_workflow(db, "outline_generation")
-        state.current_chapter = 1
-        state.target_chapters = project.planned_chapter_count
-        outline_plan = self._build_long_novel_outline_plan(db, project, plan_request, state)
-        outline_plan = self._normalize_book_outline_plan(project, plan_request, outline_plan)
-        project_snapshot = serialize_project(project)
-        db.commit()
-        total_steps = len(BOOK_OUTLINE_AGENT_SEQUENCE) + (len(BOOK_OUTLINE_SWARM_AGENT_NAMES) if request.use_topology_inference else 0)
-
-        def on_outline_agent(agent_name: str, completed_steps: int) -> None:
-            self._update_job_progress(db, job, agent_name, completed_steps, total_steps, f"{agent_name} 已完成")
-
-        outline_plan = self._run_outline_agents_with_llm(
-            db,
-            project_snapshot,
-            plan_request,
-            outline_plan,
-            agent_sequence=BOOK_OUTLINE_AGENT_SEQUENCE,
-            progress_callback=on_outline_agent,
-        )
-        outline_plan = self._normalize_book_outline_plan(project, plan_request, outline_plan)
-        outline_plan["revision_route"] = self._build_outline_revision_route(outline_plan)
-        project = self._project(db, project.id)
-
-        if request.use_topology_inference:
-            def on_swarm_progress(swarm_state: dict[str, Any]) -> None:
-                completed_steps = min(total_steps - 1, len(BOOK_OUTLINE_AGENT_SEQUENCE) + int(swarm_state.get("iteration_count") or 0))
-                active_agent = str(swarm_state.get("active_agent") or "outline_swarm")
-                if active_agent == "BeatControllerAgent":
-                    active_agent = "ForeshadowingAgent"
-                self._update_job_progress(db, job, f"outline_swarm/{active_agent}", completed_steps, total_steps, f"{active_agent} 正在推演")
-
-            outline_plan = self._attach_outline_swarm_plan(db, project, plan_request, outline_plan, generation_kind="book_outline", progress_callback=on_swarm_progress)
-        outline_plan = self._normalize_book_outline_plan(project, plan_request, outline_plan)
-        outline_plan["revision_route"] = self._build_outline_revision_route(outline_plan)
-        outline_plan["change_summary"] = self._build_book_outline_change_summary(db, project, outline_plan)
-        outline_plan["outline_topology"] = self._build_outline_topology(
-            generation_kind="book_outline",
-            mode="topology" if request.use_topology_inference else "linear",
-            agent_sequence=BOOK_OUTLINE_AGENT_SEQUENCE,
-            outline_plan=outline_plan,
-            swarm_result=outline_plan.get("outline_swarm") if request.use_topology_inference else None,
-            planned_swarm_agents=BOOK_OUTLINE_SWARM_AGENT_NAMES if request.use_topology_inference else (),
-        )
-        outline_agent_outputs = outline_plan.get("agent_outputs", {})
-        previous_outputs: list[str] = []
-        for agent_name in BOOK_OUTLINE_AGENT_SEQUENCE:
-            self._record_agent_run(
-                db,
-                job,
-                agent_name,
-                outline_agent_outputs.get(agent_name, {}),
-                {
-                    "request": request.model_dump(),
-                    "structured_prompt": outline_plan.get("structured_prompt", {}),
-                    "story_state": outline_plan.get("story_state", {}),
-                    "previous_agents": previous_outputs,
-                },
-            )
-            previous_outputs.append(agent_name)
-        if request.use_topology_inference:
-            self._record_outline_swarm_agent_runs(db, job, plan_request, outline_plan)
-        self._finish_job(db, job, {"outline_plan": outline_plan, "chapters": []})
-        db.commit()
-        return {"job": serialize_job(job), "outline_plan": outline_plan}
-
-    def _execute_chapter_outline_batch(self, db: Session, project: models.Project, request: ChapterOutlineBatchGenerateRequest, job: models.GenerationJob) -> dict:
-        try:
-            return self._execute_chapter_outline_batch_inner(db, project, request, job)
-        except Exception as exc:
-            self._fail_job(db, job, exc)
-            db.commit()
-            raise
-
-    def _execute_chapter_outline_batch_inner(self, db: Session, project: models.Project, request: ChapterOutlineBatchGenerateRequest, job: models.GenerationJob) -> dict:
-        self._ensure_batch_can_generate(db, project.id, request)
-        segments = self._chapter_outline_segment_requests(request)
-        total_steps = max(1, len(segments) * len(CHAPTER_OUTLINE_AGENT_SEQUENCE) * CHAPTER_OUTLINE_MAX_REVISION_ATTEMPTS)
-        job.progress_json = dumps({"current_step": "running", "total_steps": total_steps, "completed_steps": 0, "message": "章纲分块推演已启动"})
-        db.commit()
-        topology_instruction = (
-            "拓扑推演开启：请把章纲候选按依赖、冲突、伏笔、回收、风险和审查关系组织；保持与线性模式相同的章纲字段与章节数量。"
-            if request.use_topology_inference
-            else "拓扑推演关闭：请按线性章纲生产链生成；保持与拓扑模式相同的章纲字段与章节数量。"
-        )
-        all_chapter_outlines: list[dict[str, Any]] = []
-        segment_reports: list[dict[str, Any]] = []
-        previous_segment_outputs: list[dict[str, Any]] = []
-        completed_steps = 0
-        for segment_index, segment_request in enumerate(segments, start=1):
-            skeleton_outlines = self._build_chapter_outline_candidates(db, project, segment_request)
-            context = self._chapter_outline_batch_context(db, project, segment_request, skeleton_outlines)
-            context["segment"] = {
-                "index": segment_index,
-                "total": len(segments),
-                "chapter_count": len(skeleton_outlines),
-                "segment_size": CHAPTER_OUTLINE_SEGMENT_SIZE,
-            }
-            context["output_contract"] = self._chapter_outline_output_contract()
-            context["previous_segment_outputs"] = previous_segment_outputs[-3:]
-            segment_quality: dict[str, Any] = {}
-            chapter_outlines = skeleton_outlines
-            payload: dict[str, Any] = {"chapter_outlines": skeleton_outlines}
-            revision_route: dict[str, Any] | None = None
-            segment_passed = False
-            for attempt in range(1, CHAPTER_OUTLINE_MAX_REVISION_ATTEMPTS + 1):
-                previous_outputs: list[dict[str, Any]] = []
-                context["revision_attempt"] = attempt
-                if revision_route:
-                    context["revision_route"] = revision_route
-                    payload = {"chapter_outlines": chapter_outlines, "revision_route": revision_route}
-                retry_segment = False
-                for agent_name in CHAPTER_OUTLINE_AGENT_SEQUENCE:
-                    completed_steps += 1
-                    spec = AGENT_SPECS_BY_NAME[agent_name]
-                    fallback = payload if agent_name == "beat_control" else {"chapter_outlines": chapter_outlines}
-                    output, meta = call_agent_json(
-                        llm_client=llm_client,
-                        agent_name=agent_name,
-                        role=spec.role,
-                        system_prompt=spec.prompt,
-                        task=(
-                            "基于已确认总纲、卷纲和正典上下文，生成或审查本批章纲候选。不要改写总纲和卷纲。"
-                            "本次只处理 context.segment 中的 10 章以内分块；必须输出 chapter_outlines，不能输出 chapter_beats。"
-                            "如果 context.revision_route 存在，必须按其中 A 级问题重写本分块，不得复用被审计否决的模板句。"
-                            f"{topology_instruction}"
-                        ),
-                        context={**context, "topology_mode": "topology" if request.use_topology_inference else "linear", "previous_agent_outputs": previous_outputs},
-                        fallback=fallback,
-                        model=self._configured_model_for_agent(db, "chapter_planning", agent_name, request.model),
-                    )
-                    output["_llm"] = meta
-                    if agent_name == "beat_control":
-                        candidate = self._extract_chapter_outlines(output)
-                        if not meta.get("parsed") or not meta.get("schema_valid", True):
-                            raise _bad_request("beat_control 未返回可解析的章纲 JSON，当前 skeleton 结果不得提交。")
-                        if not candidate:
-                            raise _bad_request("beat_control 缺少 chapter_outlines，当前 skeleton 结果不得提交。")
-                        chapter_outlines = [self._normalize_chapter_outline_item(item, project, segment_request) for item in candidate if isinstance(item, dict)]
-                        segment_quality = self._chapter_outline_quality_gate(chapter_outlines, segment_request, source_agent="beat_control")
-                        if segment_quality["status"] != "passed":
-                            raise _bad_request(f"章纲质量门未通过：{segment_quality['summary']}")
-                        payload = {"chapter_outlines": chapter_outlines}
-                    elif agent_name == "foreshadowing_manager":
-                        chapter_outlines = self._merge_foreshadowing_into_chapter_outlines(chapter_outlines, output)
-                        payload = {"chapter_outlines": chapter_outlines}
-                    elif agent_name == "logic_audit":
-                        audit_gate = self._logic_audit_gate(output)
-                        if audit_gate["status"] != "passed":
-                            revision_route = self._chapter_outline_revision_route(audit_gate, segment_request)
-                            output["revision_route"] = revision_route
-                            self._record_agent_run(
-                                db,
-                                job,
-                                agent_name,
-                                output,
-                                {"request": segment_request.model_dump(), "context": {**context, "topology_mode": "topology" if request.use_topology_inference else "linear"}},
-                            )
-                            self._update_job_progress(db, job, agent_name, completed_steps, total_steps, f"第{segment_index}/{len(segments)}段 {agent_name} 要求返工")
-                            if attempt < CHAPTER_OUTLINE_MAX_REVISION_ATTEMPTS:
-                                retry_segment = True
-                                break
-                            raise _bad_request(f"逻辑审计未通过：{audit_gate['summary']}")
-                    previous_outputs.append({"agent_name": agent_name, "output": output})
-                    self._record_agent_run(db, job, agent_name, output, {"request": segment_request.model_dump(), "context": {**context, "topology_mode": "topology" if request.use_topology_inference else "linear"}})
-                    self._update_job_progress(db, job, agent_name, completed_steps, total_steps, f"第{segment_index}/{len(segments)}段 {agent_name} 已完成")
-                if retry_segment:
-                    continue
-                segment_passed = True
-                break
-            if not segment_passed:
-                raise _bad_request("章纲分块未通过审计，已停止写入正式章节")
-            all_chapter_outlines.extend(chapter_outlines)
-            segment_reports.append({"segment": context["segment"], "quality_gate": segment_quality, "chapter_count": len(chapter_outlines), "attempts": context.get("revision_attempt", 1)})
-            previous_segment_outputs.append({"segment": context["segment"], "chapter_outlines": chapter_outlines})
-        outline_quality_gate = self._chapter_outline_quality_gate(all_chapter_outlines, request, source_agent="chapter_outline_batch")
-        if outline_quality_gate["status"] != "passed":
-            raise _bad_request(f"章纲质量门未通过：{outline_quality_gate['summary']}")
-        outline_plan = {
-            "generation_kind": "chapter_outline_batch",
-            "chapter_outlines": all_chapter_outlines,
-            "batch_request": request.model_dump(),
-            "segment_reports": segment_reports,
-            "outline_quality_gate": outline_quality_gate,
-        }
-        outline_plan["outline_topology"] = self._build_outline_topology(
-            generation_kind="chapter_outline_batch",
-            mode="topology" if request.use_topology_inference else "linear",
-            agent_sequence=CHAPTER_OUTLINE_AGENT_SEQUENCE,
-            outline_plan=outline_plan,
-        )
-        result = {
-            "generation_kind": "chapter_outline_batch",
-            "chapter_outlines": all_chapter_outlines,
-            "outline_plan": outline_plan,
-            "outline_quality_gate": outline_quality_gate,
-        }
-        self._finish_job(db, job, result)
-        db.commit()
-        return {"job": serialize_job(job), "chapter_outlines": all_chapter_outlines, "outline_plan": result["outline_plan"]}
-
     def list_chapters(self, db: Session, project_id: str) -> dict:
         self._project(db, project_id)
         chapters = (
@@ -1491,6 +985,7 @@ class StudioService:
         chapter_id: str,
         request: DraftChapterRequest,
         *,
+        background_tasks: Any | None = None,
         parent_job_id: str | None = None,
         parent_chapter_no: int | None = None,
         parent_total_steps: int | None = None,
@@ -1504,13 +999,88 @@ class StudioService:
             .first()
         )
         if existing:
-            return {"job": serialize_job(existing)}
-        job = self._create_job(db, project_id, chapter_id, "draft_chapter", request.model, request.model_dump(), idem, total_steps=14)
+            payload = {"job": serialize_job(existing)}
+            if request.async_mode or existing.status == "succeeded":
+                payload["chapter"] = serialize_chapter(chapter)
+            return payload
+        queued = bool(request.async_mode and parent_job_id is None)
+        job = self._create_job(
+            db,
+            project_id,
+            chapter_id,
+            "draft_chapter",
+            request.model,
+            request.model_dump(),
+            idem,
+            total_steps=len(CHAPTER_DRAFT_PROGRESS_STEPS),
+            queued=queued,
+        )
+        if queued:
+            db.commit()
+            db.refresh(job)
+            if background_tasks is not None:
+                background_tasks.add_task(self.run_draft_chapter_job, job.id)
+            return {"job": serialize_job(job), "chapter": serialize_chapter(chapter)}
+        return self._execute_draft_chapter(
+            db,
+            project,
+            chapter,
+            request,
+            job,
+            parent_job_id=parent_job_id,
+            parent_chapter_no=parent_chapter_no,
+            parent_total_steps=parent_total_steps,
+        )
+
+    def run_draft_chapter_job(self, job_id: str) -> None:
+        with SessionLocal() as db:
+            job = db.get(models.GenerationJob, job_id)
+            if job is None or job.status in {"succeeded", "cancelled"}:
+                return
+            try:
+                request = self._draft_request_from_job(job)
+                project = self._project(db, job.project_id)
+                if not job.chapter_id:
+                    raise _bad_request("单章正文任务缺少 chapter_id")
+                chapter = self._chapter(db, job.project_id, job.chapter_id)
+                self._start_job(db, job)
+                self._execute_draft_chapter(db, project, chapter, request, job)
+            except Exception as exc:
+                job = db.get(models.GenerationJob, job_id)
+                if job is not None and job.status not in {"succeeded", "failed", "cancelled"}:
+                    self._fail_job(db, job, exc)
+                    db.commit()
+
+    def _draft_request_from_job(self, job: models.GenerationJob) -> DraftChapterRequest:
+        payload = loads(job.request_json, {})
+        allowed = {field: payload[field] for field in DraftChapterRequest.model_fields if field in payload}
+        allowed["async_mode"] = False
+        return DraftChapterRequest.model_validate(allowed)
+
+    def _execute_draft_chapter(
+        self,
+        db: Session,
+        project: models.Project,
+        chapter: models.Chapter,
+        request: DraftChapterRequest,
+        job: models.GenerationJob,
+        *,
+        parent_job_id: str | None = None,
+        parent_chapter_no: int | None = None,
+        parent_total_steps: int | None = None,
+    ) -> dict:
+        project_id = project.id
+        chapter_id = chapter.id
         state = self._state_from_project(db, project, job.id)
         state.requested_model = request.model
         state.agent_model_configs = self._model_configs_for_workflow(db, "chapter_draft")
         state.current_chapter = chapter.chapter_no
-        state.current_chapter_outline = serialize_chapter(chapter)
+        current_chapter_outline = serialize_chapter(chapter)
+        if request.mode == "draft":
+            for stale_key in ("draft_text", "final_text", "summary", "revision_notes"):
+                current_chapter_outline[stale_key] = ""
+            current_chapter_outline["word_count"] = 0
+        state.current_chapter_outline = current_chapter_outline
         state.canon_context = self.build_canon_context(db, project_id, chapter_id)["canon_context"]
         # Commit the job row before the long model call, otherwise SQLite can hold a write transaction for the whole draft.
         db.commit()
@@ -1548,19 +1118,28 @@ class StudioService:
             ("draft_rewrite", {"integrated_draft": result.integrated_draft}),
             ("quality_gate", result.quality_gate),
             ("style_unifier", {"style_polished_text": result.style_polished_text, "final_chapter_text": result.final_chapter_text}),
+            ("post_length_review", {"review_notes": result.review_notes, "health_check_report": result.health_check_report.get("post_length_review", {})}),
             ("narrative_ledger", {"narrative_ledger": result.narrative_ledger}),
             ("canon_curator", result.candidate_canon_updates or result.canon_updates),
         ]:
             payload = self._with_llm_meta(payload, result, agent_name)
             self._record_agent_run(db, job, agent_name, payload, {"chapter": serialize_chapter(chapter)})
             self._snapshot(db, project_id, chapter_id, job.id, agent_name, "chapter", json.dumps(payload, ensure_ascii=False), "")
+        post_length_review = result.health_check_report.get("post_length_review") if isinstance(result.health_check_report, dict) else None
+        if isinstance(post_length_review, dict) and post_length_review.get("status") == "needs_revision":
+            final_words = post_length_review.get("final_words")
+            minimum_words = post_length_review.get("minimum_acceptable_words")
+            message = f"章节正文未达到最低字数要求：当前 {final_words or 0} 字，最低字数 {minimum_words or 0} 字。"
+            self._fail_job(db, job, ValueError(message))
+            db.commit()
+            raise _bad_request(message)
         chapter.draft_text = result.style_polished_text
         chapter.final_text = result.final_chapter_text
         chapter.summary = result.chapter_summary
         chapter.revision_notes = dumps(result.review_notes)
         chapter.status = "drafted"
         chapter.word_count = len(result.final_chapter_text.replace("\n", ""))
-        self._persist_canon_updates(db, project_id, chapter_id, result.canon_updates)
+        canon_proposals = self._create_canon_update_proposals(db, project_id, chapter_id, result.canon_updates, source_job_id=job.id)
         output = models.GenerationOutput(
             id=generate_id("out"),
             project_id=project_id,
@@ -1579,6 +1158,7 @@ class StudioService:
                     "fact_check_report": result.fact_check_report,
                     "narrative_ledger": result.narrative_ledger,
                     "canon_updates": result.canon_updates,
+                    "canon_proposals": canon_proposals,
                 }
             ),
         )
@@ -1595,6 +1175,7 @@ class StudioService:
                 "scene_outline": result.scene_outline,
                 "narrative_ledger": result.narrative_ledger,
                 "canon_updates": result.canon_updates,
+                "canon_proposals": canon_proposals,
                 "updated_characters": result.canon_updates.get("character_updates", []),
                 "updated_entities": result.canon_updates.get("entity_updates", []),
                 "updated_world_facts": result.canon_updates.get("world_fact_updates", []),
@@ -1669,6 +1250,9 @@ class StudioService:
         job = db.get(models.GenerationJob, job_id)
         if job is None:
             raise _not_found("任务不存在")
+        if self._reconcile_stale_running_job(db, job):
+            db.commit()
+            db.refresh(job)
         return {"job": serialize_job(job)}
 
     def list_jobs(self, db: Session, project_id: str | None = None, job_type: str | None = None, limit: int = 20) -> dict:
@@ -1678,6 +1262,13 @@ class StudioService:
         if job_type:
             query = query.filter(models.GenerationJob.job_type == job_type)
         jobs = query.order_by(models.GenerationJob.created_at.desc()).limit(max(1, min(limit, 100))).all()
+        stale_changed = False
+        for job in jobs:
+            stale_changed = self._reconcile_stale_running_job(db, job) or stale_changed
+        if stale_changed:
+            db.commit()
+            for job in jobs:
+                db.refresh(job)
         return {"jobs": [serialize_job(job) for job in jobs]}
 
     def get_agent_runs(self, db: Session, job_id: str) -> dict:
@@ -1689,25 +1280,23 @@ class StudioService:
         if job is None:
             raise _not_found("任务不存在")
         if job.job_type == "batch_generate":
-            progress = loads(job.progress_json, {})
-            result = loads(job.result_json, {}) if job.result_json else {}
-            completed_steps = len(result.get("chapter_results", [])) if isinstance(result, dict) else 0
-            total_steps = max(int(progress.get("total_steps", completed_steps or 1)), completed_steps or 1)
-            if isinstance(result, dict):
-                result["failed_chapters"] = []
-                job.result_json = dumps(result)
+            request = self._batch_request_from_job(job)
+            result_payload = self._batch_result_payload(job, request)
+            self._reconcile_batch_result_payload(db, job, request, result_payload)
+            job.result_json = dumps(result_payload)
             job.status = "queued"
             job.error_message = None
             job.cancel_requested = 0
             job.cancel_reason = ""
             job.finished_at = None
             job.progress_json = dumps(
-                {
-                    "current_step": "queued",
-                    "total_steps": total_steps,
-                    "completed_steps": completed_steps,
-                    "message": "批量任务已重新入队，将从失败或未完成章节继续",
-                }
+                self._batch_progress_payload(
+                    job,
+                    request,
+                    result_payload,
+                    current_step="queued",
+                    message="批量任务已重新入队，将从失败或未完成章节继续",
+                )
             )
             db.commit()
             db.refresh(job)
@@ -1901,14 +1490,6 @@ class StudioService:
                 ["/api/projects/{project_id}/story-bible/generate"],
                 "已接入 chapter_writing_service.run_initialization，用于故事圣经生成。",
             ),
-            "outline_generation": (
-                ["/api/projects/{project_id}/chapters/plan", "/api/projects/{project_id}/outline/book/generate"],
-                "已接入 OUTLINE_AGENT_SEQUENCE 和 outline_swarm，用于旧章节规划与新版总纲/卷纲生成。",
-            ),
-            "chapter_planning": (
-                ["/api/projects/{project_id}/chapters/plan"],
-                "已接入 chapter_writing_service.run_chapter_plan，并作为章节规划前置链路。",
-            ),
             "chapter_draft": (
                 ["/api/projects/{project_id}/chapters/{chapter_id}/draft", "/api/write/generate"],
                 "已接入 chapter_writing_service.run_chapter_draft，用于单章正文生成。",
@@ -2004,51 +1585,6 @@ class StudioService:
                 "layer": layer,
             }
 
-        outline_stage_by_agent = {
-            "editor_orchestrator": "S1",
-            "one_sentence_expansion": "S1",
-            "genre_market_position": "S2",
-            "world_bible": "S3",
-            "protagonist_arc": "S4",
-            "character_tree": "S5",
-            "faction_conflict": "S5",
-            "power_system": "S5",
-            "full_structure": "S7",
-            "volume_outline": "S9",
-            "beat_control": "S10",
-            "foreshadowing_manager": "S8",
-            "logic_audit": "S11",
-        }
-        outline_output_by_agent = {
-            "editor_orchestrator": ["dispatch_decision", "hard_requirements"],
-            "one_sentence_expansion": ["故事核心"],
-            "genre_market_position": ["类型卖点定位"],
-            "world_bible": ["世界圣经"],
-            "protagonist_arc": ["主角成长线"],
-            "character_tree": ["人物树"],
-            "faction_conflict": ["势力冲突表"],
-            "power_system": ["金手指升级体系"],
-            "full_structure": ["全书10卷总纲"],
-            "volume_outline": ["逐卷50章大纲"],
-            "beat_control": ["章节节拍表"],
-            "foreshadowing_manager": ["伏笔账本"],
-            "logic_audit": ["逻辑审计报告", "最终修订版纲要"],
-        }
-        outline_nodes = [
-            {
-                "id": agent_name,
-                "label": AGENT_SPECS_BY_NAME[agent_name].role,
-                "type": "agent",
-                "agent_name": agent_name,
-                "description": agent_descriptions.get(agent_name, agent_name),
-                "inputs": ["StoryState", "上游 Agent 输出"] if index else ["raw_worldview", "one_sentence_story", "ProjectConfig"],
-                "outputs": outline_output_by_agent.get(agent_name, []),
-                "editable": True,
-                "layer": index + 1,
-                "stage": outline_stage_by_agent.get(agent_name, "S0"),
-            }
-            for index, agent_name in enumerate(OUTLINE_AGENT_SEQUENCE)
-        ]
         workflows = [
             {
                 "id": "creation_star_session",
@@ -2151,16 +1687,6 @@ class StudioService:
                 "edges": [{"source": "chief_architect", "target": "canon_curator_init", "label": "抽取设定"}],
             },
             {
-                "id": "outline_generation",
-                "key": "outline_generation",
-                "label": "长篇大纲推演",
-                "nodes": outline_nodes,
-                "edges": [
-                    {"source": left, "target": right, "label": "写回 StoryState"}
-                    for left, right in zip(OUTLINE_AGENT_SEQUENCE, OUTLINE_AGENT_SEQUENCE[1:])
-                ],
-            },
-            {
                 "id": "outline_debate_engine",
                 "key": "outline_debate_engine",
                 "label": "大纲议事引擎",
@@ -2184,20 +1710,6 @@ class StudioService:
                     {"source": "debate_character_generator", "target": "debate_user_confirm", "label": "确认后角色入库"},
                     {"source": "debate_setting_generator", "target": "debate_user_confirm", "label": "确认后设定入库"},
                     {"source": "debate_chapters", "target": "debate_user_confirm", "label": "单章候选待确认"},
-                ],
-            },
-            {
-                "id": "chapter_planning",
-                "key": "chapter_planning",
-                "label": "章节规划",
-                "nodes": [
-                    agent_node("chapter_planner", "章节规划 Agent", "chapter_planner", ["outline", "canon_context"], ["chapters"], 1),
-                    agent_node("reviewer_plan", "审核修改 Agent", "reviewer", ["chapters"], ["review_notes"], 2),
-                    agent_node("canon_curator_plan", "设定整理 Agent", "canon_curator", ["chapters", "review_notes"], ["canon_updates"], 3),
-                ],
-                "edges": [
-                    {"source": "chapter_planner", "target": "reviewer_plan", "label": "审校规划"},
-                    {"source": "reviewer_plan", "target": "canon_curator_plan", "label": "整理设定"},
                 ],
             },
             {
@@ -2356,6 +1868,7 @@ class StudioService:
             self._folder_node("folder:entities", "root", "剧情实体", 20),
             self._folder_node("folder:world_facts", "root", "世界观事实", 30),
             self._folder_node("folder:foreshadowing", "root", "伏笔", 40),
+            self._folder_node("folder:graph_edges", "root", "关系图谱", 50),
         ]
         group_nodes: dict[str, dict[str, Any]] = {}
 
@@ -2502,6 +2015,24 @@ class StudioService:
             payload["parent_id"] = metadata.get("custom_folder_id") or metadata.get("display_parent_id") or group_id
             nodes.append(payload)
 
+        for row in db.query(models.GraphEdge).filter(models.GraphEdge.project_id == project_id).order_by(models.GraphEdge.updated_at.desc()).all():
+            content = self._canon_ref_content("graph_edge", row)
+            node = self._ensure_canon_node(
+                db,
+                project_id,
+                "graph_edge",
+                row.id,
+                self._canon_ref_title("graph_edge", content),
+                "medium",
+                "active",
+                {"group": "folder:graph_edges", "source_chapter_id": row.source_chapter_id},
+                parent_id="folder:graph_edges",
+            )
+            payload = serialize_canon_node(node, content)
+            metadata = payload.get("metadata", {})
+            payload["parent_id"] = metadata.get("custom_folder_id") or metadata.get("display_parent_id") or "folder:graph_edges"
+            nodes.append(payload)
+
         db.commit()
         custom_folders = []
         for folder in (
@@ -2514,7 +2045,7 @@ class StudioService:
             metadata = payload.get("metadata", {})
             payload["parent_id"] = metadata.get("display_parent_id") or folder.parent_id or "root"
             custom_folders.append(payload)
-        return {"nodes": [*nodes[:7], *group_nodes.values(), *custom_folders, *nodes[7:]], "health": self._canon_health(db, project_id)}
+        return {"nodes": [*nodes[:8], *group_nodes.values(), *custom_folders, *nodes[8:]], "health": self._canon_health(db, project_id)}
 
     def get_canon_health(self, db: Session, project_id: str) -> dict:
         self._project(db, project_id)
@@ -2765,13 +2296,122 @@ class StudioService:
     def list_canon_versions(self, db: Session, project_id: str, ref_type: str, ref_id: str) -> dict:
         ref_type = self._normalize_canon_ref_type(ref_type)
         self._project(db, project_id)
+        chapter_lookup = self._chapter_summary_lookup(db, project_id)
         versions = (
             db.query(models.CanonVersion)
             .filter(models.CanonVersion.project_id == project_id, models.CanonVersion.ref_type == ref_type, models.CanonVersion.ref_id == ref_id)
             .order_by(models.CanonVersion.version_no.asc())
             .all()
         )
-        return {"versions": [serialize_canon_version(row) for row in versions]}
+        return {"versions": [self._enrich_source_chapter(serialize_canon_version(row), chapter_lookup) for row in versions]}
+
+    def get_canon_version_timeline(
+        self,
+        db: Session,
+        project_id: str,
+        *,
+        ref_type: str | None = None,
+        ref_id: str | None = None,
+        chapter_id: str | None = None,
+    ) -> dict:
+        self._project(db, project_id)
+        normalized_ref_type = self._normalize_canon_ref_type(ref_type) if ref_type else None
+        chapter_lookup = self._chapter_summary_lookup(db, project_id)
+        chapter_rows = (
+            db.query(models.Chapter)
+            .filter(models.Chapter.project_id == project_id, models.Chapter.deleted_at.is_(None))
+            .order_by(models.Chapter.sort_order.asc(), models.Chapter.chapter_no.asc())
+            .all()
+        )
+        timeline_by_chapter: dict[str, dict[str, Any]] = {
+            chapter.id: {
+                "chapter": self._chapter_summary(chapter),
+                "versions": [],
+                "proposals": [],
+                "snapshots": [],
+                "events": [],
+            }
+            for chapter in chapter_rows
+        }
+        unbound = {"versions": [], "proposals": [], "snapshots": [], "events": []}
+        events: list[dict[str, Any]] = []
+
+        version_query = db.query(models.CanonVersion).filter(models.CanonVersion.project_id == project_id)
+        if normalized_ref_type:
+            version_query = version_query.filter(models.CanonVersion.ref_type == normalized_ref_type)
+        if ref_id:
+            version_query = version_query.filter(models.CanonVersion.ref_id == ref_id)
+        if chapter_id:
+            version_query = version_query.filter(models.CanonVersion.source_chapter_id == chapter_id)
+        versions = version_query.order_by(models.CanonVersion.created_at.asc(), models.CanonVersion.version_no.asc()).all()
+        for row in versions:
+            payload = self._enrich_source_chapter(serialize_canon_version(row), chapter_lookup)
+            event = {
+                **payload,
+                "event_type": "version",
+                "chapter": payload.get("source_chapter"),
+                "title": self._canon_ref_title(row.ref_type, payload.get("content", {})),
+            }
+            self._append_timeline_event(timeline_by_chapter, unbound, row.source_chapter_id, "versions", payload, event)
+            events.append(event)
+
+        proposal_query = db.query(models.CanonChangeProposal).filter(models.CanonChangeProposal.project_id == project_id)
+        if normalized_ref_type:
+            proposal_query = proposal_query.filter(models.CanonChangeProposal.target_type == normalized_ref_type)
+        if ref_id:
+            proposal_query = proposal_query.filter(models.CanonChangeProposal.target_id == ref_id)
+        if chapter_id:
+            proposal_query = proposal_query.filter(models.CanonChangeProposal.source_chapter_id == chapter_id)
+        proposals = proposal_query.order_by(models.CanonChangeProposal.created_at.asc()).all()
+        for row in proposals:
+            payload = self._enrich_source_chapter(serialize_canon_proposal(row), chapter_lookup)
+            event = {
+                **payload,
+                "event_type": "proposal",
+                "ref_type": payload["target_type"],
+                "ref_id": payload.get("target_id"),
+                "chapter": payload.get("source_chapter"),
+                "title": self._canon_ref_title(payload["target_type"], payload.get("after", {})),
+            }
+            self._append_timeline_event(timeline_by_chapter, unbound, row.source_chapter_id, "proposals", payload, event)
+            events.append(event)
+
+        snapshot_query = db.query(models.VersionSnapshot).filter(models.VersionSnapshot.project_id == project_id)
+        if chapter_id:
+            snapshot_query = snapshot_query.filter(models.VersionSnapshot.chapter_id == chapter_id)
+        if normalized_ref_type or ref_id:
+            snapshot_rows = []
+        else:
+            snapshot_rows = snapshot_query.order_by(models.VersionSnapshot.created_at.asc()).all()
+        for row in snapshot_rows:
+            payload = serialize_version_snapshot(row)
+            payload = self._enrich_source_chapter({**payload, "source_chapter_id": row.chapter_id}, chapter_lookup)
+            event = {
+                **payload,
+                "event_type": "snapshot",
+                "ref_type": "chapter",
+                "ref_id": row.chapter_id,
+                "chapter": payload.get("source_chapter"),
+                "title": f"{row.agent_name} · {row.content_type}",
+            }
+            self._append_timeline_event(timeline_by_chapter, unbound, row.chapter_id, "snapshots", payload, event)
+            events.append(event)
+
+        events.sort(key=lambda item: item.get("created_at") or "")
+        chapters = list(timeline_by_chapter.values())
+        return {
+            "chapters": chapters,
+            "events": events,
+            "unbound": unbound,
+            "summary": {
+                "chapter_count": len(chapters),
+                "event_count": len(events),
+                "version_count": len(versions),
+                "proposal_count": len(proposals),
+                "snapshot_count": len(snapshot_rows),
+            },
+            "filters": {"ref_type": normalized_ref_type, "ref_id": ref_id, "chapter_id": chapter_id},
+        }
 
     def rollback_canon_version(self, db: Session, project_id: str, ref_type: str, ref_id: str, version_id: str, request: CanonRollbackRequest) -> dict:
         ref_type = self._normalize_canon_ref_type(ref_type)
@@ -2817,11 +2457,12 @@ class StudioService:
 
     def list_canon_proposals(self, db: Session, project_id: str, status: str | None = None) -> dict:
         self._project(db, project_id)
+        chapter_lookup = self._chapter_summary_lookup(db, project_id)
         query = db.query(models.CanonChangeProposal).filter(models.CanonChangeProposal.project_id == project_id)
         if status:
             query = query.filter(models.CanonChangeProposal.approval_status == status)
         rows = query.order_by(models.CanonChangeProposal.created_at.desc()).all()
-        return {"proposals": [serialize_canon_proposal(row) for row in rows]}
+        return {"proposals": [self._enrich_source_chapter(serialize_canon_proposal(row), chapter_lookup) for row in rows]}
 
     def approve_canon_proposal(self, db: Session, project_id: str, proposal_id: str, request: CanonProposalDecisionRequest | None = None) -> dict:
         proposal = db.get(models.CanonChangeProposal, proposal_id)
@@ -2963,6 +2604,53 @@ class StudioService:
                 ),
             )
             applied = {"ref_type": "world_fact", "ref_id": result["world_fact"]["id"], "item": result["world_fact"]}
+        elif target_type == "foreshadowing":
+            result = self.create_foreshadowing(
+                db,
+                project_id,
+                CreateForeshadowingRequest(
+                    chapter_id=payload.get("chapter_id") or proposal.source_chapter_id,
+                    content=str(payload.get("content") or "未命名伏笔"),
+                    planted_chapter_id=payload.get("planted_chapter_id") or proposal.source_chapter_id,
+                    planned_payoff_chapter_id=payload.get("planned_payoff_chapter_id"),
+                    actual_payoff_chapter_id=payload.get("actual_payoff_chapter_id"),
+                    planned_payoff=str(payload.get("planned_payoff") or ""),
+                    payoff_status=payload.get("payoff_status") or "planned",
+                    importance_level=payload.get("importance_level") or "medium",
+                    importance_score=int(payload.get("importance_score") or 50),
+                    related_character_ids=list(payload.get("related_character_ids") or []),
+                    related_entity_ids=list(payload.get("related_entity_ids") or []),
+                    source="agent",
+                ),
+            )
+            applied = {"ref_type": "foreshadowing", "ref_id": result["foreshadowing_item"]["id"], "item": result["foreshadowing_item"]}
+        elif target_type == "graph_edge":
+            edge = self._create_graph_edge_from_payload(db, project_id, payload, source_chapter_id=proposal.source_chapter_id)
+            db.flush()
+            content = self._canon_ref_content("graph_edge", edge)
+            version = self._record_canon_version(
+                db,
+                project_id,
+                "graph_edge",
+                edge.id,
+                content,
+                source_chapter_id=proposal.source_chapter_id,
+                source_job_id=proposal.source_job_id,
+                source_agent=proposal.source_agent,
+                change_reason=request.user_note if request and request.user_note else proposal.reason,
+                confidence=proposal.confidence,
+            )
+            self._ensure_canon_node(
+                db,
+                project_id,
+                "graph_edge",
+                edge.id,
+                self._canon_ref_title("graph_edge", content),
+                "medium",
+                "active",
+                {"last_proposal_id": proposal.id},
+            )
+            applied = {"ref_type": "graph_edge", "ref_id": edge.id, "item": content, "version": serialize_canon_version(version)}
         else:
             raise _bad_request("不支持的设定候选类型", {"target_type": proposal.target_type})
         proposal.approval_status = "approved"
@@ -3742,6 +3430,9 @@ class StudioService:
         entities = db.query(models.StoryEntity).filter(models.StoryEntity.project_id == project_id).order_by(models.StoryEntity.importance_score.desc()).limit(20).all()
         issues = db.query(models.ContinuityIssue).filter(models.ContinuityIssue.project_id == project_id, models.ContinuityIssue.status == "open").limit(20).all()
         chapter = db.get(models.Chapter, chapter_id) if chapter_id else None
+        previous_query = db.query(models.Chapter).filter(models.Chapter.project_id == project_id, models.Chapter.summary != "")
+        if chapter is not None:
+            previous_query = previous_query.filter(models.Chapter.chapter_no < chapter.chapter_no)
         context = {
             "project": serialize_project(project),
             "story_bible": serialize_story_bible(story_bible) if story_bible else None,
@@ -3751,7 +3442,7 @@ class StudioService:
             "story_entities": [serialize_story_entity(item) for item in entities],
             "graph": self.get_graph(db, project_id, chapter_id).get("graph", {}),
             "unresolved_continuity_issues": [serialize_continuity_issue(item) for item in issues],
-            "previous_summaries": [serialize_chapter(item) for item in db.query(models.Chapter).filter(models.Chapter.project_id == project_id, models.Chapter.summary != "").order_by(models.Chapter.chapter_no.desc()).limit(5).all()],
+            "previous_summaries": [serialize_chapter(item) for item in previous_query.order_by(models.Chapter.chapter_no.desc()).limit(5).all()],
         }
         return {"canon_context": context}
 
@@ -3987,24 +3678,10 @@ class StudioService:
         return {"answer": "已根据当前设定集返回相关条目。", "matches": matches[:10]}
 
     def write_generate(self, db: Session, request: WriteGenerateRequest) -> dict:
-        if request.workflow_type == "plan_chapters":
-            return self.plan_chapters(
-                db,
-                request.project_id,
-                PlanChaptersRequest(
-                    volume_title="自动规划",
-                    start_chapter_no=1,
-                    chapter_count=3,
-                    outline_requirement=request.instruction or "规划下一组章节",
-                    overwrite_existing=True,
-                    idempotency_key=f"write-plan:{request.project_id}:{len(request.instruction)}",
-                    model=request.model,
-                ),
-            )
         if not request.chapter_id:
             chapters = db.query(models.Chapter).filter(models.Chapter.project_id == request.project_id).order_by(models.Chapter.chapter_no.asc()).all()
             if not chapters:
-                raise _bad_request("项目还没有章节，请先生成章节规划")
+                raise _bad_request("项目还没有章节，请先在大纲议事中确认章纲，或手动创建章节")
             request.chapter_id = chapters[0].id
         return self.draft_chapter(db, request.project_id, request.chapter_id, DraftChapterRequest(user_instruction=request.instruction, model=request.model))
 
@@ -4081,6 +3758,200 @@ class StudioService:
         allowed = {field: payload[field] for field in BatchGenerateRequest.model_fields if field in payload}
         return BatchGenerateRequest.model_validate(allowed)
 
+    def _chapter_step_label(self, agent_name: str | None) -> str:
+        if not agent_name:
+            return "章节生成"
+        return CHAPTER_DRAFT_STEP_LABELS.get(agent_name, agent_name)
+
+    def _failed_batch_chapter_numbers(self, result_payload: dict[str, Any]) -> list[int]:
+        numbers: list[int] = []
+        for item in result_payload.get("failed_chapters", []):
+            if not isinstance(item, dict):
+                continue
+            try:
+                numbers.append(int(item.get("chapter_no")))
+            except (TypeError, ValueError):
+                continue
+        return sorted(set(numbers))
+
+    def _batch_progress_payload(
+        self,
+        job: models.GenerationJob,
+        request: BatchGenerateRequest,
+        result_payload: dict[str, Any],
+        *,
+        current_step: str,
+        message: str,
+        current_chapter_no: int | None = None,
+        child_job_id: str | None = None,
+        child_current_step: str | None = None,
+        child_current_step_status: str | None = None,
+        child_total_steps: int | None = None,
+        child_completed_steps: int | None = None,
+    ) -> dict[str, Any]:
+        total_chapters = max(1, request.chapter_end - request.chapter_start + 1)
+        completed_chapters = len(self._completed_batch_chapter_numbers(result_payload))
+        failed_chapters = self._failed_batch_chapter_numbers(result_payload)
+        child_fraction = 0.0
+        if child_total_steps and child_total_steps > 0 and child_completed_steps is not None:
+            child_fraction = min(1.0, max(0.0, child_completed_steps / child_total_steps))
+        overall_percent = 100 if completed_chapters >= total_chapters else round(((completed_chapters + child_fraction) / total_chapters) * 100)
+        started_at = job.started_at or job.created_at
+        elapsed_seconds: int | None = None
+        average_chapter_seconds: int | None = None
+        eta_seconds: int | None = None
+        if started_at:
+            now = utcnow()
+            if started_at.tzinfo is None and now.tzinfo is not None:
+                now = now.replace(tzinfo=None)
+            elif started_at.tzinfo is not None and now.tzinfo is None:
+                started_at = started_at.replace(tzinfo=None)
+            elapsed_seconds = max(0, int((now - started_at).total_seconds()))
+            if completed_chapters > 0 and elapsed_seconds > 0:
+                average_chapter_seconds = max(1, int(elapsed_seconds / completed_chapters))
+                remaining = max(0.0, total_chapters - completed_chapters - child_fraction)
+                eta_seconds = int(average_chapter_seconds * remaining)
+        long_task = total_chapters >= 10
+        long_task_advice: list[str] = []
+        if long_task:
+            long_task_advice.append("建议按分卷或 20-50 章分批观察质量，再继续更长范围。")
+            long_task_advice.append("保持浏览器打开可看实时进度；关闭后可用任务 ID 恢复。")
+        if failed_chapters:
+            long_task_advice.append("失败章节会保留在结果里，点击重试会从未完成章节继续。")
+        payload: dict[str, Any] = {
+            "current_step": current_step,
+            "total_steps": total_chapters,
+            "completed_steps": completed_chapters,
+            "current_chapter_no": current_chapter_no,
+            "message": message,
+            "total_chapters": total_chapters,
+            "completed_chapters": completed_chapters,
+            "overall_percent": min(100, max(0, overall_percent)),
+            "elapsed_seconds": elapsed_seconds,
+            "average_chapter_seconds": average_chapter_seconds,
+            "eta_seconds": eta_seconds,
+            "retryable_failed_chapters": failed_chapters,
+            "long_task": long_task,
+            "long_task_advice": long_task_advice,
+        }
+        if child_current_step:
+            payload.update(
+                {
+                    "child_job_id": child_job_id,
+                    "child_current_step": child_current_step,
+                    "child_current_step_status": child_current_step_status,
+                    "child_step_label": self._chapter_step_label(child_current_step),
+                    "child_total_steps": child_total_steps,
+                    "child_completed_steps": child_completed_steps,
+                }
+            )
+        return payload
+
+    def _seconds_since_job_heartbeat(self, job: models.GenerationJob) -> int | None:
+        heartbeat = job.heartbeat_at or job.started_at or job.created_at
+        if heartbeat is None:
+            return None
+        now = utcnow()
+        if heartbeat.tzinfo is None and now.tzinfo is not None:
+            now = now.replace(tzinfo=None)
+        elif heartbeat.tzinfo is not None and now.tzinfo is None:
+            heartbeat = heartbeat.replace(tzinfo=None)
+        return max(0, int((now - heartbeat).total_seconds()))
+
+    def _is_stale_running_job(self, job: models.GenerationJob) -> bool:
+        if job.status != "running":
+            return False
+        elapsed = self._seconds_since_job_heartbeat(job)
+        return elapsed is not None and elapsed >= RUNNING_JOB_STALE_SECONDS
+
+    def _batch_current_chapter_no_from_progress(self, progress: dict[str, Any]) -> int | None:
+        raw_chapter_no = progress.get("current_chapter_no")
+        try:
+            if raw_chapter_no is not None:
+                return int(raw_chapter_no)
+        except (TypeError, ValueError):
+            pass
+        current_step = str(progress.get("current_step") or "")
+        match = re.search(r"chapter_(\d+)", current_step)
+        if match:
+            return int(match.group(1))
+        return None
+
+    def _mark_stale_child_job_failed(self, job: models.GenerationJob, message: str) -> None:
+        progress = loads(job.progress_json, {})
+        job.status = "failed"
+        job.error_message = message
+        job.finished_at = utcnow()
+        job.heartbeat_at = utcnow()
+        job.progress_json = dumps(
+            {
+                "current_step": "failed",
+                "total_steps": progress.get("total_steps", 1),
+                "completed_steps": progress.get("completed_steps", 0),
+                "current_chapter_no": progress.get("current_chapter_no"),
+                "message": message,
+                "retryable": True,
+                "stale": True,
+            }
+        )
+
+    def _mark_stale_batch_job_failed(self, db: Session, job: models.GenerationJob, message: str) -> bool:
+        progress = loads(job.progress_json, {})
+        if not isinstance(progress, dict):
+            progress = {}
+        child_job_id = str(progress.get("child_job_id") or "")
+        if child_job_id:
+            child_job = db.get(models.GenerationJob, child_job_id)
+            if child_job is not None and child_job.status == "running":
+                if not self._is_stale_running_job(child_job):
+                    return False
+                self._mark_stale_child_job_failed(child_job, message)
+        request = self._batch_request_from_job(job)
+        result_payload = self._batch_result_payload(job, request)
+        current_chapter_no = self._batch_current_chapter_no_from_progress(progress)
+        if current_chapter_no is not None:
+            result_payload["failed_chapters"] = [
+                item
+                for item in result_payload.get("failed_chapters", [])
+                if not isinstance(item, dict) or int(item.get("chapter_no", -1)) != current_chapter_no
+            ]
+            result_payload["failed_chapters"].append(
+                {
+                    "chapter_no": current_chapter_no,
+                    "message": message,
+                    "failed_at": isoformat(utcnow()),
+                    "retryable": True,
+                    "source": "stale_job_reconciliation",
+                }
+            )
+        job.status = "failed"
+        job.error_message = message
+        job.finished_at = utcnow()
+        job.heartbeat_at = utcnow()
+        job.result_json = dumps(result_payload)
+        job.progress_json = dumps(
+            self._batch_progress_payload(
+                job,
+                request,
+                result_payload,
+                current_step="failed",
+                current_chapter_no=current_chapter_no,
+                message="后台任务中断，已保留完成章节；点击重试会从未完成章节继续。",
+            )
+        )
+        return True
+
+    def _reconcile_stale_running_job(self, db: Session, job: models.GenerationJob) -> bool:
+        if not self._is_stale_running_job(job):
+            return False
+        message = "后台任务中断或服务重启，任务已标记为失败；点击重试可从未完成章节继续。"
+        if job.job_type == "batch_generate":
+            return self._mark_stale_batch_job_failed(db, job, message)
+        if job.job_type == "draft_chapter":
+            self._mark_stale_child_job_failed(job, message)
+            return True
+        return False
+
     def _enqueue_batch_job(self, job_id: str) -> None:
         self._ensure_batch_worker()
         self._batch_job_queue.put(job_id)
@@ -4109,6 +3980,287 @@ class StudioService:
             finally:
                 self._batch_job_queue.task_done()
 
+    def _batch_fast_draft_enabled(self, request: BatchGenerateRequest) -> bool:
+        options = request.generation_options if isinstance(request.generation_options, dict) else {}
+        return bool(options.get("fast_draft") or options.get("draft_mode") == "fast_draft")
+
+    def _clean_fast_draft_text(self, text: str, chapter_no: int) -> str:
+        cleaned = str(text or "").strip()
+        cleaned = re.sub(r"^```(?:markdown|text)?", "", cleaned).strip()
+        cleaned = re.sub(r"```$", "", cleaned).strip()
+        lines = [line.rstrip() for line in cleaned.splitlines()]
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        if lines and (lines[0].lstrip().startswith("#") or re.match(rf"^\s*第\s*{chapter_no}\s*章", lines[0])):
+            lines.pop(0)
+        return "\n".join(lines).strip()
+
+    def _fast_draft_text_length(self, text: str) -> int:
+        return len(str(text or "").replace("\r", "").replace("\n", ""))
+
+    def _fast_draft_length_band(self, chapter_target: int) -> tuple[int, int]:
+        target = int(chapter_target or DEFAULT_CHAPTER_WORD_TARGET)
+        target = max(1, target)
+        upper_buffer = max(50, int(target * 0.05))
+        return target, target + upper_buffer
+
+    def _close_fast_draft_terminal_quote(self, text: str) -> str:
+        stripped = str(text or "").rstrip()
+        if not stripped or stripped[-1] not in set("。！？!?…；;"):
+            return stripped
+        candidate_close_mark: str | None = None
+        candidate_index = -1
+        for open_mark, close_mark in (("“", "”"), ("‘", "’"), ("「", "」"), ("『", "』")):
+            open_index = stripped.rfind(open_mark)
+            if open_index > stripped.rfind(close_mark) and open_index > candidate_index:
+                candidate_index = open_index
+                candidate_close_mark = close_mark
+        ascii_quote_index = stripped.rfind('"')
+        if stripped.count('"') % 2 == 1 and ascii_quote_index > candidate_index:
+            candidate_close_mark = '"'
+        if candidate_close_mark:
+            return stripped + candidate_close_mark
+        return stripped
+
+    def _trim_fast_draft_text_to_band(self, text: str, minimum_words: int, maximum_words: int) -> str:
+        cleaned = str(text or "").strip()
+        if self._fast_draft_text_length(cleaned) <= maximum_words:
+            return self._close_fast_draft_terminal_quote(cleaned)
+        minimum_words = max(1, int(minimum_words))
+        maximum_words = max(minimum_words, int(maximum_words))
+        sentence_breaks = set("。！？!?…；;」』”’）)】》")
+        sentence_lookahead = max(100, int(minimum_words * 0.03))
+        hard_maximum_words = maximum_words + sentence_lookahead
+        visible_count = 0
+        hard_cut_index = len(cleaned)
+        best_sentence_index: int | None = None
+        next_sentence_index: int | None = None
+        for index, char in enumerate(cleaned):
+            if char not in {"\r", "\n"}:
+                visible_count += 1
+            if minimum_words <= visible_count <= maximum_words and char in sentence_breaks:
+                best_sentence_index = index + 1
+            elif maximum_words < visible_count <= hard_maximum_words and char in sentence_breaks:
+                next_sentence_index = index + 1
+                break
+            if visible_count >= maximum_words:
+                hard_cut_index = index + 1
+            if visible_count >= hard_maximum_words:
+                break
+        cut_index = best_sentence_index or next_sentence_index or hard_cut_index
+        closing_marks = set("”’」』）)】》")
+        while cut_index < len(cleaned) and cleaned[cut_index] in closing_marks:
+            cut_index += 1
+        return self._close_fast_draft_terminal_quote(cleaned[:cut_index])
+
+    def _fast_draft_parent_progress(
+        self,
+        db: Session,
+        parent_job_id: str | None,
+        parent_chapter_no: int | None,
+        parent_total_steps: int | None,
+        child_job: models.GenerationJob,
+        message: str,
+    ) -> None:
+        if not parent_job_id or not parent_chapter_no or not parent_total_steps:
+            return
+        parent_job = db.get(models.GenerationJob, parent_job_id)
+        if parent_job is None or parent_job.status in {"succeeded", "failed", "cancelled"}:
+            return
+        request = self._batch_request_from_job(parent_job)
+        result_payload = self._batch_result_payload(parent_job, request)
+        parent_job.status = "running"
+        parent_job.current_agent = f"batch_generate:chapter_{parent_chapter_no}:fast_draft"
+        parent_job.heartbeat_at = utcnow()
+        progress = self._batch_progress_payload(
+            parent_job,
+            request,
+            result_payload,
+            current_step=f"chapter_{parent_chapter_no}:fast_draft",
+            current_chapter_no=parent_chapter_no,
+            message=message,
+        )
+        child_progress = loads(child_job.progress_json, {})
+        progress.update(
+            {
+                "child_job_id": child_job.id,
+                "child_current_step": "fast_draft",
+                "child_current_step_status": child_job.status,
+                "child_step_label": "快速正文",
+                "child_total_steps": 1,
+                "child_completed_steps": child_progress.get("completed_steps", 0),
+            }
+        )
+        parent_job.progress_json = dumps(progress)
+
+    def _generate_fast_batch_chapter(
+        self,
+        db: Session,
+        project_id: str,
+        chapter_id: str,
+        request: BatchGenerateRequest,
+        chapter_max_words: int,
+        attempt: int,
+        *,
+        parent_job_id: str | None,
+        parent_chapter_no: int | None,
+        parent_total_steps: int | None,
+    ) -> dict[str, Any]:
+        project = self._project(db, project_id)
+        chapter = self._chapter(db, project_id, chapter_id)
+        idem = f"batch-fast:{parent_job_id}:{chapter_id}:attempt:{attempt}"
+        existing = (
+            db.query(models.GenerationJob)
+            .filter(models.GenerationJob.project_id == project_id, models.GenerationJob.idempotency_key == idem)
+            .first()
+        )
+        if existing:
+            return {"job": serialize_job(existing), "chapter": serialize_chapter(chapter)}
+
+        child_job = self._create_job(
+            db,
+            project_id,
+            chapter_id,
+            "draft_chapter_fast",
+            request.model,
+            {
+                "mode": "fast_draft",
+                "chapter_no": chapter.chapter_no,
+                "max_words": chapter_max_words,
+                "generation_options": request.generation_options,
+            },
+            idem,
+            total_steps=1,
+            queued=False,
+        )
+        self._start_job(db, child_job)
+        self._fast_draft_parent_progress(db, parent_job_id, parent_chapter_no, parent_total_steps, child_job, f"第{chapter.chapter_no}章：快速正文正在执行")
+        canon_context = self.build_canon_context(db, project_id, chapter_id)["canon_context"]
+        previous_chapters = (
+            db.query(models.Chapter)
+            .filter(models.Chapter.project_id == project_id, models.Chapter.chapter_no < chapter.chapter_no, models.Chapter.deleted_at.is_(None))
+            .order_by(models.Chapter.chapter_no.desc())
+            .limit(3)
+            .all()
+        )
+        previous_summaries = [
+            {"chapter_no": item.chapter_no, "title": item.title, "summary": item.summary, "tail": (item.final_text or item.draft_text or "")[-500:]}
+            for item in reversed(previous_chapters)
+        ]
+        db.commit()
+        db.refresh(child_job)
+
+        system_prompt = (
+            "你是长篇小说快速正文 Agent。请直接输出中文小说正文，不要输出解释、目录、Markdown 标题或大纲。"
+            "必须遵守正典、章纲、视角和风格；正文要有完整场景推进、对话、行动、危机、高潮和结果。"
+        )
+        target_min_words, target_max_words = self._fast_draft_length_band(chapter_max_words)
+        user_payload = {
+            "project": serialize_project(project),
+            "chapter": serialize_chapter(chapter),
+            "canon_context": canon_context,
+            "previous_summaries": previous_summaries,
+            "target_words": chapter_max_words,
+            "target_word_min": target_min_words,
+            "target_word_max": target_max_words,
+            "instruction": (
+                f"生成第{chapter.chapter_no}章《{chapter.title}》完整正文，正文长度控制在 {target_min_words}-{target_max_words} 个中文字符之间，"
+                f"接近 {chapter_max_words} 字，不要超过 {target_max_words} 字，并在自然句子边界收束。"
+                "保持悬疑、制度压迫和规则漏洞爽点。只输出正文。"
+            ),
+        }
+        result = llm_client.generate(system_prompt, dumps(user_payload), request.model)
+        text = self._clean_fast_draft_text(result.content, chapter.chapter_no)
+        raw_word_count = self._fast_draft_text_length(text)
+        used_remote = bool(result.used_remote_model)
+        model_name = result.model
+        provider_name = result.provider
+        expansion_count = 0
+        while self._fast_draft_text_length(text) < target_min_words and expansion_count < 2:
+            current_words = self._fast_draft_text_length(text)
+            remaining_min = max(1, target_min_words - current_words)
+            remaining_max = max(remaining_min, target_max_words - current_words)
+            expand_payload = {
+                **user_payload,
+                "existing_text": text,
+                "current_words": current_words,
+                "remaining_word_min": remaining_min,
+                "remaining_word_max": remaining_max,
+                "instruction": (
+                    f"在不重复原文的前提下续写第{chapter.chapter_no}章，只补足 {remaining_min}-{remaining_max} 个中文字符。"
+                    f"合并后总长度必须控制在 {target_min_words}-{target_max_words} 字之间，并在自然句子边界收束。只输出可直接续接的正文段落。"
+                ),
+            }
+            expansion = llm_client.generate(system_prompt, dumps(expand_payload), request.model)
+            text = (text.rstrip() + "\n\n" + self._clean_fast_draft_text(expansion.content, chapter.chapter_no)).strip()
+            raw_word_count = self._fast_draft_text_length(text)
+            used_remote = bool(result.used_remote_model or expansion.used_remote_model)
+            model_name = expansion.model or result.model
+            provider_name = expansion.provider or result.provider
+            expansion_count += 1
+        text = self._trim_fast_draft_text_to_band(text, target_min_words, target_max_words)
+
+        summary = f"第{chapter.chapter_no}章《{chapter.title}》完成快速正文，围绕{chapter.core_event or chapter.outline}推进。"
+        chapter.draft_text = text
+        chapter.final_text = text
+        chapter.summary = summary
+        chapter.revision_notes = dumps(
+            {
+                "mode": "fast_draft",
+                "note": "20万字闭环压力测试快速正文。",
+                "target_word_min": target_min_words,
+                "target_word_max": target_max_words,
+            }
+        )
+        chapter.status = "drafted"
+        chapter.word_count = self._fast_draft_text_length(text)
+        output = models.GenerationOutput(
+            id=generate_id("out"),
+            project_id=project_id,
+            chapter_id=chapter_id,
+            job_id=child_job.id,
+            output_type="chapter_draft_fast",
+            title=chapter.title,
+            content=text,
+            summary=summary,
+            metadata_json=dumps(
+                {
+                    "mode": "fast_draft",
+                    "target_words": chapter_max_words,
+                    "target_word_min": target_min_words,
+                    "target_word_max": target_max_words,
+                    "actual_words": chapter.word_count,
+                    "raw_words": raw_word_count,
+                    "expansion_count": expansion_count,
+                    "trimmed_to_range": raw_word_count != chapter.word_count,
+                    "_llm": {
+                        "provider": provider_name,
+                        "model": model_name,
+                        "used_remote_model": used_remote,
+                    },
+                }
+            ),
+        )
+        db.add(output)
+        self._record_agent_run(
+            db,
+            child_job,
+            "fast_draft_writer",
+            {
+                "final_chapter_text": text,
+                "summary": summary,
+                "_llm": {"provider": provider_name, "model": model_name, "used_remote_model": used_remote},
+            },
+            {"chapter": serialize_chapter(chapter), "mode": "fast_draft"},
+        )
+        self._snapshot(db, project_id, chapter_id, child_job.id, "fast_draft_writer", "chapter", text, "快速正文生成")
+        self._finish_job(db, child_job, {"chapter": serialize_chapter(chapter), "draft_text": text, "polished_text": text, "mode": "fast_draft"})
+        self._fast_draft_parent_progress(db, parent_job_id, parent_chapter_no, parent_total_steps, child_job, f"第{chapter.chapter_no}章：快速正文已完成")
+        db.commit()
+        db.refresh(chapter)
+        db.refresh(child_job)
+        return {"job": serialize_job(child_job), "chapter": serialize_chapter(chapter)}
+
     def _run_batch_generate_job(self, job_id: str) -> None:
         with SessionLocal() as db:
             job = db.get(models.GenerationJob, job_id)
@@ -4117,6 +4269,7 @@ class StudioService:
             request = self._batch_request_from_job(job)
             chapter_numbers = list(range(request.chapter_start, request.chapter_end + 1))
             result_payload = self._batch_result_payload(job, request)
+            self._reconcile_batch_result_payload(db, job, request, result_payload)
             completed_numbers = self._completed_batch_chapter_numbers(result_payload)
             job.status = "running"
             job.started_at = job.started_at or utcnow()
@@ -4124,12 +4277,13 @@ class StudioService:
             job.heartbeat_at = utcnow()
             job.current_agent = "batch_generate"
             job.progress_json = dumps(
-                {
-                    "current_step": "running",
-                    "total_steps": len(chapter_numbers),
-                    "completed_steps": len(completed_numbers),
-                    "message": "批量正文生成后台任务已启动",
-                }
+                self._batch_progress_payload(
+                    job,
+                    request,
+                    result_payload,
+                    current_step="running",
+                    message="批量正文生成后台任务已启动",
+                )
             )
             job.result_json = dumps(result_payload)
             db.commit()
@@ -4159,22 +4313,40 @@ class StudioService:
                     db.commit()
                     return
                 chapter_id = chapter.id
-                attempt = self._batch_chapter_attempt(result_payload, chapter_no)
+                chapter_max_words = int(chapter.word_target or 0)
+                if chapter_max_words <= 0:
+                    project = db.get(models.Project, request.project_id)
+                    chapter_max_words = int((project.chapter_word_target if project else 0) or DEFAULT_CHAPTER_WORD_TARGET)
+                attempt = self._next_batch_chapter_attempt(db, job_id, chapter_id, result_payload, chapter_no)
             try:
                 with SessionLocal() as chapter_db:
-                    chapter_result = self.draft_chapter(
-                        chapter_db,
-                        request.project_id,
-                        chapter_id,
-                        DraftChapterRequest(
-                            user_instruction="批量生成",
-                            model=request.model,
-                            idempotency_key=f"batch:{job_id}:{chapter_id}:attempt:{attempt}",
-                        ),
-                        parent_job_id=job_id,
-                        parent_chapter_no=chapter_no,
-                        parent_total_steps=len(chapter_numbers),
-                    )
+                    if self._batch_fast_draft_enabled(request):
+                        chapter_result = self._generate_fast_batch_chapter(
+                            chapter_db,
+                            request.project_id,
+                            chapter_id,
+                            request,
+                            chapter_max_words,
+                            attempt,
+                            parent_job_id=job_id,
+                            parent_chapter_no=chapter_no,
+                            parent_total_steps=len(chapter_numbers),
+                        )
+                    else:
+                        chapter_result = self.draft_chapter(
+                            chapter_db,
+                            request.project_id,
+                            chapter_id,
+                            DraftChapterRequest(
+                                user_instruction=f"批量生成。请按本章目标字数约 {chapter_max_words} 字生成完整正文。",
+                                max_words=chapter_max_words,
+                                model=request.model,
+                                idempotency_key=f"batch:{job_id}:{chapter_id}:attempt:{attempt}",
+                            ),
+                            parent_job_id=job_id,
+                            parent_chapter_no=chapter_no,
+                            parent_total_steps=len(chapter_numbers),
+                        )
             except Exception as exc:
                 with SessionLocal() as db:
                     job = db.get(models.GenerationJob, job_id)
@@ -4225,13 +4397,14 @@ class StudioService:
             if job.status == "paused":
                 job.heartbeat_at = utcnow()
                 job.progress_json = dumps(
-                    {
-                        "current_step": "paused",
-                        "total_steps": total_steps,
-                        "completed_steps": len(completed_numbers),
-                        "current_chapter_no": chapter_no,
-                        "message": "批量任务已暂停，将在恢复后从未完成章节继续",
-                    }
+                    self._batch_progress_payload(
+                        job,
+                        request,
+                        result_payload,
+                        current_step="paused",
+                        current_chapter_no=chapter_no,
+                        message="批量任务已暂停，将在恢复后从未完成章节继续",
+                    )
                 )
                 db.commit()
                 return False
@@ -4239,13 +4412,14 @@ class StudioService:
             job.current_agent = f"batch_generate:chapter_{chapter_no}"
             job.heartbeat_at = utcnow()
             job.progress_json = dumps(
-                {
-                    "current_step": f"chapter_{chapter_no}",
-                    "total_steps": total_steps,
-                    "completed_steps": len(completed_numbers),
-                    "current_chapter_no": chapter_no,
-                    "message": f"正在生成第{chapter_no}章正文",
-                }
+                self._batch_progress_payload(
+                    job,
+                    request,
+                    result_payload,
+                    current_step=f"chapter_{chapter_no}",
+                    current_chapter_no=chapter_no,
+                    message=f"正在生成第{chapter_no}章正文",
+                )
             )
             db.commit()
             return True
@@ -4261,6 +4435,82 @@ class StudioService:
                 continue
         return numbers
 
+    def _reconcile_batch_result_payload(
+        self,
+        db: Session,
+        job: models.GenerationJob,
+        request: BatchGenerateRequest,
+        result_payload: dict[str, Any],
+    ) -> bool:
+        changed = False
+        valid_results: list[dict[str, Any]] = []
+        failed_chapters = [item for item in result_payload.get("failed_chapters", []) if isinstance(item, dict)]
+        failed_numbers = self._failed_batch_chapter_numbers({"failed_chapters": failed_chapters})
+        for item in result_payload.get("chapter_results", []):
+            if not isinstance(item, dict):
+                changed = True
+                continue
+            try:
+                chapter_no = int(item.get("chapter_no"))
+            except (TypeError, ValueError):
+                changed = True
+                continue
+            chapter = (
+                db.query(models.Chapter)
+                .filter(
+                    models.Chapter.project_id == job.project_id,
+                    models.Chapter.chapter_no == chapter_no,
+                    models.Chapter.deleted_at.is_(None),
+                )
+                .first()
+            )
+            chapter_text = (chapter.final_text or chapter.draft_text) if chapter is not None else ""
+            minimum_words = int(chapter.word_target or 0) if chapter is not None else 0
+            meets_length = minimum_words <= 0 or (chapter is not None and chapter.word_count >= minimum_words)
+            is_valid = (
+                chapter is not None
+                and chapter.status in {"drafted", "completed", "finalized"}
+                and chapter.word_count > 0
+                and meets_length
+                and bool(chapter_text.strip())
+            )
+            if is_valid:
+                refreshed = {
+                    **item,
+                    "chapter_no": chapter.chapter_no,
+                    "chapter_id": chapter.id,
+                    "title": chapter.title,
+                    "status": chapter.status,
+                    "word_count": chapter.word_count,
+                    "chapter": serialize_chapter(chapter),
+                }
+                valid_results.append(refreshed)
+                if refreshed != item:
+                    changed = True
+                continue
+            if chapter_no not in failed_numbers:
+                if chapter is not None and chapter.word_count > 0 and minimum_words > 0 and chapter.word_count < minimum_words:
+                    message = f"章节正文低于目标字数：当前 {chapter.word_count} 字，目标 {minimum_words} 字"
+                else:
+                    message = "章节正文未成功写入，已从完成结果剔除并等待重试"
+                failed_chapters.append(
+                    {
+                        "chapter_no": chapter_no,
+                        "message": message,
+                        "failed_at": isoformat(utcnow()),
+                        "retryable": True,
+                        "source": "batch_result_reconciliation",
+                    }
+                )
+                failed_numbers.append(chapter_no)
+            changed = True
+        valid_results.sort(key=lambda item: int(item.get("chapter_no", 0)))
+        if changed:
+            result_payload["chapter_results"] = valid_results
+            result_payload["failed_chapters"] = failed_chapters
+            result_payload["last_completed_chapter_no"] = valid_results[-1]["chapter_no"] if valid_results else None
+        return changed
+
     def _batch_chapter_attempt(self, result_payload: dict[str, Any], chapter_no: int) -> int:
         attempts = 1
         for item in result_payload.get("failed_chapters", []):
@@ -4273,6 +4523,33 @@ class StudioService:
                 continue
         return attempts
 
+    def _next_batch_chapter_attempt(
+        self,
+        db: Session,
+        job_id: str,
+        chapter_id: str,
+        result_payload: dict[str, Any],
+        chapter_no: int,
+    ) -> int:
+        next_attempt = self._batch_chapter_attempt(result_payload, chapter_no)
+        prefix = f"batch:{job_id}:{chapter_id}:attempt:"
+        existing_jobs = (
+            db.query(models.GenerationJob.idempotency_key)
+            .filter(
+                models.GenerationJob.job_type == "draft_chapter",
+                models.GenerationJob.chapter_id == chapter_id,
+                models.GenerationJob.idempotency_key.like(f"{prefix}%"),
+            )
+            .all()
+        )
+        max_existing_attempt = 0
+        for (idempotency_key,) in existing_jobs:
+            match = re.search(r":attempt:(\d+)$", idempotency_key or "")
+            if not match:
+                continue
+            max_existing_attempt = max(max_existing_attempt, int(match.group(1)))
+        return max(next_attempt, max_existing_attempt + 1)
+
     def _record_batch_chapter_success(
         self,
         db: Session,
@@ -4282,10 +4559,17 @@ class StudioService:
         chapter_result: dict[str, Any],
     ) -> None:
         result_payload = self._batch_result_payload(job, request)
+        child_job = chapter_result.get("job") if isinstance(chapter_result, dict) else None
+        if not isinstance(child_job, dict) or child_job.get("status") != "succeeded":
+            raise ValueError(f"第{chapter.chapter_no}章子任务未成功，不能记录为批量完成")
         chapter_payload = chapter_result.get("chapter") if isinstance(chapter_result, dict) else None
         if not isinstance(chapter_payload, dict):
             chapter_payload = serialize_chapter(chapter)
-        child_job = chapter_result.get("job") if isinstance(chapter_result, dict) else None
+        chapter_text = chapter.final_text or chapter.draft_text or ""
+        if chapter.status not in {"drafted", "completed", "finalized"} or chapter.word_count <= 0 or not chapter_text.strip():
+            raise ValueError(f"第{chapter.chapter_no}章正文未成功写入，不能记录为批量完成")
+        if chapter.word_target > 0 and chapter.word_count < chapter.word_target:
+            raise ValueError(f"第{chapter.chapter_no}章正文低于目标字数：当前 {chapter.word_count} 字，目标 {chapter.word_target} 字")
         chapter_summary = {
             "chapter_no": chapter.chapter_no,
             "chapter_id": chapter.id,
@@ -4319,13 +4603,14 @@ class StudioService:
         paused_after_current_chapter = job.status == "paused"
         job.status = "paused" if paused_after_current_chapter else "running"
         job.progress_json = dumps(
-            {
-                "current_step": "paused" if paused_after_current_chapter else f"chapter_{chapter.chapter_no}_done",
-                "total_steps": total_steps,
-                "completed_steps": completed_steps,
-                "current_chapter_no": chapter.chapter_no,
-                "message": f"第{chapter.chapter_no}章已完成并提交，任务已暂停" if paused_after_current_chapter else f"第{chapter.chapter_no}章已完成并提交",
-            }
+            self._batch_progress_payload(
+                job,
+                request,
+                result_payload,
+                current_step="paused" if paused_after_current_chapter else f"chapter_{chapter.chapter_no}_done",
+                current_chapter_no=chapter.chapter_no,
+                message=f"第{chapter.chapter_no}章已完成并提交，任务已暂停" if paused_after_current_chapter else f"第{chapter.chapter_no}章已完成并提交",
+            )
         )
 
     def _record_batch_chapter_failure(
@@ -4352,29 +4637,33 @@ class StudioService:
         job.heartbeat_at = utcnow()
         job.result_json = dumps(result_payload)
         job.progress_json = dumps(
-            {
-                "current_step": "failed",
-                "total_steps": total_steps,
-                "completed_steps": completed_steps,
-                "current_chapter_no": chapter_no,
-                "message": f"第{chapter_no}章生成失败，可重试继续",
-            }
+            self._batch_progress_payload(
+                job,
+                request,
+                result_payload,
+                current_step="failed",
+                current_chapter_no=chapter_no,
+                message=f"第{chapter_no}章生成失败，可重试继续",
+            )
         )
 
     def _mark_batch_cancelled(self, db: Session, job: models.GenerationJob) -> None:
+        request = self._batch_request_from_job(job)
+        result_payload = self._batch_result_payload(job, request)
         progress = loads(job.progress_json, {})
         job.status = "cancelled"
         job.cancel_requested = 1
         job.finished_at = utcnow()
         job.heartbeat_at = utcnow()
         job.progress_json = dumps(
-            {
-                "current_step": "cancelled",
-                "total_steps": progress.get("total_steps", 1),
-                "completed_steps": progress.get("completed_steps", 0),
-                "current_chapter_no": progress.get("current_chapter_no"),
-                "message": "批量任务已取消",
-            }
+            self._batch_progress_payload(
+                job,
+                request,
+                result_payload,
+                current_step="cancelled",
+                current_chapter_no=progress.get("current_chapter_no"),
+                message="批量任务已取消",
+            )
         )
 
     def export(self, db: Session, request: ExportRequest) -> dict:
@@ -4450,7 +4739,7 @@ class StudioService:
             chapter_count = volume_count * chapters_per_volume
         chapter_word_min = positive_int(
             basic_info.get("chapter_word_min"),
-            basic_info.get("chapter_word_target") or project.chapter_word_target or 2200,
+            basic_info.get("chapter_word_target") or project.chapter_word_target or DEFAULT_CHAPTER_WORD_TARGET,
             minimum=500,
             maximum=20000,
         )
@@ -4504,6 +4793,22 @@ class StudioService:
             "style": str(basic_info.get("style") or project.style_guide or "清晰、有悬念"),
             "initial_idea": str(basic_info.get("initial_idea") or project.initial_idea or project.premise),
         }
+
+    def _apply_creation_basic_to_project(self, project: models.Project, basic: dict[str, Any]) -> None:
+        project.genre = str(basic.get("genre") or project.genre or "")
+        project.target_reader = str(basic.get("target_reader") or project.target_reader or "")
+        project.target_words = int(basic.get("target_words") or project.target_words or 0)
+        project.planned_chapter_count = int(
+            basic.get("chapter_count") or basic.get("planned_chapter_count") or project.planned_chapter_count or 1
+        )
+        project.planned_volume_count = int(basic.get("volume_count") or project.planned_volume_count or 1)
+        project.chapters_per_volume = int(basic.get("chapters_per_volume") or project.chapters_per_volume or 1)
+        project.chapter_word_target = int(basic.get("chapter_word_target") or project.chapter_word_target or DEFAULT_CHAPTER_WORD_TARGET)
+        project.chapter_word_min = int(basic.get("chapter_word_min") or project.chapter_word_min or project.chapter_word_target)
+        project.chapter_word_max = int(basic.get("chapter_word_max") or project.chapter_word_max or project.chapter_word_target)
+        project.initial_idea = str(basic.get("initial_idea") or project.initial_idea or "")
+        project.style_guide = str(basic.get("style") or project.style_guide or "")
+        project.updated_at = utcnow()
 
     def _creation_basic_suggestions_prompt_snapshot(self, basic: dict[str, Any], request: CreationBasicSuggestionsRequest) -> dict[str, Any]:
         return {
@@ -4700,6 +5005,59 @@ class StudioService:
     def _save_creation_session_state(self, session: models.CreationSession, state: dict[str, Any]) -> None:
         session.state_json = dumps(state)
         session.updated_at = utcnow()
+
+    def _empty_creation_profile(self) -> dict[str, Any]:
+        return {
+            "basic_info": {},
+            "selected_worldview": {},
+            "selected_protagonist": {},
+            "selected_title": {},
+            "market_position": {},
+            "project_seed": {},
+            "core_conflict_system": {},
+            "novel_constitution": {},
+            "constitution_review": {},
+            "canon_candidates": {},
+            "confirmed_canon": {},
+        }
+
+    def _creation_profile_from_session(self, session: models.CreationSession) -> dict[str, Any]:
+        state = self._creation_session_state(session)
+        seed = state.get("project_seed") if isinstance(state.get("project_seed"), dict) else {}
+        confirmed = state.get("confirmed_canon") if isinstance(state.get("confirmed_canon"), dict) else {}
+
+        def pick_dict(*keys: str) -> dict[str, Any]:
+            for key in keys:
+                value = state.get(key)
+                if isinstance(value, dict) and value:
+                    return value
+                value = seed.get(key)
+                if isinstance(value, dict) and value:
+                    return value
+                value = confirmed.get(key)
+                if isinstance(value, dict) and value:
+                    return value
+            return {}
+
+        basic_info = loads(session.basic_info_json, {})
+        if not isinstance(basic_info, dict):
+            basic_info = {}
+        seed_basic = seed.get("basic_info")
+        if isinstance(seed_basic, dict):
+            basic_info = {**basic_info, **seed_basic}
+        return {
+            "basic_info": basic_info,
+            "selected_worldview": pick_dict("selected_worldview"),
+            "selected_protagonist": pick_dict("selected_protagonist"),
+            "selected_title": pick_dict("selected_title"),
+            "market_position": pick_dict("market_position"),
+            "project_seed": seed,
+            "core_conflict_system": pick_dict("core_conflict_system"),
+            "novel_constitution": pick_dict("novel_constitution"),
+            "constitution_review": pick_dict("constitution_review"),
+            "canon_candidates": pick_dict("canon_candidates"),
+            "confirmed_canon": confirmed,
+        }
 
     def _creation_session_state_summary(self, session: models.CreationSession) -> dict[str, Any]:
         state = self._creation_session_state(session)
@@ -4962,6 +5320,7 @@ class StudioService:
             fallback=fallback,
             model=model,
         )
+        self._require_creation_remote_json(step, llm_meta)
         if not isinstance(payload, dict):
             payload = fallback
         cards = payload.get("cards")
@@ -5009,7 +5368,25 @@ class StudioService:
             fallback=fallback,
             model=model,
         )
+        self._require_creation_remote_json(agent_name, llm_meta)
         return payload if isinstance(payload, dict) else fallback, job, llm_meta
+
+    def _require_creation_remote_json(self, stage: str, llm_meta: dict[str, Any]) -> None:
+        if not get_settings().llm_require_remote:
+            return
+        if llm_meta.get("used_remote_model") is True and llm_meta.get("parsed") is True and llm_meta.get("schema_valid") is True:
+            return
+        raise _bad_request(
+            f"{stage} 真实 LLM 输出未通过 JSON 质量门，已阻止写入下游状态",
+            {
+                "provider": llm_meta.get("provider", ""),
+                "model": llm_meta.get("model", ""),
+                "used_remote_model": llm_meta.get("used_remote_model"),
+                "parsed": llm_meta.get("parsed"),
+                "schema_valid": llm_meta.get("schema_valid"),
+                "validation_warnings": llm_meta.get("validation_warnings", []),
+            },
+        )
 
     def _creation_market_position_cards(
         self,
@@ -6017,8 +6394,21 @@ class StudioService:
         name = str(protagonist.get("name") or "未命名主角")
         row = db.query(models.Character).filter(models.Character.project_id == project_id, models.Character.name == name).first()
         if row is None:
-            row = models.Character(id=generate_id("chr"), project_id=project_id, name=name, role="protagonist", role_type="protagonist")
-            db.add(row)
+            row = (
+                db.query(models.Character)
+                .filter(
+                    models.Character.project_id == project_id,
+                    models.Character.source == "project_seed",
+                    models.Character.role_type == "protagonist",
+                    models.Character.name.in_(["待定主角", "未命名主角"]),
+                )
+                .first()
+            )
+            if row is None:
+                row = models.Character(id=generate_id("chr"), project_id=project_id, name=name, role="protagonist", role_type="protagonist")
+                db.add(row)
+            else:
+                row.name = name
         row.role = "protagonist"
         row.role_type = "protagonist"
         row.importance_level = "core"
@@ -6147,460 +6537,6 @@ class StudioService:
             wrapped["_llm"] = meta
         return wrapped
 
-    def _run_outline_agents_with_llm(
-        self,
-        db: Session,
-        project: models.Project | dict[str, Any],
-        request: PlanChaptersRequest,
-        outline_plan: dict[str, Any],
-        agent_sequence: tuple[str, ...] | list[str] | None = None,
-        progress_callback: Callable[[str, int], None] | None = None,
-    ) -> dict[str, Any]:
-        project_payload = project if isinstance(project, dict) else serialize_project(project)
-        previous_outputs: list[dict[str, Any]] = []
-        agent_outputs = dict(outline_plan.get("agent_outputs", {}))
-        updated_outputs: dict[str, dict[str, Any]] = {}
-        sequence = list(agent_sequence or OUTLINE_AGENT_SEQUENCE)
-        output_key_by_agent = {
-            "one_sentence_expansion": "故事核心",
-            "genre_market_position": "类型卖点定位",
-            "world_bible": "世界圣经",
-            "protagonist_arc": "主角成长线",
-            "character_tree": "人物树",
-            "faction_conflict": "势力冲突表",
-            "power_system": "金手指升级体系",
-            "full_structure": "全书10卷总纲",
-            "volume_outline": "逐卷50章大纲",
-            "beat_control": "章节节拍表",
-            "foreshadowing_manager": "伏笔账本",
-            "logic_audit": "逻辑审计报告",
-        }
-        for index, agent_name in enumerate(sequence, start=1):
-            spec = AGENT_SPECS_BY_NAME[agent_name]
-            fallback = agent_outputs.get(agent_name, {})
-            if not isinstance(fallback, dict):
-                fallback = {"value": fallback}
-            payload, meta = call_agent_json(
-                llm_client=llm_client,
-                agent_name=agent_name,
-                role=spec.role,
-                system_prompt=spec.prompt,
-                task=(
-                    "参与长篇大纲推演流水线。读取 structured_prompt、story_state、previous_agent_outputs 和当前 fallback，"
-                    "输出该 Agent 负责的结构化 JSON。"
-                ),
-                context={
-                    "project": project_payload,
-                    "request": request.model_dump(),
-                    "structured_prompt": outline_plan.get("structured_prompt", {}),
-                    "story_state": outline_plan.get("story_state", {}),
-                    "previous_agent_outputs": previous_outputs,
-                    "fallback_output": fallback,
-                },
-                fallback=fallback,
-                model=self._configured_model_for_agent(db, "outline_generation", agent_name, request.model),
-            )
-            payload["_llm"] = meta
-            updated_outputs[agent_name] = payload
-            previous_outputs.append({"agent_name": agent_name, "output": payload})
-            if progress_callback is not None:
-                progress_callback(agent_name, index)
-        outline_plan["agent_outputs"] = updated_outputs
-        for agent_name, output_key in output_key_by_agent.items():
-            if agent_name in updated_outputs:
-                payload = updated_outputs[agent_name]
-                if agent_name == "volume_outline":
-                    outline_plan[output_key] = payload.get("volumes", payload)
-                elif agent_name == "beat_control":
-                    outline_plan[output_key] = payload.get("beat_sheets", payload)
-                else:
-                    outline_plan[output_key] = payload
-        if "13Agent推演链" in outline_plan:
-            for item in outline_plan["13Agent推演链"]:
-                meta = updated_outputs.get(item.get("agent_name", ""), {}).get("_llm", {})
-                if meta:
-                    item["used_remote_model"] = meta.get("used_remote_model", False)
-                    item["provider"] = meta.get("provider", "")
-                    item["model"] = meta.get("model", "")
-        return outline_plan
-
-    def _attach_outline_swarm_plan(
-        self,
-        db: Session,
-        project: models.Project,
-        request: PlanChaptersRequest,
-        outline_plan: dict[str, Any],
-        generation_kind: str = "legacy_plan_chapters",
-        progress_callback: Callable[[dict[str, Any]], None] | None = None,
-    ) -> dict[str, Any]:
-        project_snapshot = serialize_project(project)
-        story_bible = db.query(models.StoryBible).filter(models.StoryBible.project_id == project.id).first()
-        characters = db.query(models.Character).filter(models.Character.project_id == project.id).order_by(models.Character.importance_score.desc()).limit(8).all()
-        entities = db.query(models.StoryEntity).filter(models.StoryEntity.project_id == project.id).order_by(models.StoryEntity.importance_score.desc()).limit(8).all()
-        world_facts = db.query(models.WorldFact).filter(models.WorldFact.project_id == project.id).order_by(models.WorldFact.importance_score.desc()).limit(10).all()
-        parameters = outline_plan.get("parameters", {})
-        volume_target = int(request.volume_count or parameters.get("volume_count") or 1)
-        chapter_target = int(request.chapter_count or parameters.get("chapters_per_volume") or 10)
-        seed = {
-            "title": project_snapshot["title"],
-            "genre": project_snapshot["genre"],
-            "target_reader": project_snapshot["target_reader"],
-            "premise": project_snapshot["premise"],
-            "one_sentence_story": project_snapshot["premise"],
-            "worldview": story_bible.world_setting if story_bible and story_bible.world_setting else project_snapshot["premise"],
-            "style": project_snapshot["style_guide"] or (story_bible.style_guide if story_bible else ""),
-            "target_length": f"{parameters.get('target_words', project_snapshot.get('target_words'))}字，{volume_target}卷，本次推演{chapter_target}章",
-            "outline_requirement": request.outline_requirement,
-            "characters": [serialize_character(character) for character in characters],
-            "story_entities": [serialize_story_entity(entity) for entity in entities],
-            "world_facts": [serialize_world_fact(fact) for fact in world_facts],
-            "legacy_outline_summary": {
-                "structured_prompt": outline_plan.get("structured_prompt", {}),
-                "world_bible": outline_plan.get("世界圣经", {}),
-                "volume_count": len(outline_plan.get("10卷单元总表", [])),
-            },
-        }
-        db.commit()
-        swarm_result = run_outline_swarm(
-            {
-                "project_id": project_snapshot["id"],
-                "seed": seed,
-                "generation_kind": generation_kind,
-                "volume_target": volume_target,
-                "chapter_target": chapter_target,
-                "model": request.model,
-                "max_iterations": 18,
-            },
-            progress_callback=progress_callback,
-        )
-        outline_plan["outline_swarm"] = swarm_result
-        outline_plan["outline_swarm_agent_trace"] = swarm_result.get("agent_trace", [])
-        outline_plan["outline_swarm_llm_results"] = swarm_result.get("agent_llm_results", {})
-        return outline_plan
-
-    def _record_outline_swarm_agent_runs(
-        self,
-        db: Session,
-        job: models.GenerationJob,
-        request: PlanChaptersRequest,
-        outline_plan: dict[str, Any],
-    ) -> None:
-        swarm_result = outline_plan.get("outline_swarm")
-        if not isinstance(swarm_result, dict):
-            return
-        trace_events = swarm_result.get("agent_trace", [])
-        if not isinstance(trace_events, list):
-            trace_events = []
-        llm_results = swarm_result.get("agent_llm_results", {})
-        if not isinstance(llm_results, dict):
-            llm_results = {}
-        generation_kind = str(outline_plan.get("generation_kind") or "legacy_plan_chapters")
-        expected_agent_names = set(_outline_swarm_agent_names_for_generation_kind(generation_kind))
-        trace_agent_names = {
-            str(event.get("agent_name"))
-            for event in trace_events
-            if isinstance(event, dict) and event.get("agent_name")
-        }
-        executed_agent_names = [agent_name for agent_name in OUTLINE_SWARM_AGENT_NAMES if agent_name in expected_agent_names and (agent_name in trace_agent_names or agent_name in llm_results)]
-        for agent_name in executed_agent_names:
-            agent_trace = [
-                event
-                for event in trace_events
-                if isinstance(event, dict) and event.get("agent_name") == agent_name
-            ]
-            self._record_agent_run(
-                db,
-                job,
-                f"outline_swarm/{agent_name}",
-                {
-                    "agent_name": agent_name,
-                    "status": swarm_result.get("status", "running"),
-                    "iteration_count": swarm_result.get("iteration_count"),
-                    "active_agent": swarm_result.get("active_agent"),
-                    "trace_events": agent_trace,
-                    "_llm": llm_results.get(agent_name, {}),
-                },
-                {
-                    "source": "outline_swarm",
-                    "request": request.model_dump(),
-                    "swarm_status": swarm_result.get("status", "running"),
-                    "trace_event_count": len(agent_trace),
-                },
-            )
-
-    def _agent_role_label(self, agent_name: str) -> str:
-        normalized = agent_name.removeprefix("outline_swarm/")
-        spec = AGENT_SPECS_BY_NAME.get(agent_name) or AGENT_SPECS_BY_NAME.get(normalized)
-        if spec is not None:
-            return spec.role
-        swarm_labels = {
-            "StoryDirectorAgent": "故事总导演 Agent",
-            "WhyInterrogatorAgent": "为什么审问 Agent",
-            "WorldSettingAgent": "世界构建 Agent",
-            "CharacterArcAgent": "人物弧光 Agent",
-            "ConflictAgent": "冲突矩阵 Agent",
-            "CharacterGeneratorAgent": "大纲角色生成 Agent",
-            "SettingGeneratorAgent": "大纲设定生成 Agent",
-            "PlotArchitectAgent": "长篇结构 Agent",
-            "BeatControllerAgent": "章节节拍 Agent",
-            "ForeshadowingAgent": "伏笔设计 Agent",
-            "EntityExtractorAgent": "实体抽取 Agent",
-            "ContinuityAgent": "连续性审查 Agent",
-        }
-        return swarm_labels.get(normalized, normalized)
-
-    def _topology_node(
-        self,
-        node_id: str,
-        label: str,
-        node_type: str,
-        summary: str,
-        *,
-        status: str = "succeeded",
-        agent_name: str | None = None,
-        payload: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        node: dict[str, Any] = {
-            "id": node_id,
-            "label": label,
-            "type": node_type,
-            "status": status,
-            "summary": summary,
-        }
-        if agent_name:
-            node["agent_name"] = agent_name
-        if payload:
-            node["payload"] = payload
-        return node
-
-    def _topology_edge(self, source: str, target: str, edge_type: str, label: str, *, reason: str = "", weight: float = 1.0) -> dict[str, Any]:
-        return {
-            "id": f"{edge_type}:{source}->{target}",
-            "source": source,
-            "target": target,
-            "type": edge_type,
-            "label": label,
-            "reason": reason,
-            "weight": weight,
-        }
-
-    def _summarize_topology_payload(self, payload: Any, limit: int = 160) -> str:
-        if payload is None:
-            return ""
-        if isinstance(payload, str):
-            return payload[:limit]
-        if isinstance(payload, dict):
-            for key in ("kind", "title", "name", "question", "message", "summary", "content"):
-                value = payload.get(key)
-                if value:
-                    return str(value)[:limit]
-        return dumps(payload)[:limit]
-
-    def _append_outline_artifact_nodes(
-        self,
-        nodes: list[dict[str, Any]],
-        edges: list[dict[str, Any]],
-        artifacts: list[dict[str, Any]],
-        source_node_id: str,
-        outline_plan: dict[str, Any],
-        generation_kind: str,
-    ) -> None:
-        artifact_specs: list[tuple[str, str, str, Any]] = []
-        if generation_kind == "chapter_outline_batch":
-            artifact_specs.append(("chapter_outlines", "章纲候选", "chapter_outline", outline_plan.get("chapter_outlines", [])))
-        else:
-            artifact_specs.extend(
-                [
-                    ("book_outline", "全书总纲", "book_outline", outline_plan.get("book_outline") or outline_plan.get("全书10卷总纲")),
-                    ("volume_outlines", "分卷卷纲", "volume_outline", outline_plan.get("volume_outlines") or outline_plan.get("10卷单元总表")),
-                    ("logic_audit", "结构审查", "gate_report", outline_plan.get("逻辑审计报告")),
-                ]
-            )
-        for key, label, artifact_type, payload in artifact_specs:
-            if payload in (None, "", [], {}):
-                continue
-            count = len(payload) if isinstance(payload, list) else 1
-            artifact_id = f"artifact:{generation_kind}:{key}"
-            artifact = {
-                "id": artifact_id,
-                "label": label,
-                "type": artifact_type,
-                "summary": self._summarize_topology_payload(payload),
-                "source_node_id": source_node_id,
-                "count": count,
-            }
-            artifacts.append(artifact)
-            nodes.append(self._topology_node(artifact_id, label, "artifact", f"生成 {count} 项{label}", payload={"artifact_type": artifact_type, "count": count}))
-            edges.append(self._topology_edge(source_node_id, artifact_id, "emits", "产出", reason=f"{label}由推演链生成"))
-
-    def _build_outline_topology(
-        self,
-        *,
-        generation_kind: str,
-        mode: str,
-        agent_sequence: tuple[str, ...] | list[str],
-        outline_plan: dict[str, Any],
-        swarm_result: dict[str, Any] | None = None,
-        planned_swarm_agents: tuple[str, ...] | list[str] = (),
-        planned_status: str = "succeeded",
-    ) -> dict[str, Any]:
-        nodes: list[dict[str, Any]] = []
-        edges: list[dict[str, Any]] = []
-        events: list[dict[str, Any]] = []
-        artifacts: list[dict[str, Any]] = []
-        seen_nodes: set[str] = set()
-        agent_outputs = outline_plan.get("agent_outputs") if isinstance(outline_plan.get("agent_outputs"), dict) else {}
-        swarm_llm_results = outline_plan.get("outline_swarm_llm_results") if isinstance(outline_plan.get("outline_swarm_llm_results"), dict) else {}
-        allowed_swarm_agent_names = set(_outline_swarm_agent_names_for_generation_kind(generation_kind))
-
-        def llm_meta_for(agent_name: str) -> dict[str, Any]:
-            normalized = agent_name.removeprefix("outline_swarm/")
-            if agent_name.startswith("outline_swarm/"):
-                meta = swarm_llm_results.get(normalized)
-                return meta if isinstance(meta, dict) else {}
-            output = agent_outputs.get(agent_name)
-            if isinstance(output, dict) and isinstance(output.get("_llm"), dict):
-                return output["_llm"]
-            return {}
-
-        def add_agent(agent_name: str, *, prefix: str = "agent", status: str = "succeeded", summary: str | None = None) -> str:
-            node_id = f"{prefix}:{agent_name}"
-            if node_id not in seen_nodes:
-                seen_nodes.add(node_id)
-                llm_meta = llm_meta_for(agent_name)
-                payload = {"llm": llm_meta} if llm_meta else None
-                nodes.append(
-                    self._topology_node(
-                        node_id,
-                        self._agent_role_label(agent_name),
-                        "agent",
-                        summary or f"{self._agent_role_label(agent_name)}参与{generation_kind}推演。",
-                        status=status,
-                        agent_name=agent_name,
-                        payload=payload,
-                    )
-                )
-            return node_id
-
-        previous_node_id = ""
-        for agent_name in agent_sequence:
-            node_id = add_agent(agent_name, status=planned_status)
-            events.append(
-                {
-                    "id": f"event:{generation_kind}:{agent_name}:linear",
-                    "agent_name": agent_name,
-                    "event_type": "agent_step",
-                    "message": "线性大纲 Agent 完成结构推演",
-                    "node_id": node_id,
-                }
-            )
-            if previous_node_id:
-                edges.append(self._topology_edge(previous_node_id, node_id, "handoff", "交接", reason="线性 Agent 顺序执行"))
-            previous_node_id = node_id
-
-        trace_events = []
-        if swarm_result and isinstance(swarm_result.get("agent_trace"), list):
-            trace_events = [event for event in swarm_result["agent_trace"] if isinstance(event, dict)]
-        if planned_swarm_agents and (not trace_events or planned_status != "succeeded"):
-            previous_planned_node_id = previous_node_id
-            for agent_name in planned_swarm_agents:
-                node_id = add_agent(
-                    f"outline_swarm/{agent_name}",
-                    prefix="agent",
-                    status=planned_status,
-                    summary=f"{self._agent_role_label(agent_name)}计划参与{generation_kind}拓扑推演。",
-                )
-                if previous_planned_node_id:
-                    edges.append(self._topology_edge(previous_planned_node_id, node_id, "handoff", "计划交接", reason="任务创建时的拓扑骨架"))
-                previous_planned_node_id = node_id
-        previous_swarm_node_id = ""
-        first_swarm_node_id = ""
-        for index, event in enumerate(trace_events):
-            agent_name = str(event.get("agent_name") or "outline_swarm")
-            if agent_name not in allowed_swarm_agent_names:
-                continue
-            node_id = add_agent(f"outline_swarm/{agent_name}", prefix="agent")
-            first_swarm_node_id = first_swarm_node_id or node_id
-            event_id = f"event:{generation_kind}:swarm:{index}"
-            event_type = str(event.get("event_type") or "agent_step")
-            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-            events.append(
-                {
-                    "id": event_id,
-                    "timestamp": event.get("timestamp"),
-                    "agent_name": agent_name,
-                    "event_type": event_type,
-                    "message": event.get("message", ""),
-                    "node_id": node_id,
-                    "payload": payload,
-                }
-            )
-            next_agent = payload.get("next_agent")
-            if event_type == "agent_step" and next_agent and str(next_agent) in allowed_swarm_agent_names:
-                target_node_id = add_agent(f"outline_swarm/{next_agent}", prefix="agent")
-                edges.append(self._topology_edge(node_id, target_node_id, "handoff", "Swarm 交接", reason=str(event.get("message") or "")))
-            elif previous_swarm_node_id and previous_swarm_node_id != node_id:
-                edges.append(self._topology_edge(previous_swarm_node_id, node_id, "depends_on", "承接", reason="Swarm trace 顺序承接", weight=0.7))
-            if event_type in TOPOLOGY_ARTIFACT_EVENT_TYPES:
-                artifact_id = f"artifact:{generation_kind}:trace:{index}"
-                artifact = {
-                    "id": artifact_id,
-                    "label": str(event.get("message") or event_type),
-                    "type": event_type,
-                    "summary": self._summarize_topology_payload(payload),
-                    "source_node_id": node_id,
-                    "count": 1,
-                }
-                artifacts.append(artifact)
-                nodes.append(self._topology_node(artifact_id, artifact["label"], "artifact", artifact["summary"], payload={"artifact_type": event_type}))
-                edges.append(self._topology_edge(node_id, artifact_id, "emits", "记录产物", reason=event_type))
-            previous_swarm_node_id = node_id
-
-        if first_swarm_node_id and previous_node_id:
-            edges.append(self._topology_edge(previous_node_id, first_swarm_node_id, "handoff", "进入拓扑推演", reason="线性结构交给 Swarm 做动态推演"))
-
-        source_node_id = previous_swarm_node_id or previous_node_id or (nodes[-1]["id"] if nodes else "agent:outline")
-        self._append_outline_artifact_nodes(nodes, edges, artifacts, source_node_id, outline_plan, generation_kind)
-        revision_route = outline_plan.get("revision_route") if isinstance(outline_plan.get("revision_route"), dict) else {}
-        if revision_route.get("revision_required"):
-            route_node_id = f"decision:{generation_kind}:revision_route"
-            nodes.append(
-                self._topology_node(
-                    route_node_id,
-                    "返工路由",
-                    "decision",
-                    "逻辑审计发现阻塞问题，按问题类型路由回对应 Agent。",
-                    status="blocked",
-                    payload={"revision_route": revision_route},
-                )
-            )
-            edges.append(self._topology_edge(source_node_id, route_node_id, "blocks", "触发返工", reason="logic_audit blocking / needs_revision"))
-            for route in revision_route.get("routes", []):
-                if not isinstance(route, dict):
-                    continue
-                target_agent = str(route.get("to_agent") or "")
-                if not target_agent:
-                    continue
-                target_node_id = add_agent(target_agent, status="pending")
-                edges.append(self._topology_edge(route_node_id, target_node_id, "revises", "返工", reason=str(route.get("reason") or "")))
-        metrics = {
-            "mode": mode,
-            "node_count": len(nodes),
-            "edge_count": len(edges),
-            "event_count": len(events),
-            "artifact_count": len(artifacts),
-            "agent_count": len([node for node in nodes if node.get("type") == "agent"]),
-        }
-        return {
-            "mode": mode,
-            "generation_kind": generation_kind,
-            "nodes": nodes,
-            "edges": edges,
-            "events": events,
-            "artifacts": artifacts,
-            "metrics": metrics,
-        }
-
     def _project(self, db: Session, project_id: str) -> models.Project:
         project = db.get(models.Project, project_id)
         if project is None:
@@ -6627,6 +6563,8 @@ class StudioService:
             genre=project.genre,
             target_words=project.target_words or project.planned_chapter_count * project.chapter_word_target,
             target_chapters=project.planned_chapter_count,
+            chapter_word_min=project.chapter_word_min or 0,
+            chapter_word_max=project.chapter_word_max or 0,
             current_volume=project.current_volume,
             current_chapter=project.current_chapter,
             target_reader=project.target_reader,
@@ -6680,300 +6618,6 @@ class StudioService:
         db.add(job)
         db.flush()
         return job
-
-    def _plan_request_from_job(self, job: models.GenerationJob) -> PlanChaptersRequest:
-        payload = loads(job.request_json, {})
-        allowed = {field: payload[field] for field in PlanChaptersRequest.model_fields if field in payload}
-        allowed["async_mode"] = False
-        return PlanChaptersRequest.model_validate(allowed)
-
-    def _book_outline_request_from_job(self, job: models.GenerationJob) -> BookOutlineGenerateRequest:
-        payload = loads(job.request_json, {})
-        allowed = {field: payload[field] for field in BookOutlineGenerateRequest.model_fields if field in payload}
-        allowed["async_mode"] = False
-        return BookOutlineGenerateRequest.model_validate(allowed)
-
-    def _chapter_outline_batch_request_from_job(self, job: models.GenerationJob) -> ChapterOutlineBatchGenerateRequest:
-        payload = loads(job.request_json, {})
-        allowed = {field: payload[field] for field in ChapterOutlineBatchGenerateRequest.model_fields if field in payload}
-        allowed["async_mode"] = False
-        return ChapterOutlineBatchGenerateRequest.model_validate(allowed)
-
-    def _book_outline_to_plan_request(self, project: models.Project, request: BookOutlineGenerateRequest) -> PlanChaptersRequest:
-        chapter_count = max(1, min(100, int(request.chapters_per_volume or 50)))
-        topology_instruction = (
-            "拓扑推演开启：按 Agent 交接、依赖、产物、审查和候选正典关系组织推演；不得减少总纲、卷纲字段或内容量。"
-            if request.use_topology_inference
-            else "拓扑推演关闭：按线性 Agent 链生成；不得减少总纲、卷纲字段或内容量，并保持与拓扑模式基本一致的输出结构。"
-        )
-        return PlanChaptersRequest(
-            volume_title="第一卷",
-            start_chapter_no=1,
-            chapter_count=chapter_count,
-            outline_requirement=f"{request.outline_requirement}\n\n{topology_instruction}",
-            overwrite_existing=True,
-            idempotency_key=f"{request.idempotency_key}:internal-plan",
-            target_words=request.target_words or project.target_words or max(30000, project.planned_chapter_count * project.chapter_word_target),
-            volume_count=request.volume_count,
-            chapters_per_volume=request.chapters_per_volume,
-            chapter_word_target=request.chapter_word_target or project.chapter_word_target,
-            model=request.model,
-            async_mode=False,
-        )
-
-    def _build_initial_book_outline_plan(self, db: Session, project: models.Project, request: BookOutlineGenerateRequest) -> dict[str, Any]:
-        plan_request = self._book_outline_to_plan_request(project, request)
-        outline_plan: dict[str, Any] = {
-            "generation_kind": "book_outline",
-            "parameters": {
-                "target_words": plan_request.target_words,
-                "volume_count": plan_request.volume_count,
-                "chapters_per_volume": plan_request.chapters_per_volume,
-                "chapter_word_target": plan_request.chapter_word_target,
-                "use_topology_inference": request.use_topology_inference,
-            },
-            "book_outline": {},
-            "volume_outlines": [],
-            "10卷单元总表": [],
-            "change_summary": {},
-            "revision_route": {"revision_required": False, "routes": [], "issues": [], "status": "planned"},
-        }
-        outline_plan["change_summary"] = self._build_book_outline_change_summary(db, project, outline_plan)
-        outline_plan["outline_topology"] = self._build_outline_topology(
-            generation_kind="book_outline",
-            mode="topology" if request.use_topology_inference else "linear",
-            agent_sequence=BOOK_OUTLINE_AGENT_SEQUENCE,
-            outline_plan=outline_plan,
-            planned_swarm_agents=BOOK_OUTLINE_SWARM_AGENT_NAMES if request.use_topology_inference else (),
-            planned_status="pending",
-        )
-        return outline_plan
-
-    def _build_book_outline_change_summary(self, db: Session, project: models.Project, outline_plan: dict[str, Any]) -> dict[str, Any]:
-        story_bible = db.query(models.StoryBible).filter(models.StoryBible.project_id == project.id).first()
-        volume_outlines = outline_plan.get("volume_outlines") if isinstance(outline_plan.get("volume_outlines"), list) else []
-        existing_volumes = {
-            row.volume_no: row
-            for row in db.query(models.Volume).filter(models.Volume.project_id == project.id).all()
-        }
-        incoming_numbers = [
-            int(item.get("volume_no") or index)
-            for index, item in enumerate(volume_outlines, start=1)
-            if isinstance(item, dict)
-        ]
-        overwritten = [volume_no for volume_no in incoming_numbers if volume_no in existing_volumes]
-        created = [volume_no for volume_no in incoming_numbers if volume_no not in existing_volumes]
-        parameters = outline_plan.get("parameters") if isinstance(outline_plan.get("parameters"), dict) else {}
-        return {
-            "source": "book_outline_preview",
-            "requires_user_confirmation": True,
-            "will_update": [
-                "project.target_words",
-                "project.planned_chapter_count",
-                "project.chapter_word_target",
-                "story_bible.world_setting",
-                "story_bible.main_conflict",
-                "story_bible.themes",
-                "volumes.title",
-                "volumes.outline",
-            ],
-            "story_bible_version": story_bible.version if story_bible else None,
-            "target_words": parameters.get("target_words"),
-            "volume_count": parameters.get("volume_count") or len(volume_outlines),
-            "will_create_volume_numbers": created,
-            "will_overwrite_volume_numbers": overwritten,
-            "preserved_manual_settings": [
-                "不创建或覆盖章节正文",
-                "不直接覆盖角色卡、实体、世界事实或图谱",
-                "不删除未出现在本次预览中的既有章节",
-                "AI 新设定仍需用户确认后才能进入正式设定集",
-            ],
-        }
-
-    def _collect_audit_issues(self, audit_payload: Any) -> list[dict[str, Any]]:
-        if not isinstance(audit_payload, dict):
-            return []
-        issues: list[dict[str, Any]] = []
-        for key in ("issues", "blocking_issues", "revision_suggestions"):
-            value = audit_payload.get(key)
-            if not isinstance(value, list):
-                continue
-            for item in value:
-                if isinstance(item, dict):
-                    issues.append(item)
-                elif item:
-                    issues.append({"severity": "warning", "issue": str(item)})
-        return issues
-
-    def _route_outline_issue(self, issue: dict[str, Any]) -> str:
-        text = dumps(issue)
-        if any(keyword in text for keyword in ("世界", "规则", "设定", "力量体系", "圣经")):
-            return "world_bible"
-        if any(keyword in text for keyword in ("卷", "结构", "节奏", "断裂", "阶段", "主线")):
-            return "full_structure" if "全书" in text or "结构" in text else "volume_outline"
-        if any(keyword in text for keyword in ("伏笔", "回收", "暗线", "线索")):
-            return "foreshadowing_manager"
-        if any(keyword in text for keyword in ("人物", "主角", "欲望", "成长")):
-            return "protagonist_arc"
-        return "editor_orchestrator"
-
-    def _build_outline_revision_route(self, outline_plan: dict[str, Any]) -> dict[str, Any]:
-        agent_outputs = outline_plan.get("agent_outputs") if isinstance(outline_plan.get("agent_outputs"), dict) else {}
-        audit_payload = outline_plan.get("逻辑审计报告")
-        if not isinstance(audit_payload, dict):
-            audit_payload = agent_outputs.get("logic_audit") if isinstance(agent_outputs.get("logic_audit"), dict) else {}
-        issues = self._collect_audit_issues(audit_payload)
-        status = str(audit_payload.get("status") or audit_payload.get("conclusion") or "")
-        passed = audit_payload.get("passed")
-        blocking_issues = [
-            issue
-            for issue in issues
-            if str(issue.get("severity") or issue.get("level") or "").lower() in {"blocking", "error", "fatal", "a", "a级"}
-            or "blocking" in str(issue).lower()
-        ]
-        revision_required = bool(audit_payload.get("revision_required") or blocking_issues or passed is False or status in {"blocked", "needs_revision", "需要返工"})
-        routes = []
-        for issue in blocking_issues or issues[:3]:
-            target = self._route_outline_issue(issue)
-            routes.append(
-                {
-                    "from_agent": "logic_audit",
-                    "to_agent": target,
-                    "reason": str(issue.get("issue") or issue.get("message") or issue.get("suggestion") or issue)[:240],
-                    "status": "planned" if revision_required else "informational",
-                }
-            )
-        return {
-            "revision_required": revision_required,
-            "status": "needs_revision" if revision_required else "passed",
-            "issues": issues,
-            "routes": routes if revision_required else [],
-        }
-
-    def _normalize_book_outline_plan(self, project: models.Project, request: PlanChaptersRequest, outline_plan: dict[str, Any]) -> dict[str, Any]:
-        normalized = dict(outline_plan)
-        normalized["generation_kind"] = "book_outline"
-        normalized.pop("chapters", None)
-        normalized.pop("章节节拍表", None)
-        story_state = normalized.get("story_state")
-        if isinstance(story_state, dict):
-            story_state = dict(story_state)
-            story_state.pop("beat_sheets", None)
-            normalized["story_state"] = story_state
-        volume_source = normalized.get("volume_outlines") or normalized.get("10卷单元总表") or normalized.get("逐卷50章大纲") or []
-        if not isinstance(volume_source, list):
-            volume_source = []
-        volume_outlines = self._dynamic_volume_outlines(volume_source, project.genre, int(request.chapters_per_volume or project.chapter_word_target or 50))
-        normalized["volume_outlines"] = volume_outlines
-        normalized["10卷单元总表"] = volume_outlines
-        book_outline = normalized.get("book_outline")
-        if not isinstance(book_outline, dict):
-            full_structure = normalized.get("全书10卷总纲")
-            if not isinstance(full_structure, dict):
-                full_structure = {}
-            book_outline = {
-                "title": project.title,
-                "genre": project.genre,
-                "premise": project.premise,
-                "core_theme": "主角在长期冲突中以有代价的选择回应世界压力。",
-                "core_conflict": full_structure.get("full_story_one_sentence") or project.premise,
-                "protagonist_long_term_goal": "持续夺回解释自身命运和世界规则的主动权。",
-                "ending_direction": full_structure.get("ending_closure_design", {}),
-                "mainline_keywords": ["成长", "代价", "破局", "伏笔", "终局"],
-            }
-        normalized["book_outline"] = book_outline
-        return normalized
-
-    def _dynamic_volume_outlines(self, volumes: list[dict[str, Any]], genre: str, chapters_per_volume: int) -> list[dict[str, Any]]:
-        normalized: list[dict[str, Any]] = []
-        for index, item in enumerate(volumes, start=1):
-            if not isinstance(item, dict):
-                continue
-            volume_no = int(item.get("volume_no") or item.get("volume") or "".join([char for char in str(item.get("第X卷", index)) if char.isdigit()]) or index)
-            phase_source = item.get("phases") or item.get("50章高密度剧情流水线执行协议") or []
-            if not isinstance(phase_source, list):
-                phase_source = []
-            rhythm = self._choose_rhythm_model(genre, item, max(1, len(phase_source) or 4), chapters_per_volume)
-            normalized.append(
-                {
-                    "volume_no": volume_no,
-                    "title": str(item.get("title") or item.get("卷名") or f"第{volume_no}卷"),
-                    "chapter_range": str(item.get("chapter_range") or item.get("章节区间") or self._chapter_range_from_volume_no(volume_no, chapters_per_volume)),
-                    "volume_function": str(item.get("volume_function") or item.get("core_goal") or "推动主线升级并改变主角处境。"),
-                    "rhythm_model": rhythm,
-                    "core_goal": str(item.get("core_goal") or item.get("主线") or item.get("剧情多轨道架构", {}).get("主线", "完成本卷阶段目标。")),
-                    "main_track": str(item.get("main_track") or item.get("剧情多轨道架构", {}).get("主线", "主线目标推进。")),
-                    "hidden_track": str(item.get("hidden_track") or item.get("剧情多轨道架构", {}).get("暗线", "暗线推进一格。")),
-                    "character_track": str(item.get("character_track") or item.get("relationship_change") or "人物关系或认知发生变化。"),
-                    "world_reveal": str(item.get("world_reveal") or "揭开世界规则的一层新解释。"),
-                    "opposition_pressure": str(item.get("opposition_pressure") or item.get("core_enemy_or_pressure") or "阶段反对力量升级。"),
-                    "protagonist_change": item.get("protagonist_change") or item.get("protagonist_upgrade") or item.get("本卷主角提升目标", {}),
-                    "phases": self._normalize_volume_phases(phase_source),
-                    "volume_hook": str(item.get("volume_hook") or item.get("final_hook") or item.get("卷末大钩子") or "卷末留下通向下一卷的新问题。"),
-                    "continuity_requirements": item.get("continuity_requirements") if isinstance(item.get("continuity_requirements"), list) else ["不得推翻已确认世界规则", "暗线必须承接上一卷"],
-                    "risks": item.get("risks") if isinstance(item.get("risks"), list) else ["节奏重复", "暗线推进不足"],
-                    "revision_suggestions": item.get("revision_suggestions") if isinstance(item.get("revision_suggestions"), list) else [],
-                }
-            )
-        return normalized
-
-    def _choose_rhythm_model(self, genre: str, item: dict[str, Any], phase_count: int, chapters_per_volume: int) -> dict[str, Any]:
-        genre_text = f"{genre} {item}".lower()
-        if any(keyword in genre_text for keyword in ("悬疑", "推理", "怪谈", "规则")):
-            model_name = "线索递进 + 反转揭示"
-            recommended_count = 4
-        elif any(keyword in genre_text for keyword in ("权谋", "历史", "战争", "群像")):
-            model_name = "多线群像并进"
-            recommended_count = 6
-        elif any(keyword in genre_text for keyword in ("言情", "情感", "青春")):
-            model_name = "关系阶段递进"
-            recommended_count = 4
-        elif any(keyword in genre_text for keyword in ("玄幻", "仙侠", "升级", "高武")):
-            model_name = "地图进阶 + 力量升级"
-            recommended_count = 5
-        else:
-            model_name = "动态长篇升级"
-            recommended_count = max(3, min(6, phase_count))
-        count = max(3, min(7, recommended_count))
-        segment = max(1, chapters_per_volume // count)
-        distribution = []
-        start = 1
-        for phase_no in range(1, count + 1):
-            end = chapters_per_volume if phase_no == count else min(chapters_per_volume, start + segment - 1)
-            distribution.append(f"{start}-{end}")
-            start = end + 1
-        return {
-            "model_name": model_name,
-            "phase_count": count,
-            "why_this_model": "根据题材、目标读者和本卷功能动态选择，不强制套用固定五段模板。",
-            "chapter_distribution": " / ".join(distribution),
-        }
-
-    def _normalize_volume_phases(self, phases: list[Any]) -> list[dict[str, Any]]:
-        normalized = []
-        for index, phase in enumerate(phases, start=1):
-            if not isinstance(phase, dict):
-                continue
-            normalized.append(
-                {
-                    "phase_no": index,
-                    "phase_name": str(phase.get("phase") or phase.get("name") or f"阶段{index}"),
-                    "chapter_range": str(phase.get("章节区间") or phase.get("chapter_range") or ""),
-                    "dramatic_function": str(phase.get("dramatic_function") or phase.get("function") or phase.get("name") or "推进本卷阶段目标。"),
-                    "entry_condition": str(phase.get("entry_condition") or "承接上一阶段结果。"),
-                    "exit_condition": str(phase.get("exit_condition") or "制造下一阶段压力。"),
-                    "key_events": phase.get("major_events") if isinstance(phase.get("major_events"), list) else [str(phase.get(f"大事件{i}", "")) for i in range(1, 6) if phase.get(f"大事件{i}")],
-                    "main_reversal": str(phase.get("main_reversal") or phase.get("turning_point") or "阶段信息产生反转。"),
-                    "cost": str(phase.get("cost") or "主角付出资源、关系、身份或认知代价。"),
-                    "payoff": str(phase.get("payoff") or "兑现阶段目标或爽点。"),
-                    "next_pressure": str(phase.get("next_pressure") or "暴露更高层压力。"),
-                }
-            )
-        return normalized
-
-    def _chapter_range_from_volume_no(self, volume_no: int, chapters_per_volume: int) -> str:
-        start = (volume_no - 1) * chapters_per_volume + 1
-        return f"{start}-{start + chapters_per_volume - 1}"
 
     def _apply_book_outline(self, db: Session, project: models.Project, outline_plan: dict[str, Any]) -> None:
         story_bible = self._story_bible(db, project.id)
@@ -7066,217 +6710,7 @@ class StudioService:
             lines.append(f"风险：{', '.join([str(risk) for risk in item['risks']])}")
         return "\n".join([line for line in lines if line.strip()])
 
-    def _ensure_batch_can_generate(self, db: Session, project_id: str, request: ChapterOutlineBatchGenerateRequest) -> None:
-        if request.overwrite_existing:
-            return
-        requested_numbers = self._chapter_numbers_from_ranges(request)
-        existing = (
-            db.query(models.Chapter)
-            .filter(models.Chapter.project_id == project_id, models.Chapter.chapter_no.in_(requested_numbers), models.Chapter.deleted_at.is_(None))
-            .all()
-        )
-        if existing:
-            raise _conflict("章纲范围已存在，且 overwrite_existing=false")
-
-    def _chapter_numbers_from_ranges(self, request: ChapterOutlineBatchGenerateRequest) -> list[int]:
-        numbers: list[int] = []
-        for item in request.chapter_ranges:
-            numbers.extend(range(item.start_chapter_no, item.end_chapter_no + 1))
-        return sorted(dict.fromkeys(numbers))
-
-    def _chapter_outline_batch_context(
-        self,
-        db: Session,
-        project: models.Project,
-        request: ChapterOutlineBatchGenerateRequest,
-        chapter_outlines: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        story_bible = db.query(models.StoryBible).filter(models.StoryBible.project_id == project.id).first()
-        volumes = db.query(models.Volume).filter(models.Volume.project_id == project.id).order_by(models.Volume.volume_no.asc()).all()
-        return {
-            "project": serialize_project(project),
-            "story_bible": serialize_story_bible(story_bible) if story_bible else {},
-            "volumes": [serialize_volume(volume) for volume in volumes],
-            "chapter_ranges": [item.model_dump() for item in request.chapter_ranges],
-            "generation_requirement": request.generation_requirement,
-            "fallback_chapter_outlines": chapter_outlines,
-        }
-
-    def _chapter_outline_segment_requests(self, request: ChapterOutlineBatchGenerateRequest) -> list[ChapterOutlineBatchGenerateRequest]:
-        segments: list[ChapterOutlineBatchGenerateRequest] = []
-        for item in request.chapter_ranges:
-            current = item.start_chapter_no
-            while current <= item.end_chapter_no:
-                end = min(item.end_chapter_no, current + CHAPTER_OUTLINE_SEGMENT_SIZE - 1)
-                payload = request.model_dump()
-                payload["chapter_ranges"] = [{"volume_no": item.volume_no, "start_chapter_no": current, "end_chapter_no": end}]
-                payload["idempotency_key"] = f"{request.idempotency_key}:v{item.volume_no}:{current}-{end}"
-                segments.append(ChapterOutlineBatchGenerateRequest.model_validate(payload))
-                current = end + 1
-        return segments
-
-    def _chapter_outline_output_contract(self) -> dict[str, Any]:
-        return {
-            "root_key": "chapter_outlines",
-            "forbidden_root_keys": ["chapter_beats"],
-            "max_chapters_per_call": CHAPTER_OUTLINE_SEGMENT_SIZE,
-            "required_fields": list(CHAPTER_OUTLINE_REQUIRED_FIELDS),
-            "field_notes": {
-                "crisis": "不可逆选择，不是普通危险。",
-                "climax": "执行 crisis 中选择的行动。",
-                "outcome": "承担后果，改变后续局面。",
-                "chapter_hook": "章末追读钩子，可同步到 cliffhanger。",
-                "canon_updates": "本章确认或改变的正典事实，只写候选描述。",
-            },
-        }
-
-    def _extract_chapter_outlines(self, output: dict[str, Any]) -> list[dict[str, Any]]:
-        candidates = output.get("chapter_outlines")
-        return [item for item in candidates if isinstance(item, dict)] if isinstance(candidates, list) else []
-
-    def _chapter_outline_quality_gate(self, chapter_outlines: list[dict[str, Any]], request: ChapterOutlineBatchGenerateRequest, *, source_agent: str) -> dict[str, Any]:
-        requested_numbers = self._chapter_numbers_from_ranges(request)
-        issues: list[dict[str, Any]] = []
-        if len(chapter_outlines) != len(requested_numbers):
-            issues.append({"severity": "A", "issue": f"章纲数量不匹配：期望 {len(requested_numbers)}，实际 {len(chapter_outlines)}", "location": "chapter_outlines"})
-        seen_numbers = set()
-        for index, item in enumerate(chapter_outlines, start=1):
-            chapter_no = int(item.get("chapter_no") or 0)
-            seen_numbers.add(chapter_no)
-            for field in CHAPTER_OUTLINE_REQUIRED_FIELDS:
-                value = item.get(field)
-                if field in {"foreshadowing_plants", "foreshadowing_payoffs", "canon_updates", "continuity_risks"}:
-                    if not isinstance(value, list):
-                        issues.append({"severity": "A", "issue": f"{field} 必须是数组", "location": f"chapter_outlines[{index}]"})
-                elif value in (None, "", [], {}):
-                    issues.append({"severity": "A", "issue": f"缺少必填字段 {field}", "location": f"chapter_outlines[{index}]"})
-            haystack = " ".join(str(item.get(field) or "") for field in ("outline", "core_event", "conflict", "turn_point", "crisis", "climax", "outcome", "chapter_hook", "cliffhanger"))
-            for phrase in CHAPTER_OUTLINE_GENERIC_PHRASES:
-                if phrase in haystack:
-                    issues.append({"severity": "A", "issue": f"检测到模板化短语：{phrase}", "location": f"chapter_outlines[{index}]"})
-        missing_numbers = sorted(set(requested_numbers) - seen_numbers)
-        if missing_numbers:
-            issues.append({"severity": "A", "issue": f"缺少章节号：{missing_numbers[:20]}", "location": "chapter_outlines"})
-        if len(chapter_outlines) >= 5:
-            for field in ("core_event", "conflict", "chapter_hook"):
-                values = [str(item.get(field) or item.get("cliffhanger") or "").strip() for item in chapter_outlines]
-                unique_ratio = len(set(values)) / max(1, len(values))
-                if unique_ratio < 0.75:
-                    issues.append({"severity": "A", "issue": f"{field} 唯一度不足：{unique_ratio:.0%}", "location": "chapter_outlines"})
-        status = "failed" if any(item["severity"] == "A" for item in issues) else "passed"
-        return {
-            "status": status,
-            "source_agent": source_agent,
-            "summary": "通过" if status == "passed" else "；".join(item["issue"] for item in issues[:5]),
-            "issues": issues,
-            "chapter_count": len(chapter_outlines),
-        }
-
-    def _logic_audit_gate(self, output: dict[str, Any]) -> dict[str, Any]:
-        issues = output.get("issues") if isinstance(output.get("issues"), list) else []
-        blocking = [
-            item
-            for item in issues
-            if isinstance(item, dict) and str(item.get("severity") or "").upper().startswith("A")
-        ]
-        status_text = str(output.get("pass_status") or output.get("status") or output.get("overall_conclusion") or "")
-        if "不通过" in status_text or "blocked" in status_text or "needs_revision" in status_text:
-            blocking.append({"severity": "A", "issue": status_text or "逻辑审计要求返工", "location": "logic_audit"})
-        status = "failed" if blocking else "passed"
-        return {
-            "status": status,
-            "summary": "通过" if status == "passed" else "；".join(str(item.get("issue") or item) for item in blocking[:5]),
-            "issues": blocking,
-        }
-
-    def _chapter_outline_revision_route(self, audit_gate: dict[str, Any], request: ChapterOutlineBatchGenerateRequest) -> dict[str, Any]:
-        return {
-            "revision_required": True,
-            "status": "needs_revision",
-            "from_agent": "logic_audit",
-            "to_agent": "beat_control",
-            "chapter_ranges": [item.model_dump() for item in request.chapter_ranges],
-            "issues": audit_gate.get("issues", []),
-        }
-
-    def _chapter_numbers_from_text(self, text_value: Any) -> list[int]:
-        text = str(text_value or "")
-        numbers: list[int] = []
-        for match in re.finditer(r"第\s*(\d+)\s*(?:[-—–至到]\s*(\d+))?\s*章", text):
-            start = int(match.group(1))
-            end = int(match.group(2) or start)
-            numbers.extend([start, end] if end != start else [start])
-        return sorted(dict.fromkeys(numbers))
-
-    def _merge_foreshadowing_into_chapter_outlines(self, chapter_outlines: list[dict[str, Any]], output: dict[str, Any]) -> list[dict[str, Any]]:
-        ledger = output.get("ledger") if isinstance(output.get("ledger"), list) else []
-        by_no = {int(item.get("chapter_no") or 0): item for item in chapter_outlines}
-        for item in ledger:
-            if not isinstance(item, dict):
-                continue
-            entry = {
-                "id": item.get("id", ""),
-                "name": item.get("name", ""),
-                "importance": item.get("importance", ""),
-                "true_meaning": item.get("true_meaning", ""),
-            }
-            for chapter_no in self._chapter_numbers_from_text(item.get("first_appearance")):
-                if chapter_no in by_no:
-                    by_no[chapter_no].setdefault("foreshadowing_plants", []).append({**entry, "source": "first_appearance"})
-            progress_nodes = item.get("progress_nodes") if isinstance(item.get("progress_nodes"), list) else []
-            for node in progress_nodes:
-                for chapter_no in self._chapter_numbers_from_text(node):
-                    if chapter_no in by_no:
-                        by_no[chapter_no].setdefault("foreshadowing_plants", []).append({**entry, "source": "progress_node", "note": node})
-            for node in [item.get("payoff_node")]:
-                for chapter_no in self._chapter_numbers_from_text(node):
-                    if chapter_no in by_no:
-                        by_no[chapter_no].setdefault("foreshadowing_payoffs", []).append({**entry, "source": "payoff_node", "method": item.get("payoff_method", "")})
-        return [by_no[int(item.get("chapter_no") or 0)] for item in chapter_outlines]
-
-    def _build_chapter_outline_candidates(self, db: Session, project: models.Project, request: ChapterOutlineBatchGenerateRequest) -> list[dict[str, Any]]:
-        volumes = {
-            volume.volume_no: volume
-            for volume in db.query(models.Volume).filter(models.Volume.project_id == project.id).all()
-        }
-        candidates: list[dict[str, Any]] = []
-        for item in request.chapter_ranges:
-            volume = volumes.get(item.volume_no)
-            if volume is None:
-                raise _bad_request(f"第{item.volume_no}卷不存在，请先确认总纲和卷纲")
-            for chapter_no in range(item.start_chapter_no, item.end_chapter_no + 1):
-                candidates.append(
-                    {
-                        "chapter_no": chapter_no,
-                        "volume_no": item.volume_no,
-                        "title": f"第{chapter_no}章：{self._chapter_title_seed(volume, chapter_no)}",
-                        "outline": "",
-                        "pov_character": "",
-                        "core_event": "",
-                        "conflict": "",
-                        "crisis": "",
-                        "climax": "",
-                        "outcome": "",
-                        "turn_point": "",
-                        "emotional_beats": [],
-                        "plot_purpose": "",
-                        "cliffhanger": "",
-                        "chapter_hook": "",
-                        "foreshadowing_plants": [],
-                        "foreshadowing_payoffs": [],
-                        "canon_updates": [],
-                        "continuity_risks": [],
-                        "candidate_status": "skeleton",
-                        "word_target": project.chapter_word_target,
-                    }
-                )
-        return candidates
-
-    def _chapter_title_seed(self, volume: models.Volume, chapter_no: int) -> str:
-        seeds = ["目标浮现", "线索偏转", "阻力升级", "代价出现", "钩子落下"]
-        return f"{volume.title}·{seeds[(chapter_no - 1) % len(seeds)]}"
-
-    def _normalize_chapter_outline_item(self, item: dict[str, Any], project: models.Project, request: ChapterOutlineBatchGenerateRequest) -> dict[str, Any]:
+    def _normalize_chapter_outline_item(self, item: dict[str, Any], project: models.Project) -> dict[str, Any]:
         chapter_no = int(item.get("chapter_no") or 1)
         volume_no = int(item.get("volume_no") or 1)
         chapter_hook = str(item.get("chapter_hook") or item.get("cliffhanger") or item.get("hook") or "")
@@ -7359,7 +6793,7 @@ class StudioService:
         job_id: str | None,
         overwrite_existing: bool,
     ) -> list[models.Chapter]:
-        normalized = [self._normalize_chapter_outline_item(item, project, ChapterOutlineBatchGenerateRequest(chapter_ranges=[{"volume_no": int(item.get("volume_no", 1)), "start_chapter_no": int(item.get("chapter_no", 1)), "end_chapter_no": int(item.get("chapter_no", 1))}], idempotency_key="commit")) for item in candidates]
+        normalized = [self._normalize_chapter_outline_item(item, project) for item in candidates]
         numbers = [int(item["chapter_no"]) for item in normalized]
         existing_by_no = {
             chapter.chapter_no: chapter
@@ -7407,7 +6841,7 @@ class StudioService:
             chapter.deleted_at = None
             chapters.append(chapter)
             db.flush()
-            self._snapshot(db, project.id, chapter.id, job_id, "chapter_outline_batch", "chapter_outline", dumps(item), "批量章纲确认写入")
+            self._snapshot(db, project.id, chapter.id, job_id, "outline_debate", "chapter_outline", dumps(item), "大纲议事章纲确认写入")
             canon_payload = self._chapter_outline_canon_payload(item)
             if canon_payload:
                 self._persist_canon_updates(db, project.id, chapter.id, canon_payload)
@@ -7462,13 +6896,27 @@ class StudioService:
     ) -> int:
         current_agent = state.current_agent or "chapter_draft"
         total_steps = len(CHAPTER_DRAFT_PROGRESS_STEPS)
-        completed_steps = self._chapter_draft_step_number(current_agent, previous_step)
-        message = f"{current_agent} 已完成"
+        progress_event = state.progress_event if isinstance(state.progress_event, dict) else {}
+        step_status = str(progress_event.get("status") or "completed")
+        is_running = step_status == "running"
+        completed_steps = previous_step if is_running else self._chapter_draft_step_number(current_agent, previous_step)
+        step_label = self._chapter_step_label(current_agent)
+        message = str(progress_event.get("message") or "").strip()
+        if not message and is_running:
+            message = f"{step_label}正在执行，远程模型生成时可能需要等待。"
+        elif not message:
+            message = f"{current_agent} 已完成"
+        if not is_running and current_agent == "quality_gate" and isinstance(state.quality_gate, dict) and state.quality_gate.get("status") == "passed":
+            message = "质量门已通过，正在进入风格统一与字数扩写，长章节可能需要等待。"
+        elif not is_running and current_agent == "style_unifier":
+            message = "风格统一与字数扩写已完成"
         job.current_agent = current_agent
         job.heartbeat_at = utcnow()
         job.progress_json = dumps(
             {
                 "current_step": current_agent,
+                "current_step_label": step_label,
+                "current_step_status": step_status,
                 "total_steps": total_steps,
                 "completed_steps": completed_steps,
                 "message": message,
@@ -7478,25 +6926,25 @@ class StudioService:
         if parent_job_id and parent_chapter_no and parent_total_steps:
             parent_job = db.get(models.GenerationJob, parent_job_id)
             if parent_job is not None and parent_job.status not in {"succeeded", "failed", "cancelled"}:
-                parent_result = loads(parent_job.result_json, {}) if parent_job.result_json else {}
-                if not isinstance(parent_result, dict):
-                    parent_result = {}
-                parent_completed = len(parent_result.get("chapter_results", [])) if isinstance(parent_result.get("chapter_results"), list) else 0
+                parent_request = self._batch_request_from_job(parent_job)
+                parent_result = self._batch_result_payload(parent_job, parent_request)
                 parent_job.status = "running"
                 parent_job.current_agent = f"batch_generate:chapter_{parent_chapter_no}:{current_agent}"
                 parent_job.heartbeat_at = utcnow()
                 parent_job.progress_json = dumps(
-                    {
-                        "current_step": f"chapter_{parent_chapter_no}:{current_agent}",
-                        "total_steps": parent_total_steps,
-                        "completed_steps": parent_completed,
-                        "current_chapter_no": parent_chapter_no,
-                        "child_job_id": job.id,
-                        "child_current_step": current_agent,
-                        "child_total_steps": total_steps,
-                        "child_completed_steps": completed_steps,
-                        "message": f"第{parent_chapter_no}章：{message}",
-                    }
+                    self._batch_progress_payload(
+                        parent_job,
+                        parent_request,
+                        parent_result,
+                        current_step=f"chapter_{parent_chapter_no}:{current_agent}",
+                        current_chapter_no=parent_chapter_no,
+                        child_job_id=job.id,
+                        child_current_step=current_agent,
+                        child_current_step_status=step_status,
+                        child_total_steps=total_steps,
+                        child_completed_steps=completed_steps,
+                        message=f"第{parent_chapter_no}章：{step_label}{'正在执行' if is_running else '已完成'}",
+                    )
                 )
         db.commit()
         return completed_steps
@@ -7519,14 +6967,18 @@ class StudioService:
     def _finish_job(self, db: Session, job: models.GenerationJob, result: dict) -> None:
         total_steps = max(int(loads(job.progress_json, {}).get("total_steps", 1)), 1)
         job.status = "succeeded"
-        job.progress_json = dumps(
-            {
-                "current_step": "completed",
-                "total_steps": total_steps,
-                "completed_steps": total_steps,
-                "message": "任务已完成",
-            }
-        )
+        if job.job_type == "batch_generate":
+            request = self._batch_request_from_job(job)
+            job.progress_json = dumps(self._batch_progress_payload(job, request, result, current_step="completed", message="任务已完成"))
+        else:
+            job.progress_json = dumps(
+                {
+                    "current_step": "completed",
+                    "total_steps": total_steps,
+                    "completed_steps": total_steps,
+                    "message": "任务已完成",
+                }
+            )
         job.result_json = dumps(result)
         job.finished_at = utcnow()
         job.heartbeat_at = utcnow()
@@ -7565,760 +7017,6 @@ class StudioService:
         )
         db.add(version)
         return version
-
-    def _persist_planned_chapters(self, db: Session, project: models.Project, planned: list[dict[str, Any]], request: PlanChaptersRequest, job_id: str) -> list[models.Chapter]:
-        chapters = []
-        existing_by_no = {
-            chapter.chapter_no: chapter
-            for chapter in db.query(models.Chapter)
-            .filter(models.Chapter.project_id == project.id, models.Chapter.chapter_no >= request.start_chapter_no, models.Chapter.chapter_no < request.start_chapter_no + request.chapter_count)
-            .all()
-        }
-        for item in planned:
-            chapter_no = int(item["chapter_no"])
-            chapter = existing_by_no.get(chapter_no)
-            if chapter is None:
-                max_sort_order = db.query(func.max(models.Chapter.sort_order)).filter(models.Chapter.project_id == project.id).scalar() or 0
-                chapter = models.Chapter(
-                    id=generate_id("chp"),
-                    project_id=project.id,
-                    volume_no=int(item.get("volume_no", 1)),
-                    chapter_no=chapter_no,
-                    title=item.get("title", f"第{chapter_no}章"),
-                    word_target=int(item.get("word_target", project.chapter_word_target)),
-                    sort_order=max_sort_order + len(chapters) + 1,
-                )
-                db.add(chapter)
-            chapter.title = item.get("title", chapter.title)
-            chapter.volume_no = int(item.get("volume_no", chapter.volume_no or 1))
-            chapter.word_target = int(item.get("word_target", chapter.word_target or project.chapter_word_target))
-            chapter.sort_order = chapter_no
-            chapter.outline = item.get("outline", "")
-            chapter.pov_character = item.get("pov_character", "")
-            chapter.core_event = item.get("core_event", "")
-            chapter.conflict = item.get("conflict", "")
-            chapter.turn_point = item.get("turn_point", "")
-            chapter.emotional_beats_json = dumps(item.get("emotional_beats", []))
-            chapter.plot_purpose = item.get("plot_purpose", "")
-            chapter.cliffhanger = item.get("cliffhanger", "")
-            if chapter.status not in CHAPTER_OUTLINE_STATUS_PROTECTED and not chapter.draft_text and not chapter.final_text:
-                chapter.status = "planned"
-            chapter.deleted_at = None
-            chapters.append(chapter)
-            self._snapshot(db, project.id, chapter.id, job_id, "chapter_planner", "chapter_outline", dumps(item), "章节规划")
-        return chapters
-
-    def _build_long_novel_outline_plan(
-        self,
-        db: Session,
-        project: models.Project,
-        request: PlanChaptersRequest,
-        state: NovelStudioState,
-    ) -> dict[str, Any]:
-        story_bible = db.query(models.StoryBible).filter(models.StoryBible.project_id == project.id).first()
-        characters = db.query(models.Character).filter(models.Character.project_id == project.id).order_by(models.Character.importance_score.desc()).all()
-        entities = db.query(models.StoryEntity).filter(models.StoryEntity.project_id == project.id).order_by(models.StoryEntity.importance_score.desc()).limit(8).all()
-        world_facts = db.query(models.WorldFact).filter(models.WorldFact.project_id == project.id).order_by(models.WorldFact.importance_score.desc()).limit(10).all()
-        protagonist = next((character for character in characters if character.role_type == "protagonist"), characters[0] if characters else None)
-        antagonist = next((character for character in characters if character.role_type == "antagonist"), None)
-        target_words = request.target_words or project.target_words or project.planned_chapter_count * project.chapter_word_target
-        chapter_word_target = request.chapter_word_target or project.chapter_word_target
-        volume_count = request.volume_count or max(1, project.current_volume, 3)
-        chapters_per_volume = request.chapters_per_volume or max(1, project.planned_chapter_count // volume_count)
-        genre = project.genre or state.genre or "类型小说"
-        protagonist_name = protagonist.name if protagonist else "主角"
-        antagonist_name = antagonist.name if antagonist else "核心反派/阻力势力"
-        setting_titles = [fact.title for fact in world_facts[:6]] or ["核心规则", "主线暗线", "力量代价"]
-        entity_names = [entity.name for entity in entities[:6]] or ["核心地图", "关键组织", "关键物件"]
-        main_conflict = story_bible.main_conflict if story_bible and story_bible.main_conflict else project.premise
-        style = project.style_guide or (story_bible.style_guide if story_bible else "") or "高密度、强钩子、因果链清晰"
-        structured_prompt = {
-            "role": "顶级长篇网文总编 + 爽文结构设计师",
-            "task": "不要写正文，只生成全书大纲、卷纲和本次章节纲。",
-            "parameters": {
-                "target_words": target_words,
-                "volume_count": volume_count,
-                "chapters_per_volume": chapters_per_volume,
-                "chapter_word_target": chapter_word_target,
-                "start_chapter_no": request.start_chapter_no,
-                "chapter_count": request.chapter_count,
-            },
-            "source_context": {
-                "title": project.title,
-                "genre": genre,
-                "target_reader": project.target_reader,
-                "premise": project.premise,
-                "initial_idea": project.initial_idea,
-                "style": style,
-                "protagonist": protagonist_name,
-                "antagonist": antagonist_name,
-                "story_bible": serialize_story_bible(story_bible) if story_bible else {},
-                "core_characters": [serialize_character(character) for character in characters[:8]],
-                "core_entities": [serialize_story_entity(entity) for entity in entities[:8]],
-                "world_facts": [serialize_world_fact(fact) for fact in world_facts[:10]],
-            },
-            "output_contract": ["世界圣经", f"{volume_count}卷单元总表", f"{request.chapter_count}章章纲", "全卷逻辑审计"],
-            "rules": [
-                "每卷必须推动主线升级",
-                "每卷必须有一个反派或势力破防",
-                "每卷必须有主角能力或地位变化",
-                "暗线必须逐卷推进，不能断",
-                "不要写成散点脑洞，要保证因果链",
-                "不要输出正文，只输出大纲",
-            ],
-        }
-        world_bible = {
-            "题材定性与世界蓝图": f"《{project.title}》定位为{genre}长篇，面向{project.target_reader}。世界蓝图围绕“{project.premise or main_conflict}”展开，所有地图、势力和规则都服务主线升级。",
-            "核心灵感锚定": project.initial_idea or project.premise or request.outline_requirement,
-            "主角金手指机制": self._join_nonempty(
-                [
-                    f"{protagonist_name}的核心能力/优势必须与设定事实“{self._pick(setting_titles, 0, '核心规则')}”绑定。",
-                    "能力每次升级都需要情绪、资源、情报或关系代价，不能无成本膨胀。",
-                ],
-                " ",
-            ),
-            "等级体系": [
-                f"入局期：第1卷，理解{self._pick(setting_titles, 0, '核心规则')}。",
-                f"扩张期：第2-{max(2, volume_count // 2)}卷，主角进入{self._pick(entity_names, 0, '核心地图')}并获得地位。",
-                f"破局期：第{max(3, volume_count // 2 + 1)}-{volume_count}卷，暗线真相和终局势力正面碰撞。",
-            ],
-            "四大成长线": {
-                "A. 能力/系统线": f"{protagonist_name}从被动使用能力，逐步理解规则代价并反向设计战局。",
-                "B. 势力/世界线": f"从{self._pick(entity_names, 0, '局部地图')}扩展到全局秩序，逐卷揭开{main_conflict}背后的结构性问题。",
-                "C. 社会地位与反馈线": "从被质疑、被围观、被利用，到成为能改变资源分配和舆论反馈的核心变量。",
-                "D. 情感/羁绊线": "同伴、导师、对手和副线角色不断制造选择代价，避免主角只靠外挂推进。",
-            },
-            f"{volume_count}卷生态人物树": [
-                {
-                    "卷区间": f"第{index + 1}卷",
-                    "核心人物生态": [protagonist_name, antagonist_name, self._pick([character.name for character in characters], index + 1, "阶段盟友")],
-                    "人物功能": "主角、阶段阻力、信息差角色和情感代价角色形成闭环。",
-                }
-                for index in range(volume_count)
-            ],
-        }
-        volume_table: list[dict[str, Any]] = []
-        phase_names = [
-            ("Phase 1【目标+主线引入】", "目标建立、地图开启、第一波规则展示"),
-            ("Phase 2【阻碍+支线并行】", "阻力升级、支线并行、反派第一次压制"),
-            ("Phase 3【伏笔揭露+多转折铺垫】", "旧伏笔变成新解释，多线索逼近同一个真相"),
-            ("Phase 4【爆发+情绪释放】", "主角用前文积累反打，阶段反派或势力破防"),
-            ("Phase 5【收尾+地位转化】", "回收本卷目标，改变主角地位并抛出下一卷钩子"),
-        ]
-        for index in range(volume_count):
-            volume_no = index + 1
-            start = (volume_no - 1) * chapters_per_volume + 1
-            end = volume_no * chapters_per_volume
-            title = request.volume_title if volume_no == max(1, ((request.start_chapter_no - 1) // chapters_per_volume) + 1) else f"第{volume_no}卷：{self._pick(['入局', '破圈', '失控', '围猎', '反杀', '裂变', '登阶', '真相', '终局', '新秩序'], index, '升级')}"
-            phase_blocks = []
-            for phase_index, (phase_name, phase_goal) in enumerate(phase_names):
-                phase_start = start + phase_index * max(1, chapters_per_volume // 5)
-                phase_end = min(end, phase_start + max(1, chapters_per_volume // 5) - 1)
-                phase_blocks.append(
-                    {
-                        "phase": phase_name,
-                        "章节区间": f"{phase_start}-{phase_end}章",
-                        "全部出场角色": [protagonist_name, antagonist_name, self._pick([character.name for character in characters], phase_index + index, "阶段角色")],
-                        "大事件1": f"{phase_goal}，围绕{self._pick(setting_titles, phase_index, '核心规则')}制造新问题。",
-                        "大事件2": f"{self._pick(entity_names, phase_index, '关键地点')}的资源或情报被重新分配。",
-                        "大事件3": f"{antagonist_name}或其代理势力逼迫{protagonist_name}付出代价。",
-                        "大事件4": "暗线露出一条可追踪证据，不直接揭底。",
-                        "大事件5": "阶段选择改变角色关系或公众反馈。",
-                    }
-                )
-            volume_table.append(
-                {
-                    "第X卷": f"第{volume_no}卷",
-                    "章节区间": f"{start}-{end}章",
-                    "卷名": title,
-                    "核心地图": self._pick(entity_names, index, "核心地图"),
-                    "本卷主角提升目标": {
-                        "能力": f"掌握{self._pick(setting_titles, index, '核心规则')}的新用法。",
-                        "金手指": "从被动触发转为主动设计触发条件。",
-                        "地位": f"从第{volume_no - 1}卷结果中获得新的社会位置或敌对关注。",
-                        "情感/人际": "新增一个羁绊、债务或背叛风险。",
-                    },
-                    "剧情多轨道架构": {
-                        "主线": f"{protagonist_name}推进长期目标，本卷解决一个阶段目标并制造下一卷问题。",
-                        "暗线": f"{main_conflict}背后的真相推进一格，不断指向最终卷。",
-                    },
-                    "50章高密度剧情流水线执行协议": phase_blocks,
-                    "卷末大钩子": f"{protagonist_name}以为解决了{title}的核心问题，却发现{self._pick(setting_titles, index + 1, '更大规则')}才是真正入口。",
-                    "全卷逻辑审计": {
-                        "冲突审计": "Yes：主角阶段目标与势力阻力正面相撞。",
-                        "代价审计": "Yes：能力、关系、地位至少一项付出代价。",
-                        "爽感审计": "Yes：阶段势力破防，主角获得可见反馈。",
-                        "钩子审计": "Yes：卷末钩子必须引向下一卷地图或暗线真相。",
-                    },
-                }
-            )
-        chapters = []
-        for offset in range(request.chapter_count):
-            chapter_no = request.start_chapter_no + offset
-            volume_no = ((chapter_no - 1) // chapters_per_volume) + 1
-            phase_index = min(4, ((chapter_no - 1) % chapters_per_volume) // max(1, chapters_per_volume // 5))
-            volume_outline = volume_table[min(volume_no - 1, len(volume_table) - 1)]
-            phase = volume_outline["50章高密度剧情流水线执行协议"][phase_index]
-            chapters.append(
-                {
-                    "chapter_no": chapter_no,
-                    "volume_no": volume_no,
-                    "title": f"第{chapter_no}章：{self._pick(['入局', '试探', '破防', '反转', '钩子'], offset, '推进')}",
-                    "outline": f"承接《{project.title}》总纲，本章位于{volume_outline['卷名']}的{phase['phase']}。围绕“{request.outline_requirement}”推进一个因果节点，不写散点脑洞。",
-                    "pov_character": protagonist_name,
-                    "core_event": phase["大事件1"],
-                    "conflict": f"{protagonist_name}的阶段目标与{antagonist_name}代表的阻力正面碰撞。",
-                    "turn_point": phase["大事件4"],
-                    "emotional_beats": ["目标", "阻碍", "误判", "反击", "钩子"],
-                    "plot_purpose": f"推进主线升级，服务{volume_outline['剧情多轨道架构']['主线']}",
-                    "cliffhanger": f"{phase['大事件5']}，并把读者推向下一章。",
-                    "word_target": chapter_word_target,
-                }
-            )
-        outline_state_payload = self._build_outline_state_payload(
-            project=project,
-            request=request,
-            state=state,
-            target_words=target_words,
-            volume_count=volume_count,
-            chapters_per_volume=chapters_per_volume,
-            chapter_word_target=chapter_word_target,
-            genre=genre,
-            protagonist_name=protagonist_name,
-            antagonist_name=antagonist_name,
-            main_conflict=main_conflict,
-            setting_titles=setting_titles,
-            entity_names=entity_names,
-            style=style,
-            world_bible=world_bible,
-            volume_table=volume_table,
-            chapters=chapters,
-            characters=[serialize_character(character) for character in characters[:12]],
-        )
-        return {
-            "parameters": {
-                "target_words": target_words,
-                "volume_count": volume_count,
-                "chapters_per_volume": chapters_per_volume,
-                "chapter_word_target": chapter_word_target,
-            },
-            "structured_prompt": structured_prompt,
-            "世界圣经": world_bible,
-            "10卷单元总表": volume_table,
-            "chapters": chapters,
-            **outline_state_payload,
-        }
-
-    def _build_outline_state_payload(
-        self,
-        project: models.Project,
-        request: PlanChaptersRequest,
-        state: NovelStudioState,
-        target_words: int,
-        volume_count: int,
-        chapters_per_volume: int,
-        chapter_word_target: int,
-        genre: str,
-        protagonist_name: str,
-        antagonist_name: str,
-        main_conflict: str,
-        setting_titles: list[str],
-        entity_names: list[str],
-        style: str,
-        world_bible: dict[str, Any],
-        volume_table: list[dict[str, Any]],
-        chapters: list[dict[str, Any]],
-        characters: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        one_sentence = project.premise or state.initial_idea or request.outline_requirement
-        config = {
-            "project_name": project.title,
-            "genre": genre,
-            "tone": style,
-            "target_words": target_words,
-            "target_volumes": volume_count,
-            "chapters_per_volume": chapters_per_volume,
-            "words_per_chapter": chapter_word_target,
-            "must_keep_elements": [project.initial_idea or project.premise, request.outline_requirement],
-            "forbidden_elements": ["无铺垫反转", "机械降神", "主角无代价碾压", "伏笔只埋不收"],
-        }
-        story_kernel = {
-            "one_sentence_story": one_sentence,
-            "core_story": f"{protagonist_name}围绕“{one_sentence}”被推入长期冲突，在每卷付出代价、扩大地图并逼近终局真相。",
-            "protagonist_desire": f"{protagonist_name}想夺回解释自身命运和世界规则的主动权。",
-            "core_conflict": main_conflict,
-            "failure_cost": "如果失败，主角会失去关系、地位和揭开真相的资格，世界旧秩序继续吞掉后来者。",
-            "long_term_engines": ["阶段地图升级", "势力利益冲突", "金手指代价反噬", "人物秘密揭露", "终局真相分卷推进"],
-            "ending_directions": ["主角改写旧规则但保留必要代价", "终局伏笔回收后建立新秩序", "主角完成认知成长而非单纯变强"],
-            "suitability_score": 86.0,
-        }
-        market_position = {
-            "type_positioning": {
-                "main_type": genre,
-                "sub_types": ["升级流", "悬疑暗线", "势力博弈"],
-                "tags": list(dict.fromkeys([genre, "长线伏笔", "阶段破局", "成长代价"])),
-            },
-            "target_readers": project.target_reader,
-            "core_selling_points": [
-                f"{protagonist_name}的能力与世界规则绑定，爽点来自破局而不是无脑碾压。",
-                "每卷都有独立地图和阶段势力破防。",
-                "暗线真相、人物秘密和伏笔账本持续推进。",
-            ],
-            "differentiation": f"把“{one_sentence}”拆成世界规则、人物成长和势力冲突三条可追读链。",
-            "core_emotions": ["爽", "燃", "悬疑", "压迫", "反转"],
-            "satisfaction_types": ["规则套利", "弱势反打", "身份翻转", "势力破防", "旧案揭露", "同伴救场", "代价换胜", "卷末大钩子"],
-            "fatigue_risks": ["连续靠同一种能力解题", "反派只负责震惊", "世界真相揭露过快"],
-            "type_boundaries": ["不写正文", "不让设定说明替代行动冲突", "不让终局秘密提前摊牌"],
-        }
-        schema_world_bible = {
-            "world_summary": world_bible["题材定性与世界蓝图"],
-            "base_rules": [
-                "所有新增设定必须能转化为行动冲突。",
-                "主角能力升级必须存在限制、代价或反噬。",
-                "势力变化必须回应资源、地位或真相分配。",
-                "暗线每卷至少推进一次，不能断裂。",
-                "卷末钩子必须连接下一卷地图、敌人或真相。",
-            ],
-            "power_system": {
-                "levels": world_bible["等级体系"],
-                "source": self._pick(setting_titles, 0, "核心规则"),
-                "upgrade_method": "通过阶段目标、资源交换、情报验证和关系代价逐卷升级。",
-                "cost": "每次升级至少损耗资源、关系、身份安全或心理稳定性之一。",
-                "limits": "不能跳过前置认知；越级使用必须有明确代价。",
-                "loss_of_control_risk": "能力被敌方识破后会反向制造陷阱。",
-            },
-            "social_structure": {
-                "surface_society": "公开秩序提供规则解释。",
-                "inner_society": "核心势力通过资源、资格和信息差维持优势。",
-                "official_organizations": [self._pick(entity_names, 0, "官方组织")],
-                "civilian_organizations": [self._pick(entity_names, 1, "民间组织")],
-                "underground_organizations": [self._pick(entity_names, 2, "地下势力")],
-                "supernatural_organizations": [self._pick(entity_names, 3, "超常组织")],
-            },
-            "factions": [
-                {
-                    "name": self._pick(entity_names, index, f"阶段势力{index + 1}"),
-                    "position": "阶段阻力/资源持有者",
-                    "goal": f"围绕{self._pick(setting_titles, index, '核心规则')}维持自身优势。",
-                    "resources": [self._pick(setting_titles, index, "关键资源")],
-                    "representatives": [antagonist_name],
-                    "relation_to_protagonist": "从利用、误解到围剿，再到终局正面碰撞。",
-                    "conflicts_it_can_create": ["资源封锁", "舆论围剿", "规则误导", "关系撕裂"],
-                }
-                for index in range(min(5, max(1, volume_count)))
-            ],
-            "resources": [{"name": name, "plot_value": "制造争夺、交换和代价"} for name in setting_titles[:5]],
-            "map_layers": [self._pick(entity_names, index, f"第{index + 1}层地图") for index in range(min(6, volume_count))],
-            "historical_secrets": [
-                f"{self._pick(setting_titles, 0, '旧规则')}曾被关键势力篡改。",
-                f"{protagonist_name}与终局真相存在未公开关联。",
-            ],
-            "final_secret": f"{main_conflict}并非单一反派造成，而是旧秩序长期分配规则失衡的结果。",
-            "forbidden_changes": config["forbidden_elements"],
-        }
-        protagonist_arcs = [
-            {
-                "volume": index + 1,
-                "external_goal": f"解决第{index + 1}卷阶段目标，并进入{self._pick(entity_names, index, '新地图')}。",
-                "internal_change": "从被规则驱赶，逐步学会主动定义选择边界。",
-                "ability_change": f"掌握{self._pick(setting_titles, index, '核心规则')}的新用法。",
-                "relationship_change": "新增羁绊、债务、背叛风险或公众反馈。",
-                "cost": "暴露能力线索，消耗资源，或牺牲一段安全关系。",
-            }
-            for index in range(volume_count)
-        ]
-        character_tree = {
-            "character_function_overview": "主角、阶段反派、盟友、信息差角色、情感代价角色和终局见证者共同支撑长篇。",
-            "core_character_tree": characters
-            or [
-                {
-                    "name": protagonist_name,
-                    "initial_identity": "被卷入核心冲突的人",
-                    "faction": "主角阵营",
-                    "first_volume": 1,
-                    "surface_goal": "解决眼前危机",
-                    "deep_desire": "夺回选择权",
-                    "secret": "与旧规则有关",
-                    "relation_to_protagonist_start": "本人",
-                    "relation_to_protagonist_end": "完成认知成长",
-                    "representative_conflict": main_conflict,
-                    "arc": "从被动承受到主动承担",
-                    "final_fate": "参与建立新秩序",
-                    "can_die_or_exit": False,
-                }
-            ],
-            "protagonist_camp": {"members": [protagonist_name], "internal_tension": "胜利代价和公开真相的风险不断拉扯。"},
-            "villain_chain": [
-                {
-                    "volume": index + 1,
-                    "villain": f"{antagonist_name}代理人{index + 1}",
-                    "desire": "维护阶段资源和规则解释权。",
-                    "why_against_protagonist": f"{protagonist_name}的行动威胁其利益。",
-                    "world_pressure_represented": self._pick(setting_titles, index, "世界压力"),
-                    "how_they_fail": "被主角利用前文伏笔和规则限制反制。",
-                    "consequence_after_failure": "更高层势力开始直接关注主角。",
-                }
-                for index in range(volume_count)
-            ],
-            "relationship_network": "关系从试探、债务、互信、背叛风险逐步进入终局共同选择。",
-            "character_arc_audit": {"tool_like_characters": [], "fix_suggestions": ["新增角色必须补齐欲望、秘密和退场条件。"]},
-        }
-        faction_conflicts = {
-            "core_conflict_one_sentence": main_conflict,
-            "factions": schema_world_bible["factions"],
-            "faction_relationships": "阶段势力之间既互相利用又竞争资源，主角不断把局部冲突推向全局冲突。",
-            "conflict_escalation_chain": [
-                {
-                    "volume": index + 1,
-                    "surface_conflict": f"争夺{self._pick(setting_titles, index, '关键资源')}的解释权。",
-                    "deep_conflict": "谁有资格定义世界规则。",
-                    "why_protagonist_gets_involved": "阶段目标和长期欲望被同一规则卡住。",
-                    "enemy_pressure": "资源封锁、身份污名、关系威胁和规则陷阱。",
-                    "volume_end_escalation": "局部胜利暴露更高层敌人。",
-                }
-                for index in range(volume_count)
-            ],
-            "local_to_global_escalation_path": "个人危机 -> 阶段势力冲突 -> 资源分配冲突 -> 旧秩序真相 -> 终局重构。",
-            "conflict_repetition_risks": [{"risk": "每卷都用同类敌人压制。", "alternative": "轮换资源战、舆论战、关系战、规则战和真相战。"}],
-        }
-        power_progression = {
-            "cheat_one_sentence": f"{protagonist_name}能通过理解并批注{self._pick(setting_titles, 0, '核心规则')}来制造阶段性破局机会。",
-            "basic_rules": {
-                "trigger_condition": "必须先获得足够情报或付出可见代价。",
-                "reward_mechanism": "获得一次规则解释、资源置换或局部反制机会。",
-                "exchange_mechanism": "以记忆、关系信任、身份安全或稀缺资源交换。",
-                "cooldown_or_limits": "同类场景不能连续使用；越级使用会暴露弱点。",
-                "side_effects": "敌人逐步学会反向设置诱饵。",
-                "loss_of_control_risk": "错误批注会强化敌方规则。",
-            },
-            "upgrade_route": [
-                {
-                    "volume": item["volume"],
-                    "unlocked_ability": item["ability_change"],
-                    "use_case": item["external_goal"],
-                    "limit": "必须有前文铺垫和代价。",
-                    "cost": item["cost"],
-                    "signature_satisfaction_scene": "用旧伏笔反制阶段势力。",
-                }
-                for item in protagonist_arcs
-            ],
-            "enemy_counter_methods": ["伪造情报", "污染资源", "绑架关系", "诱导越级", "公开污名", "切断补给"],
-            "failure_scenarios": ["信息不足", "代价不可接受", "关系被牵连", "敌人主动设局"],
-            "satisfaction_expression": "爽点来自理解规则后的反打、身份翻转和势力破防，避免单纯数值碾压。",
-            "power_inflation_control": {"abilities_to_delay": ["终局规则改写", "无成本复盘"], "abilities_requiring_cost": ["越级反杀", "公开改变秩序"]},
-        }
-        ten_volume_table = []
-        volume_outlines = []
-        beat_sheets = []
-        for index, item in enumerate(volume_table):
-            volume_no = index + 1
-            phases = []
-            chapter_start = (volume_no - 1) * chapters_per_volume + 1
-            chapter_end = volume_no * chapters_per_volume
-            for phase_index, phase in enumerate(item["50章高密度剧情流水线执行协议"]):
-                phases.append(
-                    {
-                        "phase": phase_index + 1,
-                        "name": phase["phase"],
-                        "chapter_range": phase["章节区间"],
-                        "characters": phase["全部出场角色"],
-                        "major_events": [
-                            {
-                                "event_no": event_no,
-                                "event": phase[f"大事件{event_no}"],
-                                "conflict": "目标、阻力、信息差和代价正面碰撞。",
-                                "effect": "推动主线或暗线，不作为散点脑洞存在。",
-                            }
-                            for event_no in range(1, 6)
-                        ],
-                    }
-                )
-            ten_volume_table.append(
-                {
-                    "volume": volume_no,
-                    "title": item["卷名"],
-                    "chapter_range": item["章节区间"],
-                    "core_map": item["核心地图"],
-                    "main_plot": item["剧情多轨道架构"]["主线"],
-                    "hidden_plot": item["剧情多轨道架构"]["暗线"],
-                    "core_enemy_or_pressure": f"{antagonist_name}及其阶段代理压力",
-                    "protagonist_upgrade": item["本卷主角提升目标"],
-                    "relationship_change": item["本卷主角提升目标"]["情感/人际"],
-                    "world_reveal": f"揭开{self._pick(setting_titles, index, '核心规则')}的一层误导版本。",
-                    "final_hook": item["卷末大钩子"],
-                    "next_volume_connection": "卷末钩子直接引向下一卷地图、敌人或真相。",
-                }
-            )
-            volume_outlines.append(
-                {
-                    "volume": volume_no,
-                    "chapter_range": item["章节区间"],
-                    "title": item["卷名"],
-                    "core_map": item["核心地图"],
-                    "protagonist_upgrade_goal": item["本卷主角提升目标"],
-                    "multi_track_plot": item["剧情多轨道架构"],
-                    "phases": phases,
-                    "final_hook": item["卷末大钩子"],
-                    "change_summary": {
-                        "protagonist": "能力、地位或认知至少一项发生可见变化。",
-                        "world": "地图扩大或规则解释更新。",
-                        "relationships": "羁绊、债务、背叛风险或公众反馈改变。",
-                        "foreshadowing": "新增并推进至少一条跨卷伏笔。",
-                        "enemy": "阶段势力破防并引出更高层压力。",
-                    },
-                    "risks": ["爽点重复", "战力膨胀过快", "暗线推进不足"],
-                }
-            )
-            ten_chapter_loops = []
-            for loop_index in range(5):
-                loop_start = chapter_start + loop_index * max(1, chapters_per_volume // 5)
-                loop_end = min(chapter_end, loop_start + max(1, chapters_per_volume // 5) - 1)
-                ten_chapter_loops.append(
-                    {
-                        "chapter_range": f"{loop_start}-{loop_end}",
-                        "small_goal": f"完成第{loop_index + 1}个阶段目标。",
-                        "small_obstacle": "遭遇资源、关系、情报或规则阻碍。",
-                        "small_climax": "用前文铺垫完成一次局部反打。",
-                        "emotional_reward": self._pick(["压迫释放", "爽点兑现", "真相逼近", "关系升温", "身份翻转"], loop_index, "阶段回报"),
-                        "new_problem": "胜利暴露下一层风险。",
-                    }
-                )
-            beat_sheets.append(
-                {
-                    "volume": volume_no,
-                    "emotional_curve": "悬疑 -> 压迫 -> 误判 -> 反转 -> 爽感爆发 -> 余波 -> 新危机",
-                    "phase_beat_functions": [
-                        {
-                            "phase": phase["phase"],
-                            "function": phase["name"],
-                            "main_emotion": self._pick(["压迫", "试探", "反转", "爆发", "余波"], idx, "推进"),
-                            "mini_climax_position": phase["chapter_range"].split("-")[-1],
-                            "ending_hook": "阶段结尾必须留下新问题。",
-                        }
-                        for idx, phase in enumerate(phases)
-                    ],
-                    "ten_chapter_loops": ten_chapter_loops,
-                    "chapter_function_table": [
-                        {
-                            "chapter": chapter_no,
-                            "function": "目标/阻力/变化/回报/钩子",
-                            "protagonist_goal": f"推进第{volume_no}卷阶段目标。",
-                            "obstacle": f"{antagonist_name}相关压力升级。",
-                            "emotion": self._pick(["目标", "阻碍", "误判", "反击", "钩子"], chapter_no, "推进"),
-                            "information_gain": f"获得关于{self._pick(setting_titles, chapter_no, '核心规则')}的新信息。",
-                            "ending_hook": "以选择、反常细节或敌方动作收束。",
-                            "satisfaction_type": self._pick(market_position["satisfaction_types"], chapter_no, "阶段爽点"),
-                        }
-                        for chapter_no in range(chapter_start, chapter_end + 1)
-                    ],
-                    "repetition_check": {
-                        "same_enemy_type": "不得连续两段循环使用同类敌人。",
-                        "same_battle_type": "战斗、调查、谈判、舆论和潜入轮换。",
-                        "same_comedy_type": "轻松桥段只作为节奏缓冲。",
-                        "same_shock_reaction": "减少围观震惊，增加实际后果。",
-                        "same_exposition_type": "设定通过行动、交易和失败揭露。",
-                    },
-                    "revision_suggestions": [],
-                }
-            )
-        full_structure = {
-            "full_story_one_sentence": story_kernel["core_story"],
-            "story_stages": [
-                {"stage_name": "开局入局", "volume_range": "1-3", "main_function": "建立卖点、基础世界和主角欲望", "reader_emotion": "新鲜、爽、悬疑", "protagonist_change": "从被动承受转向主动破局"},
-                {"stage_name": "中段扩张", "volume_range": f"4-{max(6, volume_count - 3)}", "main_function": "扩大地图、揭开世界真相", "reader_emotion": "压迫、反转、格局扩大", "protagonist_change": "从局部胜利者变成秩序变量"},
-                {"stage_name": "终局闭环", "volume_range": f"{max(7, volume_count - 2)}-{volume_count}", "main_function": "解决核心危机并回收伏笔", "reader_emotion": "燃、宿命感、闭环", "protagonist_change": "完成认知和能力闭环"},
-            ],
-            "ten_volume_table": ten_volume_table,
-            "upgrade_curve": {
-                "map": [item["core_map"] for item in ten_volume_table],
-                "enemy": [item["core_enemy_or_pressure"] for item in ten_volume_table],
-                "truth": [item["world_reveal"] for item in ten_volume_table],
-                "status": [item["protagonist_upgrade"]["地位"] for item in ten_volume_table],
-                "ability": [item["protagonist_upgrade"]["能力"] for item in ten_volume_table],
-                "emotion_intensity": ["低", "中", "中高", "高", "高", "更高", "压迫", "爆发", "终局", "闭环"][:volume_count],
-            },
-            "ending_closure_design": {
-                "main_plot_closure": ["核心矛盾正面解决", "世界规则完成重构"],
-                "character_closure": ["主角认知闭环", "主要关系完成选择"],
-                "foreshadowing_closure": ["终局伏笔回收", "误导版本反转为真相"],
-            },
-        }
-        foreshadowing_ledger = [
-            {
-                "id": f"F{index + 1:03d}",
-                "name": f"{self._pick(setting_titles, index, '核心伏笔')}的误导版本",
-                "first_appearance": f"第{index * chapters_per_volume + 1}章",
-                "surface_meaning": "看似普通规则或线索。",
-                "true_meaning": "指向终局真相的一部分。",
-                "related_characters": [protagonist_name],
-                "related_factions": [self._pick(entity_names, index, "阶段势力")],
-                "importance": "high" if index < 2 else "medium",
-                "progress_nodes": [f"第{index + 1}卷推进", f"第{min(volume_count, index + 3)}卷变体出现"],
-                "misdirection_nodes": [f"第{index + 2}卷给出错误解释"],
-                "payoff_node": f"第{max(index + 4, volume_count)}卷回收",
-                "payoff_method": "用角色选择和规则反制完成原来如此的回收。",
-                "status": "developing",
-                "risk": "如果中段不推进，会在终局显得突兀。",
-            }
-            for index in range(min(5, volume_count))
-        ]
-        foreshadowing_plan = {
-            "foreshadowing_overview": "伏笔围绕规则误导、人物秘密、势力旧账和终局真相四类账本推进。",
-            "ledger": foreshadowing_ledger,
-            "volume_foreshadowing_plan": [
-                {
-                    "volume": index + 1,
-                    "new_foreshadowing": [f"第{index + 1}卷新增规则误导"],
-                    "progressed_foreshadowing": [foreshadowing_ledger[index % len(foreshadowing_ledger)]["id"]],
-                    "paid_off_foreshadowing": [] if index < 2 else [foreshadowing_ledger[(index - 2) % len(foreshadowing_ledger)]["id"]],
-                    "volume_end_hook_foreshadowing": [f"第{index + 1}卷卷末钩子伏笔"],
-                }
-                for index in range(volume_count)
-            ],
-            "risk_check": {"too_abrupt": [], "missing_payoff": [], "paid_off_too_late": [], "weak_relation_to_main_plot": [], "can_be_merged": []},
-            "revision_suggestions": [],
-        }
-        audit_report = {
-            "stage": "S11",
-            "conclusion": "当前纲要可以进入最终修订版输出；未发现 A 级崩坏问题。",
-            "overall_conclusion": "通过：主线、卷级目标、成长体系、势力冲突、伏笔和节拍形成闭环。",
-            "issues": [],
-            "passed": True,
-            "next_agent": None,
-            "revision_required": False,
-            "special_audits": {
-                "main_plot": {"conclusion": "清晰", "problems": [], "suggestions": []},
-                "characters": {"conclusion": "具备弧线", "problems": [], "suggestions": ["后续新增角色继续补欲望和秘密。"]},
-                "world_bible": {"conclusion": "规则可制造冲突", "problems": [], "suggestions": []},
-                "power_inflation": {"conclusion": "有代价和限制", "problems": [], "suggestions": []},
-                "beat": {"conclusion": "具备阶段闭环", "problems": [], "suggestions": []},
-                "foreshadowing": {"conclusion": "账本可追踪", "problems": [], "suggestions": []},
-                "repetition": {"conclusion": "已标记轮换策略", "problems": [], "suggestions": []},
-                "ending_closure": {"conclusion": "终局闭环明确", "problems": [], "suggestions": []},
-            },
-            "revision_plan": ["保持主角长期欲望", "每卷检查代价和钩子", "正文生成前继续同步伏笔账本"],
-            "pass_status": "通过",
-            "next_step": "输出最终修订版纲要",
-        }
-        final_outline = {
-            "title": project.title,
-            "summary": story_kernel["core_story"],
-            "story_state_version": "outline-v1",
-            "ready_for_chapter_planning": True,
-            "chapters_generated_this_request": len(chapters),
-            "must_preserve": config["must_keep_elements"],
-            "audit": audit_report,
-        }
-        story_state = {
-            "config": config,
-            "kernel": story_kernel,
-            "raw_worldview": state.world_setting or project.premise,
-            "market_position": market_position,
-            "world_bible": schema_world_bible,
-            "protagonist_arcs": protagonist_arcs,
-            "characters": character_tree["core_character_tree"],
-            "faction_conflicts": faction_conflicts,
-            "power_progression": power_progression,
-            "full_structure": full_structure,
-            "volumes": volume_outlines,
-            "beat_sheets": beat_sheets,
-            "foreshadowing_ledger": foreshadowing_ledger,
-            "audit_reports": [audit_report],
-            "revision_history": [{"stage": "S12", "action": "逻辑审计无 A/B 级阻塞，生成最终修订版纲要。"}],
-            "current_stage": "S13_FINAL_OUTLINE",
-            "version": "outline-v1",
-        }
-        stage_flow = [
-            {"stage": "S0", "name": "项目初始化", "agent_name": None, "writes": ["config", "raw_worldview"]},
-            {"stage": "S1", "name": "故事核心推演", "agent_name": "one_sentence_expansion", "writes": ["kernel"]},
-            {"stage": "S2", "name": "类型卖点定位", "agent_name": "genre_market_position", "writes": ["market_position"]},
-            {"stage": "S3", "name": "世界观圣经生成", "agent_name": "world_bible", "writes": ["world_bible"]},
-            {"stage": "S4", "name": "主角成长线生成", "agent_name": "protagonist_arc", "writes": ["protagonist_arcs"]},
-            {"stage": "S5", "name": "人物树/势力冲突/金手指体系生成", "agent_name": "character_tree,faction_conflict,power_system", "writes": ["characters", "faction_conflicts", "power_progression"]},
-            {"stage": "S6", "name": "总编整合第一版 Story Bible", "agent_name": "editor_orchestrator", "writes": ["hard_requirements"]},
-            {"stage": "S7", "name": "全书10卷结构推演", "agent_name": "full_structure", "writes": ["full_structure"]},
-            {"stage": "S8", "name": "伏笔账本生成", "agent_name": "foreshadowing_manager", "writes": ["foreshadowing_ledger"]},
-            {"stage": "S9", "name": "逐卷50章大纲推演", "agent_name": "volume_outline", "writes": ["volumes"]},
-            {"stage": "S10", "name": "章节节拍表生成", "agent_name": "beat_control", "writes": ["beat_sheets"]},
-            {"stage": "S11", "name": "逻辑审计", "agent_name": "logic_audit", "writes": ["audit_reports"]},
-            {"stage": "S12", "name": "返工修订", "agent_name": "editor_orchestrator", "writes": ["revision_history"]},
-            {"stage": "S13", "name": "最终完整故事纲要输出", "agent_name": None, "writes": ["final_outline"]},
-        ]
-        agent_outputs = {
-            "editor_orchestrator": {
-                "current_judgment": "可以进入逐卷大纲和章节规划。",
-                "core_issues": [],
-                "dispatch_decision": {"next_agent": "one_sentence_expansion", "task": "从一句话故事建立长篇核心。"},
-                "hard_requirements": config["forbidden_elements"],
-                "pass_criteria": ["A 级问题为 0", "每卷都有目标、阻力、代价、钩子", "伏笔有回收路径"],
-            },
-            "one_sentence_expansion": story_kernel,
-            "genre_market_position": market_position,
-            "world_bible": schema_world_bible,
-            "protagonist_arc": {"volume_growth": protagonist_arcs, "non_breaking_principles": ["欲望不断线", "胜利必须有代价", "认知成长与能力成长对应"]},
-            "character_tree": character_tree,
-            "faction_conflict": faction_conflicts,
-            "power_system": power_progression,
-            "full_structure": full_structure,
-            "volume_outline": {"volumes": volume_outlines},
-            "beat_control": {"beat_sheets": beat_sheets},
-            "foreshadowing_manager": foreshadowing_plan,
-            "logic_audit": audit_report,
-        }
-        output_key_by_agent = {
-            "editor_orchestrator": "总编统筹决策",
-            "one_sentence_expansion": "故事核心",
-            "genre_market_position": "类型卖点定位",
-            "world_bible": "世界圣经",
-            "protagonist_arc": "主角成长线",
-            "character_tree": "人物树",
-            "faction_conflict": "势力冲突表",
-            "power_system": "金手指升级体系",
-            "full_structure": "全书10卷总纲",
-            "volume_outline": "逐卷50章大纲",
-            "beat_control": "章节节拍表",
-            "foreshadowing_manager": "伏笔账本",
-            "logic_audit": "逻辑审计报告",
-        }
-        agent_chain = [
-            {
-                "agent_name": agent_name,
-                "role": AGENT_SPECS_BY_NAME[agent_name].role,
-                "stage": next((item["stage"] for item in stage_flow if item["agent_name"] and agent_name in item["agent_name"].split(",")), "S0"),
-                "output_key": output_key_by_agent[agent_name],
-                "status": "succeeded",
-            }
-            for agent_name in OUTLINE_AGENT_SEQUENCE
-        ]
-        return {
-            "story_state": story_state,
-            "推演状态机流程": stage_flow,
-            "13Agent推演链": agent_chain,
-            "agent_outputs": agent_outputs,
-            "故事核心": story_kernel,
-            "类型卖点定位": market_position,
-            "主角成长线": protagonist_arcs,
-            "人物树": character_tree,
-            "势力冲突表": faction_conflicts,
-            "金手指升级体系": power_progression,
-            "全书10卷总纲": full_structure,
-            "逐卷50章大纲": volume_outlines,
-            "章节节拍表": beat_sheets,
-            "伏笔账本": foreshadowing_plan,
-            "逻辑审计报告": audit_report,
-            "最终修订版纲要": final_outline,
-        }
-
-    def _sync_outline_volumes(self, db: Session, project: models.Project, volume_table: list[dict[str, Any]]) -> None:
-        for item in volume_table:
-            label = str(item.get("第X卷") or "")
-            volume_no = int("".join([char for char in label if char.isdigit()]) or len(volume_table))
-            row = db.query(models.Volume).filter(models.Volume.project_id == project.id, models.Volume.volume_no == volume_no).first()
-            if row is None:
-                row = models.Volume(id=generate_id("vol"), project_id=project.id, volume_no=volume_no, title=item.get("卷名", f"第{volume_no}卷"), sort_order=volume_no)
-                db.add(row)
-            row.title = item.get("卷名", row.title)
-            row.outline = self._format_volume_outline_text(item)
 
     def _format_mapping_lines(self, payload: dict[str, Any], indent: str = "") -> list[str]:
         lines: list[str] = []
@@ -8426,9 +7124,13 @@ class StudioService:
             "world_fact": "world_fact",
             "foreshadowing_items": "foreshadowing",
             "foreshadowing": "foreshadowing",
+            "graph_edges": "graph_edge",
+            "graph_edge": "graph_edge",
+            "relation": "graph_edge",
+            "relations": "graph_edge",
         }
         normalized = mapping.get(normalized, normalized)
-        if normalized not in {"volume", "chapter", "character", "entity", "world_fact", "foreshadowing"}:
+        if normalized not in {"volume", "chapter", "character", "entity", "world_fact", "foreshadowing", "graph_edge"}:
             raise _bad_request("不支持的设定类型", {"ref_type": ref_type})
         return normalized
 
@@ -8488,6 +7190,8 @@ class StudioService:
             return db.query(models.WorldFact).filter(models.WorldFact.project_id == project_id).all()
         if ref_type == "foreshadowing":
             return db.query(models.ForeshadowingItem).filter(models.ForeshadowingItem.project_id == project_id, models.ForeshadowingItem.payoff_status != "abandoned").all()
+        if ref_type == "graph_edge":
+            return db.query(models.GraphEdge).filter(models.GraphEdge.project_id == project_id).all()
         return []
 
     def _similarity_score(self, left: str, right: str) -> float:
@@ -8592,6 +7296,39 @@ class StudioService:
         db.commit()
         raise _conflict("设定字段已锁定，Agent 更新已转入候选变更池", {"locked_fields": changed, "proposal_id": proposal.id})
 
+    def _chapter_summary(self, chapter: models.Chapter | None) -> dict[str, Any] | None:
+        if chapter is None:
+            return None
+        return {"id": chapter.id, "volume_no": chapter.volume_no, "chapter_no": chapter.chapter_no, "title": chapter.title}
+
+    def _chapter_summary_lookup(self, db: Session, project_id: str) -> dict[str, dict[str, Any]]:
+        return {
+            chapter.id: self._chapter_summary(chapter)
+            for chapter in db.query(models.Chapter).filter(models.Chapter.project_id == project_id).all()
+        }
+
+    def _enrich_source_chapter(self, payload: dict[str, Any], chapter_lookup: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        source_chapter_id = payload.get("source_chapter_id")
+        payload["source_chapter"] = chapter_lookup.get(source_chapter_id) if source_chapter_id else None
+        return payload
+
+    def _append_timeline_event(
+        self,
+        timeline_by_chapter: dict[str, dict[str, Any]],
+        unbound: dict[str, list[Any]],
+        chapter_id: str | None,
+        bucket: str,
+        payload: dict[str, Any],
+        event: dict[str, Any],
+    ) -> None:
+        target = timeline_by_chapter.get(chapter_id) if chapter_id else None
+        if target is None:
+            unbound[bucket].append(payload)
+            unbound["events"].append(event)
+            return
+        target[bucket].append(payload)
+        target["events"].append(event)
+
     def _canon_ref_content(self, ref_type: str, row: Any) -> dict[str, Any]:
         if ref_type == "volume":
             return serialize_volume(row)
@@ -8605,6 +7342,8 @@ class StudioService:
             return serialize_world_fact(row)
         if ref_type == "foreshadowing":
             return serialize_foreshadowing_item(row)
+        if ref_type == "graph_edge":
+            return serialize_graph_edge(row)
         raise _bad_request("不支持的设定类型", {"ref_type": ref_type})
 
     def _canon_ref_title(self, ref_type: str, content: dict[str, Any]) -> str:
@@ -8616,6 +7355,8 @@ class StudioService:
             return str(content.get("title") or "未命名世界观事实")
         if ref_type == "foreshadowing":
             return str(content.get("content") or "未命名伏笔")[:48]
+        if ref_type == "graph_edge":
+            return str(content.get("label") or content.get("edge_type") or "未命名关系")
         return str(content.get("name") or content.get("title") or "未命名设定")
 
     def _canon_ref_row(self, db: Session, project_id: str, ref_type: str, ref_id: str) -> Any:
@@ -8626,6 +7367,7 @@ class StudioService:
             "entity": models.StoryEntity,
             "world_fact": models.WorldFact,
             "foreshadowing": models.ForeshadowingItem,
+            "graph_edge": models.GraphEdge,
         }
         model = model_by_type[ref_type]
         row = db.get(model, ref_id)
@@ -8682,6 +7424,11 @@ class StudioService:
                 row.related_character_ids_json = dumps(content.get("related_character_ids") or [])
             if "related_entity_ids" in content:
                 row.related_entity_ids_json = dumps(content.get("related_entity_ids") or [])
+            return
+        if ref_type == "graph_edge":
+            for field in ("edge_type", "label", "importance_score", "confidence", "evidence", "source_chapter_id"):
+                if field in content and hasattr(row, field):
+                    setattr(row, field, content[field])
 
     def _ensure_canon_node(
         self,
@@ -8829,6 +7576,7 @@ class StudioService:
         entities = db.query(models.StoryEntity).filter(models.StoryEntity.project_id == project_id, models.StoryEntity.current_status != "archived").count()
         world_facts = db.query(models.WorldFact).filter(models.WorldFact.project_id == project_id).count()
         foreshadowing = db.query(models.ForeshadowingItem).filter(models.ForeshadowingItem.project_id == project_id, models.ForeshadowingItem.payoff_status != "abandoned").count()
+        graph_edges = db.query(models.GraphEdge).filter(models.GraphEdge.project_id == project_id).count()
         versioned_refs = {
             (row.ref_type, row.ref_id)
             for row in db.query(models.CanonVersion.ref_type, models.CanonVersion.ref_id).filter(models.CanonVersion.project_id == project_id).all()
@@ -8838,6 +7586,7 @@ class StudioService:
         official_refs.update(("entity", row.id) for row in db.query(models.StoryEntity.id).filter(models.StoryEntity.project_id == project_id, models.StoryEntity.current_status != "archived").all())
         official_refs.update(("world_fact", row.id) for row in db.query(models.WorldFact.id).filter(models.WorldFact.project_id == project_id).all())
         official_refs.update(("foreshadowing", row.id) for row in db.query(models.ForeshadowingItem.id).filter(models.ForeshadowingItem.project_id == project_id, models.ForeshadowingItem.payoff_status != "abandoned").all())
+        official_refs.update(("graph_edge", row.id) for row in db.query(models.GraphEdge.id).filter(models.GraphEdge.project_id == project_id).all())
         pending = db.query(models.CanonChangeProposal).filter(models.CanonChangeProposal.project_id == project_id, models.CanonChangeProposal.approval_status == "pending").count()
         low_confidence_facts = db.query(models.WorldFact).filter(models.WorldFact.project_id == project_id, models.WorldFact.confidence < 0.7).count()
         low_confidence_proposals = db.query(models.CanonChangeProposal).filter(models.CanonChangeProposal.project_id == project_id, models.CanonChangeProposal.approval_status == "pending", models.CanonChangeProposal.confidence < 0.7).count()
@@ -8853,6 +7602,7 @@ class StudioService:
                 "entities": entities,
                 "world_facts": world_facts,
                 "foreshadowing": foreshadowing,
+                "graph_edges": graph_edges,
             },
             "recommendations": [
                 "优先审批候选设定，避免正文生成读取到未确认事实。",
@@ -8860,6 +7610,182 @@ class StudioService:
                 "核心人物和世界规则建议锁定后再进入批量正文生成。",
             ],
         }
+
+    def _create_canon_update_proposals(
+        self,
+        db: Session,
+        project_id: str,
+        chapter_id: str | None,
+        updates: dict[str, Any],
+        *,
+        source_job_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        chapter_lookup = self._chapter_summary_lookup(db, project_id)
+        proposals: list[dict[str, Any]] = []
+
+        def add_proposal(
+            target_type: str,
+            after: dict[str, Any],
+            *,
+            target_id: str | None = None,
+            operation: str = "create",
+            before: dict[str, Any] | None = None,
+            confidence: float = 0.8,
+            reason: str = "章后设定整理候选",
+        ) -> None:
+            proposal = self._create_canon_proposal(
+                db,
+                project_id,
+                target_type,
+                after,
+                target_id=target_id,
+                operation=operation,
+                before=before,
+                source_chapter_id=chapter_id,
+                source_job_id=source_job_id,
+                source_agent="canon_curator",
+                confidence=confidence,
+                reason=reason,
+            )
+            proposals.append(self._enrich_source_chapter(serialize_canon_proposal(proposal), chapter_lookup))
+
+        for item in updates.get("character_updates", []):
+            name = str(item.get("name") or "未命名角色")
+            existing = db.query(models.Character).filter(models.Character.project_id == project_id, models.Character.name == name).first()
+            confidence = float(item.get("confidence") or 0.8)
+            if existing:
+                before = self._canon_ref_content("character", existing)
+                after = dict(before)
+                for key, value in item.items():
+                    if value not in (None, ""):
+                        after[key] = value
+                after["last_seen_chapter_id"] = chapter_id
+                add_proposal("character", after, target_id=existing.id, operation="update", before=before, confidence=confidence)
+            else:
+                add_proposal(
+                    "character",
+                    {
+                        "name": name,
+                        "role_type": item.get("role_type") or item.get("role") or "supporting",
+                        "importance_level": item.get("importance_level") or "medium",
+                        "importance_score": int(item.get("importance_score") or 50),
+                        "summary": str(item.get("summary") or item.get("profile") or ""),
+                        "current_status": item.get("current_status") or "active",
+                        "source_chapter_id": chapter_id,
+                    },
+                    confidence=confidence,
+                )
+
+        for item in updates.get("entity_updates", []):
+            entity_type = str(item.get("entity_type") or "event")
+            name = str(item.get("name") or "未命名实体")
+            existing = (
+                db.query(models.StoryEntity)
+                .filter(models.StoryEntity.project_id == project_id, models.StoryEntity.entity_type == entity_type, models.StoryEntity.name == name)
+                .first()
+            )
+            confidence = float(item.get("confidence") or 0.8)
+            if existing:
+                before = self._canon_ref_content("entity", existing)
+                after = dict(before)
+                for key, value in item.items():
+                    if value not in (None, ""):
+                        after[key] = value
+                after["last_seen_chapter_id"] = chapter_id
+                add_proposal("entity", after, target_id=existing.id, operation="update", before=before, confidence=confidence)
+            else:
+                add_proposal(
+                    "entity",
+                    {
+                        "entity_type": entity_type,
+                        "name": name,
+                        "importance_level": item.get("importance_level") or "medium",
+                        "importance_score": int(item.get("importance_score") or 50),
+                        "description": str(item.get("description") or item.get("content") or ""),
+                        "current_status": item.get("current_status") or "active",
+                        "source": "agent",
+                        "source_chapter_id": chapter_id,
+                    },
+                    confidence=confidence,
+                )
+
+        for item in updates.get("world_fact_updates", []):
+            title = str(item.get("title") or "新世界观事实")
+            existing = db.query(models.WorldFact).filter(models.WorldFact.project_id == project_id, models.WorldFact.title == title).first()
+            confidence = float(item.get("confidence") or 0.75)
+            if existing:
+                before = self._canon_ref_content("world_fact", existing)
+                after = dict(before)
+                for key, value in item.items():
+                    if value not in (None, ""):
+                        after[key] = value
+                after["source_chapter_id"] = chapter_id
+                add_proposal("world_fact", after, target_id=existing.id, operation="update", before=before, confidence=confidence)
+            else:
+                add_proposal(
+                    "world_fact",
+                    {
+                        "category": item.get("category") or "timeline",
+                        "title": title,
+                        "content": str(item.get("content") or ""),
+                        "importance_level": item.get("importance_level") or "medium",
+                        "importance_score": int(item.get("importance_score") or 55),
+                        "confidence": confidence,
+                        "related_entity_ids": list(item.get("related_entity_ids") or []),
+                        "source_chapter_id": chapter_id,
+                    },
+                    confidence=confidence,
+                )
+
+        for item in updates.get("relation_updates", []):
+            source_label = str(item.get("source_label") or item.get("source") or "未命名关系来源")
+            target_label = str(item.get("target_label") or item.get("target") or "未命名关系目标")
+            confidence = float(item.get("confidence") or 0.8)
+            add_proposal(
+                "graph_edge",
+                {
+                    "source_label": source_label,
+                    "target_label": target_label,
+                    "source_ref_type": item.get("source_ref_type"),
+                    "source_ref_id": item.get("source_ref_id"),
+                    "target_ref_type": item.get("target_ref_type"),
+                    "target_ref_id": item.get("target_ref_id"),
+                    "edge_type": item.get("edge_type") or "related_to",
+                    "label": item.get("label") or item.get("edge_type") or "关联",
+                    "importance_score": int(item.get("importance_score") or 60),
+                    "confidence": confidence,
+                    "evidence": str(item.get("evidence") or ""),
+                    "source_chapter_id": chapter_id,
+                },
+                confidence=confidence,
+                reason="章后关系图谱候选",
+            )
+
+        for item in updates.get("foreshadowing_updates", []):
+            content = str(item.get("content") or "").strip()
+            if not content:
+                continue
+            confidence = float(item.get("confidence") or 0.8)
+            add_proposal(
+                "foreshadowing",
+                {
+                    "chapter_id": chapter_id,
+                    "content": content,
+                    "planted_chapter_id": item.get("planted_chapter_id") or chapter_id,
+                    "planned_payoff_chapter_id": item.get("planned_payoff_chapter_id"),
+                    "actual_payoff_chapter_id": item.get("actual_payoff_chapter_id"),
+                    "planned_payoff": str(item.get("planned_payoff") or ""),
+                    "payoff_status": item.get("payoff_status") or "planned",
+                    "importance_level": item.get("importance_level") or "medium",
+                    "importance_score": int(item.get("importance_score") or 50),
+                    "related_character_ids": list(item.get("related_character_ids") or []),
+                    "related_entity_ids": list(item.get("related_entity_ids") or []),
+                    "source": "agent",
+                },
+                confidence=confidence,
+                reason="章后伏笔候选",
+            )
+        return proposals
 
     def _persist_canon_updates(self, db: Session, project_id: str, chapter_id: str | None, updates: dict[str, Any]) -> None:
         for item in updates.get("character_updates", []):
@@ -8972,6 +7898,80 @@ class StudioService:
         row.evidence = evidence
         row.source_chapter_id = source_chapter_id
         return row
+
+    def _graph_node_for_relation_endpoint(
+        self,
+        db: Session,
+        project_id: str,
+        *,
+        ref_type: str | None = None,
+        ref_id: str | None = None,
+        label: str = "",
+    ) -> models.GraphNode:
+        normalized_ref_type: str | None = None
+        if ref_type and ref_id:
+            normalized_ref_type = self._normalize_canon_ref_type(ref_type)
+            row = self._canon_ref_row(db, project_id, normalized_ref_type, ref_id)
+            content = self._canon_ref_content(normalized_ref_type, row)
+            return self._ensure_graph_node(
+                db,
+                project_id,
+                "clue" if normalized_ref_type == "foreshadowing" else normalized_ref_type,
+                ref_id,
+                self._canon_ref_title(normalized_ref_type, content),
+                str(content.get("importance_level") or "medium"),
+                int(content.get("importance_score") or 50),
+            )
+        clean_label = str(label or "未命名节点").strip() or "未命名节点"
+        existing_node = db.query(models.GraphNode).filter(models.GraphNode.project_id == project_id, models.GraphNode.label == clean_label).first()
+        if existing_node:
+            return existing_node
+        character = db.query(models.Character).filter(models.Character.project_id == project_id, models.Character.name == clean_label).first()
+        if character:
+            return self._ensure_graph_node(db, project_id, "character", character.id, character.name, character.importance_level, character.importance_score)
+        entity = db.query(models.StoryEntity).filter(models.StoryEntity.project_id == project_id, models.StoryEntity.name == clean_label).first()
+        if entity:
+            return self._ensure_graph_node(db, project_id, "entity", entity.id, entity.name, entity.importance_level, entity.importance_score)
+        fact = db.query(models.WorldFact).filter(models.WorldFact.project_id == project_id, models.WorldFact.title == clean_label).first()
+        if fact:
+            return self._ensure_graph_node(db, project_id, "world_fact", fact.id, fact.title, fact.importance_level, fact.importance_score)
+        ref_key = re.sub(r"[^0-9A-Za-z_\-\u4e00-\u9fff]+", "_", clean_label).strip("_")[:80] or generate_id("concept")
+        return self._ensure_graph_node(db, project_id, "concept", f"concept:{ref_key}", clean_label, "medium", 50)
+
+    def _create_graph_edge_from_payload(
+        self,
+        db: Session,
+        project_id: str,
+        payload: dict[str, Any],
+        *,
+        source_chapter_id: str | None = None,
+    ) -> models.GraphEdge:
+        source_node = self._graph_node_for_relation_endpoint(
+            db,
+            project_id,
+            ref_type=payload.get("source_ref_type"),
+            ref_id=payload.get("source_ref_id"),
+            label=str(payload.get("source_label") or payload.get("source") or "未命名关系来源"),
+        )
+        target_node = self._graph_node_for_relation_endpoint(
+            db,
+            project_id,
+            ref_type=payload.get("target_ref_type"),
+            ref_id=payload.get("target_ref_id"),
+            label=str(payload.get("target_label") or payload.get("target") or "未命名关系目标"),
+        )
+        return self._ensure_graph_edge(
+            db,
+            project_id,
+            source_node.id,
+            target_node.id,
+            str(payload.get("edge_type") or "related_to"),
+            str(payload.get("label") or payload.get("edge_type") or "关联"),
+            int(payload.get("importance_score") or 60),
+            confidence=float(payload.get("confidence") or 0.8),
+            evidence=str(payload.get("evidence") or ""),
+            source_chapter_id=payload.get("source_chapter_id") or source_chapter_id,
+        )
 
     def _sync_foreshadowing_graph(self, db: Session, item: models.ForeshadowingItem, payoff: bool = False) -> None:
         clue_node = self._ensure_graph_node(db, item.project_id, "clue", item.id, item.content, item.importance_level, item.importance_score)

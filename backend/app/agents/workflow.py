@@ -14,10 +14,6 @@ class CompatAgentWorkflow:
         self._sync_compat_globals()
         return _chapter_workflow.agent_workflow.run_initialization(state)
 
-    def run_chapter_plan(self, state):
-        self._sync_compat_globals()
-        return _chapter_workflow.agent_workflow.run_chapter_plan(state)
-
     def run_chapter_draft(self, state):
         self._sync_compat_globals()
         return _chapter_workflow.agent_workflow.run_chapter_draft(state)

@@ -29,7 +29,7 @@ const initialForm: CreateProjectInput = {
   style_guide: "",
   language: "zh-CN",
   planned_chapter_count: 80,
-  chapter_word_target: 3000,
+  chapter_word_target: 8000,
 };
 
 function getApiErrorMessage(error: unknown): string {

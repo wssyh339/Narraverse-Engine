@@ -496,7 +496,7 @@
   {
     "label": "真实 LLM 生成第1卷 1-10章分块章纲",
     "method": "POST",
-    "path": "/api/projects/prj_9631900a667b4ad59dd3afef11/outline/chapters/batch-generate",
+    "path": "legacy chapter outline batch endpoint removed on 2026-06-21",
     "status_code": 200,
     "elapsed_seconds": 232.16,
     "success": true
@@ -512,7 +512,7 @@
   {
     "label": "commit 10章章纲",
     "method": "POST",
-    "path": "/api/projects/prj_9631900a667b4ad59dd3afef11/outline/chapters/commit",
+    "path": "legacy chapter outline commit endpoint removed on 2026-06-21",
     "status_code": 200,
     "elapsed_seconds": 0.03,
     "success": true

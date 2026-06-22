@@ -55,7 +55,7 @@ import {
   type ForeshadowingSuggestion,
   type ImportanceLevel,
 } from "../api/studio";
-import type { Chapter, EditorProposal, Volume } from "../types/api";
+import type { Chapter, EditorProposal, GenerationJob, Volume } from "../types/api";
 
 const aiTools = [
   ["opening", "开篇"],
@@ -76,10 +76,75 @@ const chatModeOptions: Array<{ label: string; value: ChapterChatMode }> = [
   { label: "续写", value: "continue" },
 ];
 
+const activeJobStatuses = new Set(["queued", "running"]);
+
+function chapterFromDraftJob(job: GenerationJob | null): Chapter | null {
+  const result = job?.result;
+  if (!result || typeof result !== "object" || !("chapter" in result)) return null;
+  return ((result as { chapter?: Chapter }).chapter ?? null);
+}
+
 interface EditorSelection {
   start: number | null;
   end: number | null;
   text: string;
+}
+
+const storyBibleLabels: Record<string, string> = {
+  title: "标题",
+  premise: "前提",
+  core_promise: "作品承诺",
+  main_conflict: "主线冲突",
+  ending_direction: "终局方向",
+  reader_experience: "读者体验",
+  subtitle: "副标题",
+  theme: "主题",
+  volume_plan: "分卷计划",
+  escalation_engine: "升级引擎",
+  reader_expectation: "读者期待",
+  forbidden_rules_ref: "禁用规则",
+};
+
+function compactValue(value: unknown): string {
+  if (value == null || value === "") return "";
+  if (Array.isArray(value)) {
+    return value
+      .map((item, index) => {
+        if (item && typeof item === "object") {
+          const record = item as Record<string, unknown>;
+          const title = record.title || record["标题"] || record.name || record["卷名"] || `条目${index + 1}`;
+          const summary = record.summary || record["摘要"] || record.content || record["内容"] || "";
+          return `${title}${summary ? `：${summary}` : ""}`;
+        }
+        return String(item);
+      })
+      .filter(Boolean)
+      .join("；");
+  }
+  if (typeof value === "object") {
+    return Object.entries(value as Record<string, unknown>)
+      .map(([key, nested]) => {
+        const label = storyBibleLabels[key] || key;
+        const text = compactValue(nested);
+        return text ? `${label}：${text}` : "";
+      })
+      .filter(Boolean)
+      .join("；");
+  }
+  return String(value);
+}
+
+function formatStoryBibleSummary(storyBible: unknown, fallback: string): string {
+  if (!storyBible || typeof storyBible !== "object") return fallback || "暂无上下文摘要";
+  const record = storyBible as Record<string, unknown>;
+  const preferred = ["core_promise", "main_conflict", "ending_direction", "reader_expectation", "volume_plan"];
+  const lines = preferred
+    .map((key) => {
+      const text = compactValue(record[key]);
+      return text ? `${storyBibleLabels[key] || key}：${text}` : "";
+    })
+    .filter(Boolean);
+  return lines.join("\n") || compactValue(record) || fallback || "暂无上下文摘要";
 }
 
 interface AssistantChatMessage {
@@ -135,6 +200,8 @@ export function WorkspacePage() {
   const [chatInput, setChatInput] = useState("");
   const [chatMessages, setChatMessages] = useState<AssistantChatMessage[]>([]);
   const [chatStreaming, setChatStreaming] = useState(false);
+  const [draftJobId, setDraftJobId] = useState("");
+  const [draftJob, setDraftJob] = useState<GenerationJob | null>(null);
   const [replaceForm] = Form.useForm<{ find: string; replace: string; regex: boolean }>();
   const [chapterForm] = Form.useForm<{ title: string; volume_no: number; outline: string }>();
   const [volumeForm] = Form.useForm<{ title: string; outline: string }>();
@@ -154,6 +221,12 @@ export function WorkspacePage() {
     queryKey: ["versions", selectedChapter?.id],
     queryFn: () => studioApi.listVersions(selectedChapter?.id),
     enabled: !!selectedChapter,
+  });
+  const draftJobQuery = useQuery({
+    queryKey: ["draft-job", draftJobId],
+    queryFn: () => studioApi.getJob(draftJobId),
+    enabled: Boolean(draftJobId),
+    refetchInterval: draftJob && activeJobStatuses.has(draftJob.status) ? 3000 : false,
   });
 
   const foreshadowingItems = stateQuery.data?.state.foreshadowing_items ?? [];
@@ -195,14 +268,43 @@ export function WorkspacePage() {
   });
   const draftMutation = useMutation({
     mutationFn: () => studioApi.draftChapter(projectId, selectedChapter!.id, "请根据当前章纲生成首版正文，保持设定连续、冲突清晰，并保留结尾钩子。"),
-    onSuccess: ({ chapter }) => {
-      message.success("章节正文已生成");
-      setEditorValue(chapter.final_text || chapter.draft_text || "");
-      setDirty(false);
-      invalidateWorkbench();
+    onSuccess: ({ job, chapter }) => {
+      setDraftJob(job);
+      setDraftJobId(job.id);
+      if (job.status === "succeeded") {
+        setEditorValue(chapter.final_text || chapter.draft_text || "");
+        setDirty(false);
+        invalidateWorkbench();
+        message.success("章节正文已生成");
+      } else {
+        message.success("后台任务已创建，正在生成正文");
+      }
     },
     onError: (error) => message.error(error instanceof Error ? error.message : "生成正文失败"),
   });
+
+  useEffect(() => {
+    if (draftJobQuery.data?.job) {
+      setDraftJob(draftJobQuery.data.job);
+    }
+  }, [draftJobQuery.data?.job]);
+
+  useEffect(() => {
+    if (!draftJob || activeJobStatuses.has(draftJob.status)) return;
+    if (draftJob.status === "succeeded") {
+      const chapter = chapterFromDraftJob(draftJob);
+      if (chapter && chapter.id === selectedChapter?.id) {
+        setEditorValue(chapter.final_text || chapter.draft_text || "");
+        setDirty(false);
+      }
+      invalidateWorkbench();
+      message.success("章节正文已生成");
+    } else if (draftJob.status === "failed") {
+      message.error(draftJob.error?.message || "生成正文失败");
+    }
+    setDraftJobId("");
+    setDraftJob(null);
+  }, [draftJob?.status, draftJob?.id, selectedChapter?.id]);
 
   useEffect(() => {
     if (!dirty || !selectedChapter || saveMutation.isPending) return;
@@ -441,7 +543,7 @@ export function WorkspacePage() {
               ))}
             </div>
           ))}
-          {chapters.length === 0 ? <Empty description="还没有章节，先新建章节或生成大纲" /> : null}
+          {chapters.length === 0 ? <Empty description="还没有章节，先确认章纲或新建章节" /> : null}
         </div>
         <Divider />
         <div className="directory-utilities">
@@ -468,7 +570,15 @@ export function WorkspacePage() {
         </div>
         <div className="editor-toolbar">
           <Space wrap size={4}>
-            <Button icon={<WandSparkles size={14} />} type="primary" disabled={!selectedChapter || dirty} loading={draftMutation.isPending} onClick={() => draftMutation.mutate()}>生成正文</Button>
+            <Button
+              icon={<WandSparkles size={14} />}
+              type="primary"
+              disabled={!selectedChapter || dirty || Boolean(draftJobId)}
+              loading={draftMutation.isPending || Boolean(draftJob && activeJobStatuses.has(draftJob.status))}
+              onClick={() => draftMutation.mutate()}
+            >
+              {draftJob && activeJobStatuses.has(draftJob.status) ? "生成中" : "生成正文"}
+            </Button>
             <Button icon={<WandSparkles size={14} />} disabled={!selectedChapter} onClick={() => { setEditorValue(smartFormat(editorValue)); setDirty(true); message.success("智能排版已应用"); }}>智能排版</Button>
             <Button icon={<Replace size={14} />} disabled={!selectedChapter} onClick={() => setReplaceOpen(true)}>查找替换</Button>
             <Button icon={<FileText size={14} />} disabled={!selectedChapter} onClick={() => setFrequencyOpen(true)}>高频词</Button>
@@ -591,7 +701,7 @@ export function WorkspacePage() {
         <Typography.Text strong>当前上下文</Typography.Text>
         <div className="context-summary">
           <Tag>{characters.length} 角色</Tag><Tag>{worldFacts.length} 世界事实</Tag><Tag>{issues.length} 连续性问题</Tag>
-          <Typography.Paragraph ellipsis={{ rows: 5 }}>{storyBible?.world_setting || project.premise}</Typography.Paragraph>
+          <Typography.Paragraph ellipsis={{ rows: 5 }}>{formatStoryBibleSummary(storyBible, project.premise)}</Typography.Paragraph>
         </div>
       </aside>
 

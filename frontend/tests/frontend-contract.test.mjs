@@ -89,6 +89,8 @@ test("workbench API supports directory, notes, proposals, versions, and backup",
     "/settings/proposals",
     "/settings/duplicates/scan",
     "/settings/export",
+    "/settings/version-timeline",
+    "/creation/profile",
     "/locks",
     "/impact",
     "/settings/archive",
@@ -99,22 +101,32 @@ test("workbench API supports directory, notes, proposals, versions, and backup",
 
 test("frontend API modules use only MVP backend endpoints", () => {
   const projects = read("src/api/projects.ts");
-  const chapters = read("src/api/chapters.ts");
+  const studio = read("src/api/studio.ts");
   const jobs = read("src/api/jobs.ts");
+  const app = read("src/App.tsx");
+  const deletedLegacyFiles = [
+    "src/api/chapters.ts",
+    "src/pages/ChapterPlanPage.tsx",
+    "src/pages/ProjectWorkspacePage.tsx",
+    "src/components/AppShell.tsx",
+  ];
 
   assert.match(projects, /\/projects/);
   assert.match(projects, /\/story-bible/);
-  assert.match(chapters, /\/chapters\/plan/);
   assert.match(jobs, /\/jobs\/\$\{jobId\}/);
+  assert.doesNotMatch(studio, /chapters\/plan|planChapters/);
+  assert.doesNotMatch(app, /chapters\/plan|ChapterPlanPage|ProjectWorkspacePage|AppShell/);
+  for (const deletedPath of deletedLegacyFiles) {
+    assert.equal(existsSync(new URL(`../${deletedPath}`, import.meta.url)), false, `${deletedPath} should stay deleted`);
+  }
 });
 
 test("pages expose loading, empty, and error states", () => {
   const source = [
     read("src/pages/ProjectListPage.tsx"),
-    read("src/pages/ProjectWorkspacePage.tsx"),
-    read("src/pages/StoryBiblePage.tsx"),
-    read("src/pages/ChapterPlanPage.tsx"),
-    read("src/pages/JobDetailPage.tsx"),
+    read("src/pages/WorkspacePage.tsx"),
+    read("src/pages/OutlineStudioPage.tsx"),
+    read("src/pages/JobPage.tsx"),
   ].join("\n");
 
   assert.match(source, /加载中|正在/);
@@ -240,7 +252,7 @@ test("workspace exposes loading, empty, error, generation, and foreshadowing con
     assert.doesNotMatch(wizard, new RegExp(`title: "${removedStep}"`));
   }
   assert.doesNotMatch(wizard, /总设定表|创建书名/);
-  assert.match(wizard, /step: "title"/);
+  assert.match(wizard, /title_packaging/);
   assert.match(wizard, /selected_title/);
   assert.doesNotMatch(wizard, /customTitle/);
   assert.doesNotMatch(wizard, /自定义书名/);
@@ -317,6 +329,87 @@ test("workspace exposes loading, empty, error, generation, and foreshadowing con
   assert.doesNotMatch(wizard, /MANUAL_CONSTRAINT_PRESETS/);
   assert.doesNotMatch(wizard, /renderTargetWordPresets/);
   assert.match(studio, /creation\/basic-suggestions/);
+});
+
+test("outline debate header exposes compact scale planner summary", () => {
+  const panel = read("src/pages/outline/OutlineDebatePanel.tsx");
+  const page = read("src/pages/OutlineStudioPage.tsx");
+
+  assert.match(page, /targetWords=\{debateScalePlan\.target_words\}/);
+  assert.match(panel, /outline-debate-scale-summary/);
+  assert.match(panel, /总字数/);
+  assert.match(panel, /卷章/);
+  assert.match(panel, /单章/);
+  assert.doesNotMatch(panel, /Scale Planner：/);
+});
+
+test("batch monitor exposes long-running progress and retry context", () => {
+  const page = read("src/pages/BatchPage.tsx");
+  const types = read("src/types/api.ts");
+
+  for (const field of [
+    "overall_percent?: number",
+    "elapsed_seconds?: number",
+    "eta_seconds?: number",
+    "average_chapter_seconds?: number",
+    "retryable_failed_chapters?: number[]",
+    "long_task_advice?: string[]",
+  ]) {
+    assert.match(types, new RegExp(field.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+  for (const label of ["overallPercent", "当前章节进度", "预计剩余", "长篇任务建议", "可重试章节"]) {
+    assert.match(page, new RegExp(label));
+  }
+});
+
+test("outline studio keeps body visibility independent from directory selection", () => {
+  const page = read("src/pages/OutlineStudioPage.tsx");
+  const directory = read("src/pages/outline/OutlineDirectory.tsx");
+  const debate = read("src/pages/outline/OutlineDebatePanel.tsx");
+
+  assert.match(page, /openDirectoryView/);
+  assert.match(page, /setSelectedView\(view\)/);
+  assert.match(page, /nextMissingChapterNo/);
+  assert.match(page, /nextDebateChapterNo/);
+  assert.match(page, /selectedChapter\?\.chapter_no \?\? nextDebateChapterNo/);
+  assert.doesNotMatch(page, /setSelectedView\(view\);\s*setDetailOpen\(true\)/);
+  assert.match(page, /selectedView=\{selectedView\}/);
+  assert.match(page, /onPhaseComplete=\{invalidate\}/);
+  assert.match(debate, /selectedView\?: OutlineView/);
+  assert.match(debate, /selectedView === "volume"/);
+  assert.match(debate, /selectedView === "chapterOutline"/);
+  assert.match(debate, /lastSelectedViewRef/);
+  assert.match(debate, /selectedView === lastSelectedViewRef\.current/);
+  assert.match(debate, /onPhaseComplete\?\.\(confirmedRun\)/);
+  assert.match(debate, /phaseFullyConfirmed/);
+  assert.match(debate, /phaseStatus\(session, "chapters", phaseFullyConfirmed\("chapters"\)\)/);
+  assert.match(debate, /scalePlan\?\.chapter_count/);
+  assert.match(debate, /confirmedCount >= expectedCount/);
+  assert.match(debate, /confirmedRefreshBlocked/);
+  assert.match(debate, /activeItemAlreadyConfirmed/);
+  assert.match(directory, /aria-pressed=\{detailOpen\}/);
+  assert.match(directory, /隐藏大纲正文|显示大纲正文/);
+});
+
+test("outline body renders structured debate content with localized labels", () => {
+  const editor = read("src/pages/outline/OutlineEditorPanel.tsx");
+
+  for (const marker of [
+    "safeParseStructuredText",
+    "normalizePythonLikeJson",
+    "extractStructuredOutlineSections",
+    "outlineFieldLabels",
+    "phase_3: \"阶段三\"",
+    "stage_goal: \"阶段目标\"",
+    "main_conflict: \"主线冲突\"",
+    "boundary: \"边界选择\"",
+    "cost: \"代价\"",
+    "chapters: \"章节范围\"",
+  ]) {
+    assert.ok(editor.includes(marker), `missing marker: ${marker}`);
+  }
+
+  assert.doesNotMatch(editor, /replace\(\/_\/g, " "\)/);
 });
 
 test("creation star title packaging is a single editable card lane without separate market cards", () => {
@@ -493,6 +586,15 @@ test("creation star footer only navigates while generation uses project cache an
     "titlePackagingBatchTokenRef",
     "createCardSkeleton",
     "applyGeneratedCard",
+    "stableId",
+    "source_card_id",
+    "cacheGeneratedCards",
+    "seenIds",
+    "cached-card-",
+    "AntApp.useApp",
+    "本次生成未返回有效卡片",
+    "本轮只生成",
+    "确认已选世界观、主角和书名包装卡后",
     "renderEditableText",
     "renderEditableList",
     "生成中",
@@ -500,6 +602,9 @@ test("creation star footer only navigates while generation uses project cache an
     assert.ok(wizard.includes(marker), `missing marker: ${marker}`);
   }
 
+  assert.match(wizard, /App as AntApp/);
+  assert.match(wizard, /applyGeneratedCard\(card, \(patch\) => patchCard\(skeleton\.id, patch\), skeleton\.id\)/);
+  assert.doesNotMatch(wizard, /Typography,\s*message\s*}/);
   assert.doesNotMatch(wizard, /逐字生成/);
   assert.doesNotMatch(wizard, /revealCardText/);
   assert.doesNotMatch(wizard, /STREAM_CHUNK_SIZE|STREAM_DELAY_MS/);
@@ -562,28 +667,45 @@ test("workspace exposes streaming assistant chat for selected chapter text", () 
   assert.match(workspace, /生成提案 → 展示差异 → 用户确认 → 应用前快照 → 写入正文/);
 });
 
+test("workspace drafts chapters through a resumable background job", () => {
+  const workspace = read("src/pages/WorkspacePage.tsx");
+  const studio = read("src/api/studio.ts");
+
+  assert.match(studio, /async_mode:\s*true/);
+  assert.match(studio, /draftChapter/);
+  assert.match(studio, /getJob/);
+  assert.match(workspace, /draftJobId/);
+  assert.match(workspace, /draftJobQuery/);
+  assert.match(workspace, /refetchInterval/);
+  assert.match(workspace, /studioApi\.getJob\(draftJobId\)/);
+  assert.match(workspace, /后台任务已创建/);
+});
+
 test("outline studio exposes long-novel planning controls", () => {
   const outline = read("src/pages/OutlineStudioPage.tsx");
   const outlineDirectory = read("src/pages/outline/OutlineDirectory.tsx");
   const outlineEditor = read("src/pages/outline/OutlineEditorPanel.tsx");
-  const outlineGraph = read("src/pages/outline/OutlineInferenceGraph.tsx");
-  const outlineCanon = read("src/pages/outline/CanonStudioPanel.tsx");
-  const outlineGeneration = read("src/pages/outline/outlineGeneration.ts");
+  const scalePlan = read("src/pages/outline/scalePlan.ts");
+  const outlineUtils = read("src/pages/outline/outlineUtils.ts");
   const studio = read("src/api/studio.ts");
-  const outlineBundle = [outline, outlineDirectory, outlineEditor, outlineGraph, outlineCanon, outlineGeneration].join("\n");
+  const outlineBundle = [outline, outlineDirectory, outlineEditor, scalePlan, outlineUtils].join("\n");
   const mountedOutlineUi = [outline, outlineDirectory, outlineEditor].join("\n");
 
   for (const label of ["总纲", "卷纲", "章节", "章纲", "大纲正文"]) {
     assert.match(outlineBundle, new RegExp(label));
   }
+  for (const deletedPath of [
+    "src/pages/outline/OutlineGenerationModal.tsx",
+    "src/pages/outline/OutlineInferenceGraph.tsx",
+    "src/pages/outline/outlineGeneration.ts",
+    "src/pages/outline/useOutlineGenerationJob.ts",
+    "src/pages/outline/CanonStudioPanel.tsx",
+  ]) {
+    assert.equal(existsSync(new URL(`../${deletedPath}`, import.meta.url)), false, `${deletedPath} should stay deleted`);
+  }
   assert.doesNotMatch(mountedOutlineUi, /生成大纲|批量生成章纲|openGenerationPreview|OutlineGenerationModal|outlinePreviewOpen|confirmApplyOutlineUpdate/);
   assert.doesNotMatch(outlineDirectory, /<Plus|title="添加"/);
-  assert.match(outlineGeneration, /use_topology_inference/);
-  assert.match(outlineGraph, /outlineTopology/);
-  assert.match(outlineGraph, /outline_topology\.nodes|topologyNodes/);
-  assert.match(outlineGraph, /outline_topology\.edges|topologyEdges/);
-  assert.match(outlineGraph, /ResizeObserver/);
-  assert.match(outlineGraph, /requestAnimationFrame/);
+  assert.match(outline, /useTopologyInference/);
   assert.doesNotMatch(outlineBundle, /生成卷纲/);
   assert.match(outlineBundle, /target_words/);
   assert.match(outlineBundle, /volume_count/);
@@ -594,21 +716,10 @@ test("outline studio exposes long-novel planning controls", () => {
   assert.match(outlineBundle, /chapter_word_max/);
   assert.match(outline, /App\.useApp/);
   assert.doesNotMatch(outline, /Modal\.confirm/);
-  assert.match(outlineGraph, /echarts\/charts/);
-  assert.match(outlineGraph, /selectedStep/);
-  assert.match(outlineGraph, /selectedStepId/);
-  assert.match(outlineGraph, /lastAutoSelectedStepId/);
-  assert.match(outlineGraph, /detailId/);
-  assert.match(outlineGraph, /推演节点详情/);
-  assert.match(outlineGraph, /LLM 来源/);
-  assert.match(outlineGraph, /used_remote_model/);
-  assert.match(outlineGraph, /provider/);
-  assert.match(outlineGraph, /schema_valid|validation_warnings/);
-  assert.match(outlineGraph, /init\(chartRef\.current\)/);
   assert.match(outline, /OutlineDirectory/);
   assert.match(outline, /OutlineEditorPanel/);
   assert.match(outline, /OutlineDebatePanel/);
-  assert.match(outline, /CanonStudioPanel/);
+  assert.doesNotMatch(outline, /CanonStudioPanel/);
   assert.match(outlineDirectory, /显示大纲正文/);
   assert.match(outlineDirectory, /隐藏大纲正文/);
   assert.match(outlineDirectory, /outline-directory-toolbar/);
@@ -624,8 +735,6 @@ test("outline studio exposes long-novel planning controls", () => {
   assert.match(outlineEditor, /大纲正文/);
   assert.doesNotMatch(outlineEditor, /大纲工作台/);
   assert.ok(outline.split("\n").length < 430, "OutlineStudioPage should remain an orchestrator, not a monolith");
-  assert.match(outlineGraph, /outline-agent-graph/);
-  assert.match(outlineGraph, /等待后端返回真实推演记录/);
   assert.doesNotMatch(outline, /window\.setInterval/);
   assert.doesNotMatch(outline, /OUTLINE_AGENT_STEPS\.map/);
   assert.doesNotMatch(outlineBundle, /13Agent推演链/);
@@ -652,8 +761,6 @@ test("outline studio exposes long-novel planning controls", () => {
   assert.match(outline, /hasDeletableOutline/);
   assert.doesNotMatch(outline, /generateFromExistingOutline/);
   assert.doesNotMatch(outline, /请先生成总纲/);
-  assert.match(outlineGeneration, /overwrite_existing: true/);
-  assert.doesNotMatch(outlineGeneration, /基于已生成总纲/);
   assert.match(outlineDirectory, /renderVolumeChapterTree/);
   assert.match(outlineDirectory, /outline-directory-bulk-actions/);
   assert.match(outlineDirectory, /outline-bulk-footer/);
@@ -667,13 +774,12 @@ test("outline studio exposes long-novel planning controls", () => {
   assert.doesNotMatch(outline, /回收站/);
   assert.match(outline, /toggleDirectorySelection/);
   assert.doesNotMatch(outlineEditor, /generateFromExistingOutline/);
-  assert.match(outlineGeneration, /bookOutlineGenerate/);
-  assert.match(outlineGeneration, /chapterOutlineBatchGenerate/);
-  assert.match(studio, /outline\/book\/generate/);
-  assert.match(studio, /outline\/book\/commit/);
-  assert.match(studio, /outline\/chapters\/batch-generate/);
-  assert.match(studio, /outline\/chapters\/commit/);
-  assert.doesNotMatch(outlineGeneration, /mode === "volume"/);
+  assert.match(studio, /outline\/debate\/sessions/);
+  assert.doesNotMatch(studio, /outline\/book\/generate/);
+  assert.doesNotMatch(studio, /outline\/book\/commit/);
+  assert.doesNotMatch(studio, /outline\/chapters\/batch-generate/);
+  assert.doesNotMatch(studio, /outline\/chapters\/commit/);
+  assert.doesNotMatch(outlineBundle, /bookOutlineGenerate|chapterOutlineBatchGenerate/);
   assert.doesNotMatch(outlineEditor, /删除总纲|删除大纲|删除卷纲|删除章纲/);
   assert.match(outlineEditor, /formatOutlineDocument/);
   assert.match(outlineEditor, /formatVolumeOutlineDocument/);
@@ -682,8 +788,7 @@ test("outline studio exposes long-novel planning controls", () => {
   assert.doesNotMatch(outlineEditor, /readableJson/);
   assert.doesNotMatch(outlineEditor, /Descriptions/);
   assert.match(outline, /setLastOutlinePlan/);
-  assert.doesNotMatch(outlineCanon, /正典补全/);
-  assert.doesNotMatch(outlineCanon, /长篇小说多 Agent 协作推演与正典补全系统/);
+  assert.doesNotMatch(outlineBundle, /正典补全|长篇小说多 Agent 协作推演与正典补全系统/);
   assert.match(studio, /deleteVolume/);
   assert.match(studio, /\/volumes\/\$\{volumeId\}/);
   assert.match(studio, /chapters\/trash\/batch/);
@@ -694,22 +799,23 @@ test("outline studio exposes long-novel planning controls", () => {
   assert.match(studio, /outline_plan/);
 });
 
-test("outline studio no longer mounts the legacy generation modal flow", () => {
+test("outline studio removes the legacy generation modal flow", () => {
   const outline = read("src/pages/OutlineStudioPage.tsx");
-  const outlineUtils = read("src/pages/outline/outlineUtils.tsx");
-  const outlineJobHook = read("src/pages/outline/useOutlineGenerationJob.ts");
+  const outlineUtils = read("src/pages/outline/outlineUtils.ts");
 
-  assert.match(outlineUtils, /interface RunningInferenceOptions/);
-  assert.match(outlineUtils, /generationMode === "outline"/);
-  assert.match(outlineUtils, /generationMode === "chapter"/);
-  assert.match(outlineUtils, /BOOK_OUTLINE_SWARM_AGENT_ROLES/);
-  assert.match(outlineUtils, /agentName !== "BeatControllerAgent"/);
-  assert.match(outlineUtils, /CHAPTER_OUTLINE_AGENT_ROLES/);
+  assert.match(outlineUtils, /sameStringArray/);
+  assert.doesNotMatch(outlineUtils, /RunningInferenceOptions|BOOK_OUTLINE_SWARM_AGENT_ROLES|CHAPTER_OUTLINE_AGENT_ROLES/);
   assert.doesNotMatch(outline, /buildRunningInferenceSteps\(\{\s*generationMode/);
   assert.doesNotMatch(outline, /useTopologyInference: Boolean\(values\.use_topology_inference\)/);
   assert.doesNotMatch(outline, /useOutlineGenerationJob/);
-  assert.match(outlineJobHook, /useTopologyInference/);
-  assert.match(outlineJobHook, /buildRunningInferenceSteps\(\{\s*generationMode,\s*useTopologyInference/);
+  for (const deletedPath of [
+    "src/pages/outline/OutlineGenerationModal.tsx",
+    "src/pages/outline/OutlineInferenceGraph.tsx",
+    "src/pages/outline/outlineGeneration.ts",
+    "src/pages/outline/useOutlineGenerationJob.ts",
+  ]) {
+    assert.equal(existsSync(new URL(`../${deletedPath}`, import.meta.url)), false, `${deletedPath} should stay deleted`);
+  }
 });
 
 test("outline studio exposes streaming debate engine phases", () => {
@@ -864,6 +970,7 @@ test("settings subsections group file tree, characters, world, graph, and foresh
   assert.match(settingsTree, /SettingsSectionNav active="tree"/);
   assert.match(settingsTree, /getSettingsTree/);
   assert.match(settingsTree, /listCanonVersions/);
+  assert.match(settingsTree, /getCanonVersionTimeline/);
   assert.match(settingsTree, /rollbackCanonVersion/);
   assert.match(settingsTree, /approveCanonProposal/);
   assert.match(settingsTree, /archiveCanonItems/);
@@ -876,12 +983,22 @@ test("settings subsections group file tree, characters, world, graph, and foresh
   assert.match(settingsTree, /影响索引/);
   assert.match(settingsTree, /版本/);
   assert.match(settingsTree, /候选/);
-  for (const label of ["小说宪法", "核心矛盾系统", "关系图谱", "候选变更", "来源", "关系", "状态演进", "Agent 审计", "重复项", "差异对比", "冻结字段", "人物卡当前状态", "正典健康度仪表盘", "新建文件夹", "导出 Markdown", "导出 JSON", "扫描重复项"]) {
+  for (const label of ["小说宪法", "核心矛盾系统", "关系图谱", "候选变更", "来源", "关系", "章节轴", "Agent 审计", "重复项", "差异对比", "冻结字段", "人物卡当前状态", "正典健康度仪表盘", "新建文件夹", "导出 Markdown", "导出 JSON", "扫描重复项"]) {
     assert.match(settingsTree, new RegExp(label));
   }
   assert.match(settingsNav, /作品资料/);
   assert.match(profile, /SettingsSectionNav active="profile"/);
   assert.match(profile, /作品资料与故事圣经/);
+  assert.match(profile, /getCreationProfile/);
+  assert.match(profile, /创作 Star 立项档案/);
+  assert.match(profile, /世界观抽卡/);
+  assert.match(profile, /主角人设抽卡/);
+  assert.match(profile, /书名与包装/);
+  assert.match(profile, /核心矛盾系统/);
+  assert.match(profile, /小说宪法/);
+  assert.match(profile, /压力测试/);
+  assert.match(profile, /profile-creation-archive/);
+  assert.match(profile, /formatProfileValue/);
   assert.match(characters, /SettingsSectionNav active="characters"/);
   assert.match(world, /SettingsSectionNav active="world"/);
   assert.match(graph, /SettingsSectionNav active="graph"/);
@@ -899,19 +1016,14 @@ test("settings subsections group file tree, characters, world, graph, and foresh
 
 test("outline studio hides inline canon completion panel content", () => {
   const outline = read("src/pages/OutlineStudioPage.tsx");
-  const outlineCanon = read("src/pages/outline/CanonStudioPanel.tsx");
   const studio = read("src/api/studio.ts");
 
-  assert.match(outline, /CanonStudioPanel/);
-  assert.match(outlineCanon, /return null/);
-  for (const label of ["正典补全", "世界观输入框", "一句话故事输入框", "Agent handoff", "正典库实体表", "实体补全状态表", "DramaNode 故事节点图", "ContinuityAgent 审查结果", "final_outline.md", "canon_store.json"]) {
-    assert.doesNotMatch(outlineCanon, new RegExp(label));
-  }
-  assert.doesNotMatch(outlineCanon, /runCanonStudio/);
-  assert.doesNotMatch(outlineCanon, /downloadCanonArtifact/);
-  assert.match(studio, /canon-studio\/run/);
-  assert.match(studio, /canon-studio\/store/);
-  assert.match(studio, /canon-studio\/final-outline/);
+  assert.doesNotMatch(outline, /CanonStudioPanel/);
+  assert.equal(existsSync(new URL("../src/pages/outline/CanonStudioPanel.tsx", import.meta.url)), false);
+  assert.doesNotMatch(studio, /runCanonStudio/);
+  assert.doesNotMatch(studio, /getCanonStore/);
+  assert.doesNotMatch(studio, /getCanonFinalOutline/);
+  assert.doesNotMatch(studio, /canon-studio\//);
 });
 
 test("docs describe the split API and outline frontend structure", () => {
@@ -924,6 +1036,7 @@ test("docs describe the split API and outline frontend structure", () => {
     assert.match(doc, /backend\/app\/api\/v1\/endpoints\/writing\.py/);
     assert.match(doc, /frontend\/src\/pages\/outline\//);
     assert.match(doc, /OutlineStudioPage/);
+    assert.doesNotMatch(doc, /canon-studio|final_outline|canon_store|正典补全/);
   }
 });
 
@@ -945,6 +1058,8 @@ test("batch page exposes real job status and control actions", () => {
   assert.match(batch, /listChapters/);
   assert.match(batch, /getJob/);
   assert.match(batch, /localStorage/);
+  assert.match(batch, /latestRecentJob/);
+  assert.match(batch, /saveJobId\(projectId,\s*latestRecentJob\.id\)/);
   assert.match(batch, /请先确认章纲/);
   assert.match(batch, /批量任务已创建/);
   assert.match(batch, /已完成章节/);
@@ -963,16 +1078,17 @@ test("batch page exposes real job status and control actions", () => {
   assert.match(studio, /\/jobs\/\$\{jobId\}\/retry/);
 });
 
-test("job page renders readable outline swarm agent run details", () => {
+test("job page renders readable outline debate agent run details", () => {
   const job = read("src/pages/JobPage.tsx");
 
-  for (const label of ["LLM 来源", "本地降级", "Swarm Trace", "迭代次数", "原始载荷"]) {
+  for (const label of ["LLM 来源", "本地降级", "议事轨迹", "回合数", "原始载荷"]) {
     assert.match(job, new RegExp(label));
   }
-  assert.match(job, /isOutlineSwarmRun/);
+  assert.match(job, /isOutlineDebateRun/);
   assert.match(job, /renderAgentRunDetails/);
   assert.match(job, /trace_events/);
-  assert.match(job, /outline_swarm/);
+  assert.match(job, /outline_debate/);
+  assert.doesNotMatch(job, /outline_swarm|Swarm Trace|迭代次数/);
   assert.doesNotMatch(job, /JSON\.stringify\(run\.output_payload, null, 2\)\.slice\(0, 500\)/);
 });
 

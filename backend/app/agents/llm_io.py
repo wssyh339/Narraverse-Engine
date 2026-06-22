@@ -207,11 +207,40 @@ def call_agent_json(
     )
     started_at = time.perf_counter()
     result = llm_client.generate(prompt, dumps(user_payload), model)
-    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
     used_remote_model = bool(getattr(result, "used_remote_model", False))
     if require_remote and not used_remote_model:
         raise RuntimeError(f"{agent_name} 真实议事需要远程 LLM 输出，但当前结果来自本地降级。")
     parsed = parse_json_object(result.content)
+    repair_attempted = False
+    repair_succeeded = False
+    if parsed is None and require_remote and not allow_fallback:
+        repair_attempted = True
+        repair_payload = {
+            "agent_name": agent_name,
+            "role": role,
+            "task": "把 previous_output 修复为一个严格 JSON object。",
+            "previous_output": str(result.content)[:12000],
+            "expected_output_schema": _schema_hint(fallback),
+            "repair_rules": [
+                "只输出一个 JSON object",
+                "不要输出 Markdown、代码围栏、解释或前后缀",
+                "字段名必须使用 expected_output_schema 中的字段；缺失内容使用空字符串、空数组或空对象",
+            ],
+        }
+        repair_prompt = (
+            f"{rendered_system_prompt}\n\n"
+            "上一次远程 LLM 输出未能解析为 JSON。现在只做格式修复，不新增事实。"
+        )
+        repair_result = llm_client.generate(repair_prompt, dumps(repair_payload), model)
+        used_remote_model = used_remote_model or bool(getattr(repair_result, "used_remote_model", False))
+        if require_remote and not bool(getattr(repair_result, "used_remote_model", False)):
+            raise RuntimeError(f"{agent_name} JSON 修复需要远程 LLM 输出，但当前结果来自本地降级。")
+        repaired = parse_json_object(repair_result.content)
+        if repaired is not None:
+            parsed = repaired
+            result = repair_result
+            repair_succeeded = True
+    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
     if parsed is None and not allow_fallback:
         raise RuntimeError(f"{agent_name} LLM 输出未解析为 JSON object，真实议事路径不允许 fallback。")
     payload = merge_agent_payload(fallback, parsed) if allow_fallback else {**fallback, **(parsed or {})}
@@ -225,6 +254,8 @@ def call_agent_json(
         "elapsed_ms": elapsed_ms,
         "schema_valid": not validation_warnings,
         "validation_warnings": validation_warnings,
+        "repair_attempted": repair_attempted,
+        "repair_succeeded": repair_succeeded,
     }
     payload["_quality_gate"] = {
         "schema_valid": meta["schema_valid"],

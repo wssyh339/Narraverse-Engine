@@ -19,6 +19,7 @@ from app.api.v1.endpoints.studio import (
     creation_star_draw,
     creation_star_options,
     export_prompt_templates,
+    get_creation_profile,
     get_creation_session,
     get_agent,
     import_prompt_templates,

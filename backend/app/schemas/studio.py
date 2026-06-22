@@ -59,6 +59,7 @@ class DraftChapterRequest(APIModel):
     temperature: float = Field(default=0.75, ge=0, le=2)
     max_words: int = Field(default=3200, ge=500, le=12000)
     idempotency_key: str | None = None
+    async_mode: bool = False
     model: str | None = None
 
 
@@ -339,10 +340,14 @@ class UpdateChapterRequest(APIModel):
     pov_character: str | None = None
     core_event: str | None = None
     conflict: str | None = None
+    crisis: str | None = None
+    climax: str | None = None
+    outcome: str | None = None
     turn_point: str | None = None
     emotional_beats: list[str] | None = None
     plot_purpose: str | None = None
     cliffhanger: str | None = None
+    chapter_hook: str | None = None
     draft_text: str | None = None
     final_text: str | None = None
     summary: str | None = None

@@ -7,6 +7,7 @@ import { studioApi, type CreateProjectPayload } from "../api/studio";
 import { CreationStarWizard } from "../components/CreationStarWizard";
 import { useStudioStore } from "../store/studioStore";
 
+const DEFAULT_CHAPTER_WORD_TARGET = 8000;
 const creationStarDraftProject: CreateProjectPayload = {
   title: "未命名创作 Star 项目",
   genre: "待定",
@@ -15,8 +16,8 @@ const creationStarDraftProject: CreateProjectPayload = {
   style_guide: "清晰、有钩子。",
   language: "zh-CN",
   planned_chapter_count: 80,
-  chapter_word_target: 2200,
-  target_words: 176000,
+  chapter_word_target: DEFAULT_CHAPTER_WORD_TARGET,
+  target_words: 80 * DEFAULT_CHAPTER_WORD_TARGET,
   initial_idea: "",
 };
 

@@ -1,4 +1,5 @@
 import os
+import json
 import re
 from pathlib import Path
 
@@ -30,17 +31,17 @@ def test_agent_prompt_can_be_customized_and_restored_to_default() -> None:
     reset_database()
     client = TestClient(app)
 
-    original = assert_success(client.get("/api/agents/full_structure"))["agent"]
+    original = assert_success(client.get("/api/agents/chapter_planner"))["agent"]
     assert original["is_custom"] is False
     assert original["prompt"] == original["default_prompt"]
 
-    custom_prompt = "自定义全书结构 Agent：只输出 JSON。"
-    updated = assert_success(client.put("/api/agents/full_structure/prompt", json={"prompt": custom_prompt}))["agent"]
+    custom_prompt = "自定义章节规划 Agent：只输出 JSON。"
+    updated = assert_success(client.put("/api/agents/chapter_planner/prompt", json={"prompt": custom_prompt}))["agent"]
     assert updated["is_custom"] is True
     assert updated["prompt"] == custom_prompt
     assert updated["default_prompt"] == original["default_prompt"]
 
-    restored = assert_success(client.post("/api/agents/full_structure/prompt/restore"))["agent"]
+    restored = assert_success(client.post("/api/agents/chapter_planner/prompt/restore"))["agent"]
     assert restored["is_custom"] is False
     assert restored["prompt"] == original["default_prompt"]
 
@@ -188,7 +189,7 @@ def test_llm_provider_resolver_infers_provider_from_catalog_models() -> None:
     assert prefixed.model == "custom/model-name"
 
 
-def test_workflows_api_exposes_prompt_lifecycle_views_and_keeps_legacy_prompt_lanes() -> None:
+def test_workflows_api_exposes_prompt_lifecycle_views_and_active_debate_lane() -> None:
     reset_database()
     client = TestClient(app)
 
@@ -198,6 +199,12 @@ def test_workflows_api_exposes_prompt_lifecycle_views_and_keeps_legacy_prompt_la
     assert "chapter_closed_loop_lifecycle" in by_key
     assert "special_booster_lifecycle" in by_key
     assert "chapter_production" in by_key
+    assert "outline_debate_engine" in by_key
+    assert "outline_planning" not in by_key
+    assert "outline_generation" not in by_key
+    assert "outline_swarm" not in by_key
+    assert "book_structure_lifecycle" not in by_key
+    assert "volume_rolling_lifecycle" not in by_key
     first_lifecycle_index = next(index for index, workflow in enumerate(workflows) if workflow.get("workflow_kind") == "prompt_lifecycle")
     first_prompt_library_index = next(index for index, workflow in enumerate(workflows) if workflow.get("workflow_kind") == "prompt_library")
     assert first_lifecycle_index < first_prompt_library_index
@@ -216,6 +223,10 @@ def test_workflows_api_exposes_prompt_lifecycle_views_and_keeps_legacy_prompt_la
     assert legacy["workflow_kind"] == "prompt_library"
     assert legacy["runtime_status"] == "applied_via_prompt_binding"
 
+    debate = by_key["outline_debate_engine"]
+    assert debate["runtime_status"] == "active_runtime"
+    assert "/api/projects/{project_id}/outline/debate/sessions" in debate["entrypoints"]
+
 
 def test_call_agent_json_replaces_template_input_placeholders_before_llm_call() -> None:
     captured = {}
@@ -228,10 +239,10 @@ def test_call_agent_json_replaces_template_input_placeholders_before_llm_call() 
 
     call_agent_json(
         llm_client=FakeLLM(),
-        agent_name="full_structure",
-        role="全书结构 Agent",
+        agent_name="chapter_planner",
+        role="章节规划 Agent",
         system_prompt="小说宪法：【粘贴小说宪法】\n当前卷：【填写，例如第一卷：底层觉醒】\n正文长度：【填写字数】",
-        task="生成大纲",
+        task="根据已确认章纲生成章节卡",
         context={
             "project": {"title": "雾港来信", "genre": "悬疑", "chapter_word_target": 2200},
             "story_bible": {"main_conflict": "记者追查十年前旧案", "themes": ["记忆", "真相"]},
@@ -249,6 +260,39 @@ def test_call_agent_json_replaces_template_input_placeholders_before_llm_call() 
     assert "记者追查十年前旧案" in system_prompt
     assert "第一卷：旧信" in system_prompt
     assert "2200" in system_prompt
+
+
+def test_call_agent_json_repairs_invalid_remote_json_once_when_fallback_is_forbidden() -> None:
+    calls: list[dict[str, str]] = []
+
+    class FakeLLM:
+        def generate(self, system_prompt: str, user_prompt: str, model: str | None = None):
+            calls.append({"system_prompt": system_prompt, "user_prompt": user_prompt})
+            content = "我先解释一下：这个审计通过。" if len(calls) == 1 else '{"ok": true, "notes": ["repaired"]}'
+            return type("Result", (), {"content": content, "provider": "fake", "model": model or "fake", "used_remote_model": True})()
+
+    payload, meta = call_agent_json(
+        llm_client=FakeLLM(),
+        agent_name="outline_debate/ContinuityAuditorAgent",
+        role="连续性审计 Agent",
+        system_prompt="输出 JSON。",
+        task="审计议事结果。",
+        context={"project": {"title": "雾港来信"}},
+        fallback={"ok": False, "notes": []},
+        model="unit-model",
+        require_remote=True,
+        allow_fallback=False,
+    )
+
+    assert len(calls) == 2
+    repair_payload = json.loads(calls[1]["user_prompt"])
+    assert "previous_output" in repair_payload
+    assert repair_payload["expected_output_schema"]["ok"] == "bool"
+    assert payload["ok"] is True
+    assert payload["notes"] == ["repaired"]
+    assert meta["parsed"] is True
+    assert meta["repair_attempted"] is True
+    assert meta["repair_succeeded"] is True
 
 
 def test_call_agent_json_marks_invalid_critical_agent_output_schema() -> None:
@@ -368,13 +412,17 @@ def test_workflow_definitions_expose_runtime_application_status() -> None:
         assert workflow["runtime_note"]
         assert workflow["entrypoints"]
 
-    outline = next(workflow for workflow in workflows if workflow["id"] == "outline_generation")
-    assert outline["runtime_status"] == "active_runtime"
-    assert "/api/projects/{project_id}/chapters/plan" in outline["entrypoints"]
+    debate = next(workflow for workflow in workflows if workflow["id"] == "outline_debate_engine")
+    assert debate["runtime_status"] == "active_runtime"
+    assert "/api/projects/{project_id}/outline/debate/sessions" in debate["entrypoints"]
+    assert "/api/projects/{project_id}/outline/debate/sessions/{session_id}/book/stream" in debate["entrypoints"]
 
-    prompt_lane = next(workflow for workflow in workflows if workflow["id"] == "outline_planning")
-    assert prompt_lane["runtime_status"] == "applied_via_prompt_binding"
-    assert "AgentSpec" in prompt_lane["runtime_note"]
+    workflow_ids = {workflow["id"] for workflow in workflows}
+    assert "outline_planning" not in workflow_ids
+    assert "outline_generation" not in workflow_ids
+    assert "outline_swarm" not in workflow_ids
+    assert "book_structure_lifecycle" not in workflow_ids
+    assert "volume_rolling_lifecycle" not in workflow_ids
 
 
 def test_creation_star_session_workflow_is_registered_for_visualization() -> None:

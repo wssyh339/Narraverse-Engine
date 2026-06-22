@@ -76,8 +76,18 @@ export interface JobProgress {
   current_chapter_no?: number;
   child_job_id?: string;
   child_current_step?: string;
+  child_step_label?: string;
   child_total_steps?: number;
   child_completed_steps?: number;
+  total_chapters?: number;
+  completed_chapters?: number;
+  overall_percent?: number;
+  elapsed_seconds?: number;
+  average_chapter_seconds?: number;
+  eta_seconds?: number;
+  retryable_failed_chapters?: number[];
+  long_task?: boolean;
+  long_task_advice?: string[];
   message?: string;
 }
 
@@ -85,7 +95,7 @@ export interface GenerationJob {
   id: string;
   project_id: string;
   chapter_id: string | null;
-  job_type: "plan_chapters" | string;
+  job_type: string;
   status: "queued" | "running" | "succeeded" | "failed" | "cancelled" | string;
   idempotency_key: string;
   model: string;
@@ -256,7 +266,14 @@ export interface ForeshadowingItem {
   updated_at: string;
 }
 
-export type CanonRefType = "character" | "entity" | "world_fact" | "foreshadowing" | "folder";
+export type CanonRefType = "character" | "entity" | "world_fact" | "foreshadowing" | "graph_edge" | "folder";
+
+export interface CanonSourceChapter {
+  id: string;
+  volume_no: number;
+  chapter_no: number;
+  title: string;
+}
 
 export interface CanonHealth {
   official_count: number;
@@ -270,6 +287,7 @@ export interface CanonHealth {
     entities: number;
     world_facts: number;
     foreshadowing: number;
+    graph_edges?: number;
   };
   recommendations: string[];
 }
@@ -300,6 +318,7 @@ export interface CanonVersion {
   version_no: number;
   content: Record<string, unknown>;
   source_chapter_id: string | null;
+  source_chapter?: CanonSourceChapter | null;
   source_job_id: string | null;
   source_agent: string;
   change_reason: string;
@@ -316,6 +335,7 @@ export interface CanonChangeProposal {
   before: Record<string, unknown>;
   after: Record<string, unknown>;
   source_chapter_id: string | null;
+  source_chapter?: CanonSourceChapter | null;
   source_job_id: string | null;
   source_agent: string;
   approval_status: "pending" | "approved" | "rejected" | string;
@@ -323,6 +343,55 @@ export interface CanonChangeProposal {
   reason: string;
   created_at: string;
   decided_at: string | null;
+}
+
+export interface CanonTimelineEvent {
+  id: string;
+  event_type: "version" | "proposal" | "snapshot" | string;
+  ref_type: Exclude<CanonRefType, "folder"> | "chapter";
+  ref_id: string | null;
+  title: string;
+  chapter: CanonSourceChapter | null;
+  source_chapter?: CanonSourceChapter | null;
+  created_at: string;
+  version_no?: number;
+  content?: Record<string, unknown>;
+  target_type?: Exclude<CanonRefType, "folder">;
+  target_id?: string | null;
+  operation?: string;
+  approval_status?: string;
+  source_agent?: string;
+  source_job_id?: string | null;
+  change_reason?: string;
+  reason?: string;
+  confidence?: number;
+}
+
+export interface CanonTimelineChapter {
+  chapter: CanonSourceChapter;
+  versions: CanonVersion[];
+  proposals: CanonChangeProposal[];
+  snapshots: Record<string, unknown>[];
+  events: CanonTimelineEvent[];
+}
+
+export interface CanonVersionTimeline {
+  chapters: CanonTimelineChapter[];
+  events: CanonTimelineEvent[];
+  unbound: {
+    versions: CanonVersion[];
+    proposals: CanonChangeProposal[];
+    snapshots: Record<string, unknown>[];
+    events: CanonTimelineEvent[];
+  };
+  summary: {
+    chapter_count: number;
+    event_count: number;
+    version_count: number;
+    proposal_count: number;
+    snapshot_count: number;
+  };
+  filters: { ref_type: string | null; ref_id: string | null; chapter_id: string | null };
 }
 
 export interface CanonImpact {
@@ -396,10 +465,13 @@ export interface AgentRun {
   status: string;
   input_payload: Record<string, unknown>;
   output_payload: Record<string, unknown>;
+  input?: Record<string, unknown>;
+  output?: Record<string, unknown>;
   error_message: string;
   langsmith_run_id?: string;
   langsmith_url?: string;
   trace_mode?: string;
+  duration_ms?: number | null;
   started_at: string | null;
   finished_at: string | null;
 }
@@ -679,52 +751,31 @@ export interface CreationSession {
   updated_at: string;
 }
 
-export interface CanonRunPayload {
-  worldview: string;
-  one_sentence_story: string;
-  genre: string;
-  target_length: string;
-  tone: string;
-  reference_works?: string[];
-  avoid_elements?: string[];
+export interface CreationProfileArchive {
+  basic_info: CreationStarBasicInfo;
+  selected_worldview: Record<string, unknown>;
+  selected_protagonist: Record<string, unknown>;
+  selected_title: Record<string, unknown>;
+  market_position: Record<string, unknown>;
+  project_seed: Record<string, unknown>;
+  core_conflict_system: Record<string, unknown>;
+  novel_constitution: Record<string, unknown>;
+  constitution_review: Record<string, unknown>;
+  canon_candidates: Record<string, unknown>;
+  confirmed_canon: Record<string, unknown>;
 }
 
-export interface CanonEntity {
-  name: string;
-  entity_type: string;
-  level: "S" | "A" | "B" | "C";
-  story_function: string;
-  first_appearance: string;
-  responsible_agent: string;
-  completion_status: "candidate" | "incomplete" | "complete" | "conflict";
-  continuity_checked: boolean;
-  payload: Record<string, unknown>;
-}
-
-export interface DramaNode {
-  node_id: string;
-  node_type: string;
-  title: string;
-  description: string;
-  story_function: string;
-  cost: string;
-  state_change: string;
-  why_chain: string[];
-  related_entities: string[];
-}
-
-export interface CanonRunResult {
-  project_id: string;
-  canon_store_path: string;
-  trace_store_path: string;
-  version_store_path: string;
-  final_outline_path: string;
-  final_outline: string;
-  continuity_report: { passed: boolean; score: number; issues: Array<Record<string, unknown>> };
-  agent_trace: string[];
-  drama_nodes: DramaNode[];
-  canon_entities: CanonEntity[];
-  completion_tickets: Array<Record<string, unknown>>;
-  uncertainty_tickets: Array<Record<string, unknown>>;
-  agent_handoff_graph: Record<string, string[]>;
+export interface CreationProjectProfile {
+  project: Project;
+  story_bible: StoryBible | null;
+  creation_session: CreationSession | null;
+  creation_profile: CreationProfileArchive;
+  profile_summary: {
+    has_creation_star: boolean;
+    session_status: string;
+    session_step: string;
+    session_updated_at: string | null;
+    canon_sections: string[];
+    confirmed: boolean;
+  };
 }

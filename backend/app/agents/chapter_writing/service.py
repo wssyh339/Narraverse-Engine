@@ -8,9 +8,6 @@ class ChapterWritingService:
     def run_initialization(self, state: NovelStudioState) -> NovelStudioState:
         return agent_workflow.run_initialization(state)
 
-    def run_chapter_plan(self, state: NovelStudioState) -> NovelStudioState:
-        return agent_workflow.run_chapter_plan(state)
-
     def run_chapter_draft(self, state: NovelStudioState) -> NovelStudioState:
         return agent_workflow.run_chapter_draft(state)
 

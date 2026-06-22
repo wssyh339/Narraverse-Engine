@@ -194,7 +194,7 @@ class DeepAgentLangSmithService:
 
     def _select_tool(self, message: str) -> tuple[str, str, dict[str, Any]]:
         if "大纲" in message or "结构" in message:
-            return "run_outline_workflow", "high", {"intent": "inspect_outline", "requires_user_confirmation": True}
+            return "run_outline_debate", "high", {"intent": "inspect_outline_debate", "requires_user_confirmation": True}
         if "正典" in message or "设定" in message:
             return "create_candidate_canon_update", "high", {"intent": "prepare_canon_candidates", "requires_user_confirmation": True}
         return "read_canon_context", "low", {"intent": "read_context", "requires_user_confirmation": False}
