@@ -610,9 +610,13 @@ export interface WorkflowNode {
   layer: number;
   prompt_id?: string;
   prompt_filename?: string;
+  default_agent_name?: string;
   provider?: string | null;
   model?: string | null;
   model_config_id?: string | null;
+  configurable?: boolean;
+  node_runtime_status?: "configurable_agent" | "prompt_task" | "active_runtime" | "control" | string;
+  runtime_note?: string;
   tags?: string[];
 }
 

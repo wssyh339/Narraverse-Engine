@@ -46,6 +46,24 @@ from app.services.serializers import (
 
 
 DEFAULT_CHAPTER_WORD_TARGET = 8000
+DEFAULT_CHAPTER_WINDOWS_PER_VOLUME = 5
+OUTLINE_TEMPLATE_BLOCKLIST = (
+    "待确认",
+    "本章核心事件待确认",
+    "本章冲突待确认",
+    "本章危机待确认",
+    "本章高潮待确认",
+    "本章结果待确认",
+    "第{chapter_no}章围绕本章核心事件推进一次行动、阻碍和后果",
+    "围绕本章核心事件推进一次行动、阻碍和后果",
+    "本章危机是主角必须作出不可逆选择",
+    "本章高潮是主角执行选择并付出可见代价",
+    "本章结果改变局面",
+    "留下下一章必须回应的问题",
+    "根据类型、读者体验和阶段冲突选择",
+)
+STATE_CHANGE_AXES = ("压力", "认知", "资源", "关系", "规则", "秘密", "代价", "目标")
+FORESHADOWING_ACTIONS = ("plant", "remind", "mislead", "payoff")
 
 PHASE_CONFIG: dict[str, dict[str, str]] = {
     "book": {
@@ -73,10 +91,10 @@ PHASE_UPSTREAM_LABELS = {"volumes": ("book", "总纲"), "chapters": ("volumes", 
 
 DEBATE_AGENTS: tuple[tuple[str, str], ...] = (
     ("outline_debate/StoryDirectorAgent", "主持总策划 Agent"),
-    ("outline_debate/MarketPositionAgent", "类型卖点与读者体验 Agent"),
+    ("outline_debate/MarketPositionAgent", "类型卖点 Agent"),
     ("outline_debate/StructureDoctorAgent", "结构医生 Agent"),
-    ("outline_debate/CharacterGeneratorAgent", "大纲角色生成 Agent"),
-    ("outline_debate/SettingGeneratorAgent", "大纲设定生成 Agent"),
+    ("outline_debate/CharacterGeneratorAgent", "角色生成 Agent"),
+    ("outline_debate/SettingGeneratorAgent", "设定生成 Agent"),
     ("outline_debate/ContinuityAuditorAgent", "连续性审计 Agent"),
 )
 DEBATE_AGENT_ROLES = dict(DEBATE_AGENTS)
@@ -92,52 +110,55 @@ DEBATE_AGENT_SYSTEM_PROMPTS: dict[str, str] = {
     "outline_debate/StoryDirectorAgent": (
         "你是大纲讨论组的主持总策划 Agent。你的能力是收束作品承诺、核心矛盾、阶段边界和候选产物。"
         "你必须读取 context 中的 Star 立项种子、项目资料、已确认正典和上游阶段结果。"
+        "你还必须根据专席评分、阻塞项和用户插话决定下一位发言者，并输出 adopted/rejected/pending 的裁决。"
         "本轮发言不直接写库；用户确认本阶段后，服务层会把已确认的大纲、角色和设定条目立即写入正式正典。"
     ),
     "outline_debate/MarketPositionAgent": (
-        "你是类型卖点与读者体验 Agent。你的能力是判断频道、类型、爽点、压迫感、情感拉扯、平台期待和商业可读性。"
-        "你必须把读者体验转成可持续冲突、章节钩子和风险提示，不得生成空泛营销话术。"
+        "你是类型卖点 Agent。你的能力是判断频道、类型、爽点、压迫感、情感拉扯、平台期待、追读理由和兑现节奏。"
+        "你必须把读者体验转成可持续冲突、章节钩子、伏笔兑现和风险提示，不得生成空泛营销话术。"
     ),
     "outline_debate/StructureDoctorAgent": (
         "你是结构医生 Agent。你的能力是检查长篇因果链、节奏模型、危机/高潮/结果边界、卷章功能和返工点。"
         "必须严格区分：危机是不可逆选择，高潮是执行选择，结果是承担后果。"
     ),
     "outline_debate/CharacterGeneratorAgent": (
-        "你是大纲角色生成 Agent。你的能力是在大纲讨论中新出现未入库角色时立即生成角色档案卡候选。"
-        "不必等待“角色缺口”措辞；凡是候选大纲、用户插话或其他 Agent 发言出现新角色、角色功能或角色名，都要判断是否已在正典中存在，未存在则生成。"
-        "角色必须有剧情功能、首次需要位置、冲突关系、重复项检查建议和确认入库边界。"
+        "你是角色生成 Agent。你的能力是审查人物功能、关系压力、重复风险和首次需要时机。"
+        "不要因轻量提及就生成完整角色卡；只有用户/主持明确要求，或角色达到中等以上重要度、影响主线/伏笔/关系压力/正典连续性时，才生成角色档案卡候选。"
+        "角色必须先规划全书预计角色总量、重要性分布和本阶段新增数量；候选列表按 importance_score 递减。"
+        "每张角色卡必须覆盖设定页角色字段，并兼容创作 Star 主角模板字段。"
         "讨论发言阶段不调用 characters 写入；用户确认对应阶段或条目后，由服务层立即入库，不再进入二次候选审批。"
     ),
     "outline_debate/SettingGeneratorAgent": (
-        "你是大纲设定生成 Agent。你的能力是在大纲讨论中新出现未入库世界规则、场景、地点、组织、物件或制度时立即生成设定候选。"
-        "不必等待“设定缺口”措辞；凡是候选大纲、用户插话或其他 Agent 发言出现新设定对象，都要判断是否已在正典中存在，未存在则生成。"
-        "设定必须说明冲突用途、伏笔用途、连续性风险和确认入库边界。讨论发言阶段不调用 world_facts 或 graph 写入；用户确认对应阶段或条目后，由服务层立即入库，不再进入二次候选审批。"
+        "你是设定生成 Agent。你的能力是审查规则成本、设定冲突用途、揭示时机、伏笔用途和连续性风险。"
+        "不要因轻量提及就生成完整设定；只有用户/主持明确要求，或设定达到中等以上重要度、影响选择代价/主线冲突/伏笔/正典连续性时，才生成设定候选。"
+        "设定必须覆盖设定页实体或世界观事实展示字段，并说明冲突用途、限制、成本、伏笔用途、连续性风险和确认入库边界。讨论发言阶段不调用 world_facts 或 graph 写入；用户确认对应阶段或条目后，由服务层立即入库，不再进入二次候选审批。"
     ),
     "outline_debate/ContinuityAuditorAgent": (
         "你是连续性审计 Agent。你的能力是标记不确定项、冲突风险、缺失来源、阻塞问题和需要用户确认的变更。"
-        "不确定不得硬编；只有用户确认阶段或条目后，正式正典变更才会由服务层直接写入。"
+        "你必须给出 pass/revise/blocked 裁决；不确定不得硬编；存在 blocking_items 时不得建议直接确认。"
+        "只有用户确认阶段或条目后，正式正典变更才会由服务层直接写入。"
     ),
 }
 
 DEBATE_AGENT_SKILL_SPECS: dict[str, dict[str, Any]] = {
     "outline_debate/StoryDirectorAgent": {
-        "core_capability": "主持讨论并收束作品承诺、主线冲突、阶段目标和候选结论。",
+        "core_capability": "主持讨论、路由专席、收束作品承诺、主线冲突、阶段目标和候选结论。",
         "skill_file": "app/prompts/outline_debate_story_director_skill.md",
-        "skills": ["长篇主线设计 skill", "冲突发动机 skill", "终局反推 skill", "讨论主持 skill", "决议归纳 skill"],
+        "skills": ["长篇主线设计 skill", "冲突发动机 skill", "终局反推 skill", "议程压缩 skill", "专席路由 skill", "采纳否决裁决 skill"],
         "required_context_keys": ["project", "story_bible", "canon_context", "scale_plan", "upstream_phase_runs", "requirement"],
         "allowed_read_tools": ["get_project_state", "get_story_bible", "get_canon_context", "list_volumes", "list_chapters"],
-        "allowed_candidate_tools": ["record_outline_piece", "build_outline_topology", "create_uncertainty_ticket"],
+        "allowed_candidate_tools": ["record_outline_piece", "record_debate_decision", "route_to_agent", "close_round", "build_outline_topology", "create_uncertainty_ticket"],
         "validators": ["schema_validator", "impact_analyzer"],
         "forbidden_tools": ["direct_formal_outline_write", "createCharacter", "createWorldFact", "createEntity"],
         "candidate_policy": "只形成待确认大纲条目；用户确认阶段后由服务层立即写入正式大纲和正典。",
     },
     "outline_debate/MarketPositionAgent": {
-        "core_capability": "判断目标读者体验、类型卖点、压迫感和期待管理。",
+        "core_capability": "判断目标读者体验、类型卖点、压迫感、追读理由和期待兑现。",
         "skill_file": "app/prompts/outline_debate_market_position_skill.md",
-        "skills": ["类型文卖点识别 skill", "目标读者体验建模 skill", "平台风格判断 skill", "预期管理 skill"],
+        "skills": ["类型文卖点识别 skill", "目标读者体验建模 skill", "追读承诺账本 skill", "爽点兑现延期判断 skill", "前三章与卷末期待管理 skill"],
         "required_context_keys": ["project", "story_bible", "canon_context", "scale_plan", "requirement"],
-        "allowed_read_tools": ["get_project_state", "get_story_bible", "get_canon_context"],
-        "allowed_candidate_tools": ["record_outline_piece"],
+        "allowed_read_tools": ["get_project_state", "get_story_bible", "get_canon_context", "list_chapters", "list_foreshadowing"],
+        "allowed_candidate_tools": ["record_outline_piece", "create_completion_ticket"],
         "validators": ["schema_validator", "impact_analyzer"],
         "forbidden_tools": ["direct_formal_outline_write", "createCharacter", "createWorldFact", "createEntity"],
         "candidate_policy": "只把市场判断转译为冲突、钩子和风险；如需新增设定，交给设定生成 Agent，并在用户确认后直接入库。",
@@ -145,46 +166,46 @@ DEBATE_AGENT_SKILL_SPECS: dict[str, dict[str, Any]] = {
     "outline_debate/StructureDoctorAgent": {
         "core_capability": "检查长篇结构、卷节奏、章节因果，以及危机/高潮/结果边界。",
         "skill_file": "app/prompts/outline_debate_structure_doctor_skill.md",
-        "skills": ["节奏模型选择 skill", "危机高潮结果区分 skill", "长篇因果链检查 skill", "卷纲拆分 skill", "章纲密度控制 skill"],
+        "skills": ["节奏模型选择 skill", "危机高潮结果区分 skill", "长篇因果链检查 skill", "十章节奏窗 skill", "反派压力线结构检查 skill", "章纲密度控制 skill"],
         "required_context_keys": ["project", "story_bible", "canon_context", "scale_plan", "upstream_phase_runs", "requirement"],
-        "allowed_read_tools": ["get_project_state", "get_story_bible", "get_canon_context", "list_volumes", "list_chapters"],
+        "allowed_read_tools": ["get_project_state", "get_story_bible", "get_canon_context", "list_volumes", "list_chapters", "list_foreshadowing", "get_graph"],
         "allowed_candidate_tools": ["record_outline_piece", "create_completion_ticket"],
         "validators": ["schema_validator", "rhythm_model_selector", "crisis_climax_result_checker", "impact_analyzer"],
         "forbidden_tools": ["direct_formal_outline_write", "createCharacter", "createWorldFact", "createEntity"],
         "candidate_policy": "只校正结构候选；发现结构阻塞时登记返工建议。",
     },
     "outline_debate/CharacterGeneratorAgent": {
-        "core_capability": "在大纲讨论中新出现未入库角色时生成候选角色卡。",
+        "core_capability": "审查人物功能与关系压力，并在达到触发门槛时生成候选角色卡。",
         "skill_file": "app/prompts/outline_debate_character_generator_skill.md",
-        "skills": ["角色功能识别 skill", "人物卡生成 skill", "角色关系钩子 skill", "重复角色识别 skill", "活跃状态重要度分类 skill"],
-        "required_context_keys": ["project", "canon_context.characters", "canon_context.graph", "requirement"],
-        "allowed_read_tools": ["get_canon_context", "list_characters", "get_graph"],
-        "allowed_candidate_tools": ["create_character_candidate", "create_uncertainty_ticket"],
+        "skills": ["角色功能识别 skill", "人物功能审计 skill", "人物卡生成 skill", "角色关系钩子 skill", "重复角色识别 skill", "反派压力线协作 skill", "活跃状态重要度分类 skill"],
+        "required_context_keys": ["project", "canon_context.characters", "canon_context.graph", "scale_plan", "requirement"],
+        "allowed_read_tools": ["get_canon_context", "list_characters", "list_chapters", "list_foreshadowing", "get_graph"],
+        "allowed_candidate_tools": ["create_character_candidate", "create_relationship_candidate", "record_outline_piece", "create_uncertainty_ticket"],
         "validators": ["schema_validator", "duplicate_scanner", "impact_analyzer"],
         "forbidden_tools": ["createCharacter", "direct_formal_outline_write"],
-        "candidate_policy": "只要讨论中出现未入库角色、角色功能或角色名，就生成 character_candidate；用户确认对应总纲/卷纲/章纲条目后由服务层立即入库。",
+        "candidate_policy": "先输出 character_function_audit；只有用户/主持明确要求、重要度达到 medium 以上、存在 first_needed_in，或影响主线/伏笔/关系压力/正典连续性时，才生成完整 character_candidates；候选按 importance_score 递减，用户确认对应总纲/卷纲/章纲条目后由服务层立即入库，不进入二次审批。",
     },
     "outline_debate/SettingGeneratorAgent": {
-        "core_capability": "在大纲讨论中新出现未入库规则、地点、组织、物件、场景或制度时生成候选设定。",
+        "core_capability": "审查设定冲突用途、规则成本和揭示时机，并在达到触发门槛时生成候选设定。",
         "skill_file": "app/prompts/outline_debate_setting_generator_skill.md",
-        "skills": ["世界规则生成 skill", "组织地点物件制度生成 skill", "设定冲突用途分析 skill", "伏笔用途分析 skill", "正典候选归类 skill"],
-        "required_context_keys": ["project", "canon_context.entities", "canon_context.world_facts", "canon_context.graph", "requirement"],
-        "allowed_read_tools": ["get_canon_context", "list_entities", "list_world_facts", "get_graph", "list_foreshadowing"],
-        "allowed_candidate_tools": ["create_setting_candidate", "create_uncertainty_ticket"],
+        "skills": ["世界规则生成 skill", "规则成本检查 skill", "组织地点物件制度生成 skill", "设定冲突用途分析 skill", "设定揭示节奏 skill", "伏笔用途分析 skill", "正典候选归类 skill"],
+        "required_context_keys": ["project", "canon_context.entities", "canon_context.world_facts", "canon_context.graph", "scale_plan", "requirement"],
+        "allowed_read_tools": ["get_canon_context", "list_entities", "list_world_facts", "list_chapters", "get_graph", "list_foreshadowing"],
+        "allowed_candidate_tools": ["create_setting_candidate", "create_graph_relation_candidate", "record_outline_piece", "create_uncertainty_ticket"],
         "validators": ["schema_validator", "duplicate_scanner", "continuity_checker", "impact_analyzer"],
         "forbidden_tools": ["createWorldFact", "createEntity", "direct_formal_outline_write"],
-        "candidate_policy": "只要讨论中出现未入库规则、地点、组织、物件、场景或制度，就生成 setting_candidate；用户确认对应总纲/卷纲/章纲条目后由服务层立即入库。",
+        "candidate_policy": "先输出 setting_function_audit；只有用户/主持明确要求、重要度达到 medium 以上、存在 first_needed_in，或影响选择代价/主线冲突/伏笔/正典连续性时，才生成完整 setting_candidates；候选按 importance_score 递减，用户确认对应总纲/卷纲/章纲条目后由服务层立即入库，不进入二次审批。",
     },
     "outline_debate/ContinuityAuditorAgent": {
         "core_capability": "审计连续性、正典冲突、伏笔账本、时间线和不确定项。",
         "skill_file": "app/prompts/outline_debate_continuity_auditor_skill.md",
-        "skills": ["连续性审计 skill", "正典冲突检测 skill", "伏笔账本检查 skill", "时间线检查 skill", "不确定项登记 skill"],
+        "skills": ["连续性审计 skill", "正典冲突检测 skill", "伏笔账本检查 skill", "时间线检查 skill", "阻塞项裁决 skill", "不确定项登记 skill"],
         "required_context_keys": ["project", "story_bible", "canon_context", "scale_plan", "upstream_phase_runs", "requirement"],
-        "allowed_read_tools": ["get_project_state", "get_story_bible", "get_canon_context", "get_graph", "list_foreshadowing", "list_chapters"],
-        "allowed_candidate_tools": ["create_uncertainty_ticket", "create_completion_ticket", "record_outline_piece"],
+        "allowed_read_tools": ["get_project_state", "get_story_bible", "get_canon_context", "list_characters", "list_entities", "list_world_facts", "get_graph", "list_foreshadowing", "list_chapters"],
+        "allowed_candidate_tools": ["create_uncertainty_ticket", "create_completion_ticket", "create_blocking_ticket", "record_outline_piece"],
         "validators": ["schema_validator", "continuity_checker", "crisis_climax_result_checker", "impact_analyzer"],
         "forbidden_tools": ["createCharacter", "createWorldFact", "createEntity", "direct_formal_outline_write"],
-        "candidate_policy": "只输出风险、证据和待确认项；不得把不确定内容写成正式正典。",
+        "candidate_policy": "只输出风险、证据、blocking_items 和待确认项；不得把不确定内容写成正式正典；存在阻塞项时不得建议直接确认。",
     },
 }
 
@@ -232,16 +253,41 @@ DISPLAY_KEY_LABELS: dict[str, str] = {
     "chapter_outline_candidates": "章纲候选",
     "chapter_outlines": "章纲列表",
     "chapter_ranges": "章节范围",
+    "chapter_windows": "章节窗口",
+    "window_no": "窗口序号",
+    "window_range": "窗口范围",
+    "window_goal": "窗口目标",
+    "window_function": "窗口功能",
     "chapter_word_max": "单章最高字数",
     "chapter_word_min": "单章最低字数",
     "chapter_word_target": "单章目标字数",
     "chapters": "章节",
     "chapters_per_volume": "每卷章节数",
     "character_candidate": "角色候选",
+    "character_candidates": "角色候选列表",
+    "character_count_plan": "角色数量规划",
     "claims": "关键主张",
     "cliffhanger": "章末钩子",
     "climax": "高潮",
     "confidence": "置信度",
+    "decision": "裁决",
+    "decision_source": "裁决来源",
+    "scores": "评分",
+    "score_source": "评分来源",
+    "blocking_items": "阻塞项",
+    "must_fix_before_confirm": "确认前必须修复",
+    "challenge_targets": "质询对象",
+    "response_to_objections": "回应质询",
+    "adopted": "采纳项",
+    "rejected": "否决项",
+    "pending": "待定项",
+    "next_agent": "建议下一席",
+    "reader_promise_audit": "读者承诺审计",
+    "structure_audit": "结构审计",
+    "character_function_audit": "人物功能审计",
+    "setting_function_audit": "设定功能审计",
+    "candidate_trigger": "候选触发门槛",
+    "audit_status": "审计状态",
     "conflict": "冲突",
     "continuity_risk": "连续性风险",
     "core_promise": "作品承诺",
@@ -276,7 +322,19 @@ DISPLAY_KEY_LABELS: dict[str, str] = {
     "result_patch": "结果补丁",
     "rhythm_model": "节奏模型",
     "risks": "风险",
+    "quality_metrics": "质量指标",
+    "state_change": "状态改变",
+    "state_change_goal": "状态变化目标",
+    "state_change_text": "状态改变说明",
+    "foreshadowing_use": "伏笔用途",
+    "foreshadowing_window_coverage": "伏笔窗口覆盖率",
+    "source_window": "来源窗口",
+    "source_window_detail": "来源窗口详情",
+    "mini_climax": "小高潮",
+    "transition_hook": "过渡钩子",
     "setting_candidate": "设定候选",
+    "setting_candidates": "设定候选列表",
+    "setting_count_plan": "设定数量规划",
     "stage_goal": "阶段目标",
     "status": "状态",
     "title": "标题",
@@ -462,7 +520,11 @@ class OutlineDebateOrchestrator:
             "uncertainties": [],
             "confidence": 0.0,
             "character_candidate": {},
+            "character_candidates": [],
+            "character_count_plan": {},
             "setting_candidate": {},
+            "setting_candidates": [],
+            "setting_count_plan": {},
             "decisions": [],
         }
 
@@ -1635,27 +1697,71 @@ class OutlineDebateService:
     def _expected_item_count(self, phase: str, request: OutlineDebateRunRequest) -> int:
         scale_plan = request.scale_plan if isinstance(request.scale_plan, dict) else {}
         if phase == "volumes":
-            return self._bounded_int(scale_plan.get("volume_count") or request.volume_count, request.volume_count or 1, 1, 30)
-        planned_chapters = self._bounded_int(
+            return len(self._volume_numbers_for_request(request))
+        return len(self._chapter_candidates_for_request(request)) or self._bounded_int(
             scale_plan.get("chapter_count"),
             max(1, int(request.volume_count or 1) * int(request.chapters_per_volume or 1)),
             1,
             6000,
         )
-        return max(planned_chapters, len(self._chapter_candidates_for_request(request)) or 1)
 
-    def _chapter_candidates_for_request(self, request: OutlineDebateRunRequest) -> list[tuple[int, int]]:
-        if request.target_chapter_no:
-            return [(self._target_volume_no(request), self._target_chapter_no(request))]
+    def _volume_numbers_for_request(self, request: OutlineDebateRunRequest) -> list[int]:
+        if request.target_volume_no:
+            return [int(request.target_volume_no)]
         if request.chapter_ranges:
-            candidates: list[tuple[int, int]] = []
+            numbers = sorted({int(chapter_range.volume_no) for chapter_range in request.chapter_ranges})
+            if numbers:
+                return numbers
+        scale_plan = request.scale_plan if isinstance(request.scale_plan, dict) else {}
+        volume_count = self._bounded_int(scale_plan.get("volume_count") or request.volume_count, request.volume_count or 1, 1, 30)
+        return list(range(1, volume_count + 1))
+
+    def _chapter_ranges_for_request(self, request: OutlineDebateRunRequest) -> list[dict[str, int]]:
+        if request.target_chapter_no:
+            return [
+                {
+                    "volume_no": self._target_volume_no(request),
+                    "start_chapter_no": self._target_chapter_no(request),
+                    "end_chapter_no": self._target_chapter_no(request),
+                }
+            ]
+        if request.chapter_ranges:
+            ranges: list[dict[str, int]] = []
             for chapter_range in request.chapter_ranges:
                 start_no = int(chapter_range.start_chapter_no)
                 end_no = int(chapter_range.end_chapter_no)
-                for chapter_no in range(start_no, end_no + 1):
-                    candidates.append((int(chapter_range.volume_no), chapter_no))
-            return candidates or [(1, 1)]
-        return [(1, 1)]
+                if end_no < start_no:
+                    start_no, end_no = end_no, start_no
+                ranges.append(
+                    {
+                        "volume_no": int(chapter_range.volume_no),
+                        "start_chapter_no": start_no,
+                        "end_chapter_no": end_no,
+                    }
+                )
+            return ranges
+        scale_plan = request.scale_plan if isinstance(request.scale_plan, dict) else {}
+        chapters_per_volume = self._bounded_int(
+            scale_plan.get("chapters_per_volume") or request.chapters_per_volume,
+            request.chapters_per_volume or 1,
+            1,
+            300,
+        )
+        return [
+            {
+                "volume_no": volume_no,
+                "start_chapter_no": (volume_no - 1) * chapters_per_volume + 1,
+                "end_chapter_no": volume_no * chapters_per_volume,
+            }
+            for volume_no in self._volume_numbers_for_request(request)
+        ]
+
+    def _chapter_candidates_for_request(self, request: OutlineDebateRunRequest) -> list[tuple[int, int]]:
+        candidates: list[tuple[int, int]] = []
+        for chapter_range in self._chapter_ranges_for_request(request):
+            for chapter_no in range(int(chapter_range["start_chapter_no"]), int(chapter_range["end_chapter_no"]) + 1):
+                candidates.append((int(chapter_range["volume_no"]), chapter_no))
+        return candidates or [(1, 1)]
 
     def _refresh_confirmation_items(self, phase_run: dict[str, Any], request: OutlineDebateRunRequest | None = None) -> dict[str, Any]:
         phase = phase_run["phase"]
@@ -1776,46 +1882,63 @@ class OutlineDebateService:
         request: OutlineDebateConfirmRequest,
     ) -> dict[str, Any]:
         self._ensure_upstream_confirmed(session, phase, self._request_from_phase_run(phase_run))
-        item_key = request.item_key or self._first_pending_item_key(phase_run)
-        if not item_key:
+        if request.confirm_all:
+            item_keys = [
+                str(item.get("item_key") or "")
+                for item in phase_run.get("confirmation_items", [])
+                if isinstance(item, dict) and item.get("candidate_status") == "pending_confirmation" and item.get("item_key")
+            ]
+        else:
+            item_keys = [request.item_key or self._first_pending_item_key(phase_run)]
+        item_keys = [item_key for item_key in item_keys if item_key]
+        if not item_keys:
             raise _bad_request(f"{PHASE_CONFIG[phase]['result_title']}缺少待确认条目")
-        item = self._candidate_item_by_key(phase_run, item_key)
-        if item is None:
-            raise _bad_request(f"未找到可确认条目：{item_key}")
-        if item.get("candidate_status") == "stale":
-            raise _bad_request(f"{item_key} 已过期，请重新议事生成后再确认")
-
-        canon_update = self._commit_outline_item_to_canon(db, project_id, job, session, phase, item, request.notes)
-        materializations = self._materialize_phase_candidate_artifacts(
-            db,
-            project_id,
-            job,
-            phase_run,
-            phase,
-            request.notes,
-            source_chapter_id=canon_update.get("ref_id") if canon_update.get("ref_type") == "chapter" else None,
-        )
         now = utcnow().isoformat()
-        item["candidate_status"] = "confirmed"
-        item["confirmed_at"] = now
-        item["requires_user_confirmation"] = False
-        item["canon_update"] = canon_update
-        if materializations:
-            item["canon_materializations"] = materializations
-            canon_update["candidate_materializations"] = materializations
-            phase_run["canon_materializations"] = materializations
-            self._remember_candidate_materializations(session, phase, materializations)
-        for confirmation_item in phase_run.get("confirmation_items", []):
-            if isinstance(confirmation_item, dict) and confirmation_item.get("item_key") == item_key:
-                confirmation_item["candidate_status"] = "confirmed"
-                confirmation_item["confirmed_at"] = now
-                confirmation_item["canon_update"] = canon_update
+        canon_updates: list[dict[str, Any]] = []
+        confirmed_items: list[dict[str, Any]] = []
+        for item_key in item_keys:
+            item = self._candidate_item_by_key(phase_run, item_key)
+            if item is None:
+                raise _bad_request(f"未找到可确认条目：{item_key}")
+            if item.get("candidate_status") == "stale":
+                raise _bad_request(f"{item_key} 已过期，请重新议事生成后再确认")
+            if request.confirm_all and item.get("candidate_status") == "confirmed":
+                continue
+            canon_update = self._commit_outline_item_to_canon(db, project_id, job, session, phase, item, request.notes)
+            materializations = self._materialize_phase_candidate_artifacts(
+                db,
+                project_id,
+                job,
+                phase_run,
+                phase,
+                request.notes,
+                source_chapter_id=canon_update.get("ref_id") if canon_update.get("ref_type") == "chapter" else None,
+            )
+            item["candidate_status"] = "confirmed"
+            item["confirmed_at"] = now
+            item["requires_user_confirmation"] = False
+            item["canon_update"] = canon_update
+            if materializations:
+                item["canon_materializations"] = materializations
+                canon_update["candidate_materializations"] = materializations
+                phase_run["canon_materializations"] = materializations
+                self._remember_candidate_materializations(session, phase, materializations)
+            for confirmation_item in phase_run.get("confirmation_items", []):
+                if isinstance(confirmation_item, dict) and confirmation_item.get("item_key") == item_key:
+                    confirmation_item["candidate_status"] = "confirmed"
+                    confirmation_item["confirmed_at"] = now
+                    confirmation_item["canon_update"] = canon_update
+            canon_updates.append(canon_update)
+            confirmed_items.append(item)
         self._refresh_confirmation_items(phase_run)
-        self._upsert_confirmed_item(session, phase, item, phase_run["candidate_status"])
+        for item in confirmed_items:
+            self._upsert_confirmed_item(session, phase, item, phase_run["candidate_status"])
         if phase_run["candidate_status"] == "confirmed":
             phase_run["confirmed_at"] = now
-        phase_run["last_confirmed_item_key"] = item_key
-        phase_run["last_canon_update"] = canon_update
+        phase_run["last_confirmed_item_key"] = item_keys[-1]
+        if canon_updates:
+            phase_run["last_canon_update"] = canon_updates[-1]
+            phase_run["last_canon_updates"] = canon_updates
         result["candidate_status"] = phase_run["candidate_status"]
         result["requires_user_confirmation"] = phase_run["candidate_status"] != "confirmed"
         self._mark_primary_artifact_status(phase_run, phase_run["candidate_status"])
@@ -1841,7 +1964,7 @@ class OutlineDebateService:
         db.commit()
         db.refresh(job)
         session = self._session_from_job(job)
-        return {"session": session, "phase_run": session["phase_runs"][phase], "canon_update": canon_update, "job": serialize_job(job)}
+        return {"session": session, "phase_run": session["phase_runs"][phase], "canon_update": canon_updates[-1] if canon_updates else {}, "canon_updates": canon_updates, "job": serialize_job(job)}
 
     def _request_from_phase_run(self, phase_run: dict[str, Any]) -> OutlineDebateRunRequest:
         payload = phase_run.get("input") if isinstance(phase_run.get("input"), dict) else {}
@@ -2028,6 +2151,22 @@ class OutlineDebateService:
             }
         role_type = self._string_or(payload.get("role_type") or payload.get("role"), "supporting")
         importance_score = self._bounded_int(payload.get("importance_score"), 50, 0, 100)
+        relationship_hooks = payload.get("relations") if isinstance(payload.get("relations"), list) else payload.get("relationship_hooks")
+        long_term_goal = self._first_string(payload.get("long_term_goal"), payload.get("long_term_desire"), fallback="")
+        immediate_goal = self._first_string(payload.get("immediate_goal"), fallback="")
+        inner_wound = self._first_string(payload.get("inner_wound"), fallback="")
+        ability = self._first_string(payload.get("ability"), fallback="")
+        ability_cost = self._first_string(payload.get("ability_cost"), fallback="")
+        weakness = self._first_string(payload.get("weakness"), fallback="")
+        secret = self._first_string(payload.get("secret"), fallback="")
+        goals = self._clean_string_values(payload.get("goals"), long_term_goal, immediate_goal)
+        motivations = self._clean_string_values(payload.get("motivations"), payload.get("motivation"), payload.get("conflict_seed"), payload.get("reader_satisfaction"))
+        secrets = self._clean_string_values(payload.get("secrets"), secret)
+        abilities = self._clean_string_values(payload.get("abilities"), ability, ability_cost)
+        weaknesses = self._clean_string_values(payload.get("weaknesses"), weakness, inner_wound, ability_cost)
+        profile = self._first_string(payload.get("profile"), payload.get("one_sentence_pitch"), payload.get("identity"), payload.get("summary"), fallback="")
+        personality = self._first_string(payload.get("personality"), inner_wound, payload.get("relationship_hook"), fallback="")
+        arc = self._first_string(payload.get("character_arc"), payload.get("growth_arc"), payload.get("arc"), fallback="")
         row = models.Character(
             id=generate_id("chr"),
             project_id=project_id,
@@ -2039,19 +2178,22 @@ class OutlineDebateService:
             importance_score=importance_score,
             summary=self._string_or(payload.get("summary") or payload.get("profile") or payload.get("story_function"), ""),
             appearance=self._string_or(payload.get("appearance"), ""),
-            personality=self._string_or(payload.get("personality"), ""),
-            goals_json=dumps(self._list_of_clean_strings(payload.get("goals"))),
-            motivations_json=dumps(self._list_of_clean_strings(payload.get("motivations"))),
-            secrets_json=dumps(self._list_of_clean_strings(payload.get("secrets"))),
-            abilities_json=dumps(self._list_of_clean_strings(payload.get("abilities"))),
-            weaknesses_json=dumps(self._list_of_clean_strings(payload.get("weaknesses"))),
-            character_arc=self._string_or(payload.get("character_arc") or payload.get("arc"), ""),
+            personality=personality,
+            profile=profile,
+            goals_json=dumps(goals),
+            motivations_json=dumps(motivations),
+            secrets_json=dumps(secrets),
+            abilities_json=dumps(abilities),
+            weaknesses_json=dumps(weaknesses),
+            motivation=self._first_string(payload.get("motivation"), motivations[0] if motivations else "", fallback=""),
+            arc=arc,
+            character_arc=arc,
             current_status=self._string_or(payload.get("current_status"), "active"),
             first_appearance_chapter_id=source_chapter_id,
             last_seen_chapter_id=source_chapter_id,
             related_entity_ids_json=dumps(self._list_of_clean_strings(payload.get("related_entity_ids"))),
             related_character_ids_json=dumps(self._list_of_clean_strings(payload.get("related_character_ids"))),
-            relations_json=dumps(payload.get("relationship_hooks") if isinstance(payload.get("relationship_hooks"), list) else []),
+            relations_json=dumps(relationship_hooks if isinstance(relationship_hooks, list) else self._list_of_clean_strings(relationship_hooks)),
             updated_reason=notes or f"确认{PHASE_CONFIG[phase]['result_title']}时自动入库",
             source="outline_debate",
             status="active",
@@ -2280,9 +2422,56 @@ class OutlineDebateService:
         return any(token.lower() in compact.lower() for token in placeholder_tokens)
 
     def _list_of_clean_strings(self, value: Any) -> list[str]:
-        if not isinstance(value, list):
+        if value in (None, "", [], {}):
             return []
-        return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            stripped = value.strip()
+            return [stripped] if stripped else []
+        if not isinstance(value, (list, tuple, set)):
+            return []
+        items: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                continue
+            stripped = str(item).strip()
+            if stripped:
+                items.append(stripped)
+        return list(dict.fromkeys(items))
+
+    def _clean_string_values(self, *values: Any) -> list[str]:
+        items: list[str] = []
+        for value in values:
+            items.extend(self._list_of_clean_strings(value))
+        return list(dict.fromkeys(items))
+
+    def _first_string(self, *values: Any, fallback: str = "") -> str:
+        for value in values:
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return fallback
+
+    def _importance_level_from_score(self, score: int) -> str:
+        if score >= 90:
+            return "core"
+        if score >= 70:
+            return "major"
+        if score >= 40:
+            return "medium"
+        return "minor"
+
+    def _importance_score_for_sort(self, candidate: dict[str, Any]) -> int:
+        raw_score = candidate.get("importance_score")
+        if raw_score not in (None, ""):
+            return self._bounded_int(raw_score, 50, 0, 100)
+        level = str(candidate.get("importance_level") or "").strip().lower()
+        return {"core": 95, "major": 78, "medium": 50, "minor": 25}.get(level, 50)
+
+    def _sort_candidates_by_importance(self, candidates: list[dict[str, Any]], label_key: str) -> list[dict[str, Any]]:
+        return sorted(
+            candidates,
+            key=lambda candidate: (self._importance_score_for_sort(candidate), str(candidate.get(label_key) or candidate.get("name") or "")),
+            reverse=True,
+        )
 
     def _bounded_int(self, value: Any, fallback: int, minimum: int, maximum: int) -> int:
         try:
@@ -2857,11 +3046,18 @@ class OutlineDebateService:
             chapter_word_min, chapter_word_max = chapter_word_max, chapter_word_min
         chapter_word_target = min(max(chapter_word_target, chapter_word_min), chapter_word_max)
         target_words = positive_int(source.get("target_words") or request.target_words, chapter_count * chapter_word_target, minimum=0, maximum=10000000)
+        chapter_window_size = positive_int(
+            source.get("chapter_window_size"),
+            max(1, round(chapters_per_volume / DEFAULT_CHAPTER_WINDOWS_PER_VOLUME)),
+            minimum=1,
+            maximum=300,
+        )
         return {
             "target_words": target_words,
             "volume_count": volume_count,
             "chapter_count": chapter_count,
             "chapters_per_volume": chapters_per_volume,
+            "chapter_window_size": chapter_window_size,
             "chapter_word_target": chapter_word_target,
             "chapter_word_min": chapter_word_min,
             "chapter_word_max": chapter_word_max,
@@ -2869,32 +3065,68 @@ class OutlineDebateService:
 
     def _phase_focus_constraints(self, phase: str, request: OutlineDebateRunRequest, scale_plan: dict[str, int]) -> dict[str, Any]:
         if phase == "chapters":
-            volume_no = self._target_volume_no(request)
-            chapter_no = self._target_chapter_no(request)
+            expected_chapters = len(self._chapter_candidates_for_request(request))
+            if request.target_chapter_no:
+                volume_no = self._target_volume_no(request)
+                chapter_no = self._target_chapter_no(request)
+                return {
+                    "mode": "single_chapter",
+                    "target_volume_no": volume_no,
+                    "target_chapter_no": chapter_no,
+                    "item_key": f"chapter:{chapter_no}",
+                    "hard_rules": [
+                        f"本轮只讨论并输出第{chapter_no}章章纲候选。",
+                        "不得把前三章、多章批次、相邻章节写入 artifact_patch.chapter_outlines 或 result_patch.chapter_outlines。",
+                        "可以简短提及前后章作为连续性上下文，但只能作为风险、衔接或伏笔说明。",
+                        f"chapter_outlines 必须只包含 chapter_no={chapter_no} 的一个对象。",
+                        f"本章目标字数为 {scale_plan['chapter_word_target']} 字。",
+                    ],
+                }
+            requested_ranges = [
+                {
+                    "volume_no": int(chapter_range.volume_no),
+                    "start_chapter_no": int(chapter_range.start_chapter_no),
+                    "end_chapter_no": int(chapter_range.end_chapter_no),
+                }
+                for chapter_range in request.chapter_ranges
+            ] or self._chapter_ranges_for_request(request)
             return {
-                "mode": "single_chapter",
-                "target_volume_no": volume_no,
-                "target_chapter_no": chapter_no,
-                "item_key": f"chapter:{chapter_no}",
+                "mode": "chapter_batch",
+                "chapter_ranges": requested_ranges,
+                "expected_chapter_count": expected_chapters,
+                "chapter_window_size": scale_plan["chapter_window_size"],
+                "item_key": f"chapters:{expected_chapters}",
                 "hard_rules": [
-                    f"本轮只讨论并输出第{chapter_no}章章纲候选。",
-                    "不得把前三章、多章批次、相邻章节写入 artifact_patch.chapter_outlines 或 result_patch.chapter_outlines。",
-                    "可以简短提及前后章作为连续性上下文，但只能作为风险、衔接或伏笔说明。",
-                    f"chapter_outlines 必须只包含 chapter_no={chapter_no} 的一个对象。",
-                    f"本章目标字数为 {scale_plan['chapter_word_target']} 字。",
+                    "本轮按 chapter_ranges 或规模参数输出批量章纲候选；如果请求没有显式范围，则按 volume_count 与 chapters_per_volume 推导。",
+                    "必须先形成 chapter_windows，再从窗口派生 chapter_outlines；窗口大小来自 scale_plan.chapter_window_size，不得写死固定 10 章窗口。",
+                    f"chapter_outlines 必须覆盖 {expected_chapters} 个请求章节，不得只输出前三章、单章样例或模板占位。",
+                    "每章必须有 state_change、foreshadowing_use、危机/高潮/结果分离和来源窗口。",
+                    f"单章目标字数为 {scale_plan['chapter_word_target']} 字。",
                 ],
             }
         if phase == "volumes":
-            volume_no = self._target_volume_no(request)
+            volume_numbers = self._volume_numbers_for_request(request)
+            if request.target_volume_no:
+                volume_no = self._target_volume_no(request)
+                return {
+                    "mode": "single_volume",
+                    "target_volume_no": volume_no,
+                    "item_key": f"volume:{volume_no}",
+                    "hard_rules": [
+                        f"本轮只讨论并输出第{volume_no}卷卷纲候选。",
+                        "不得把全部分卷或相邻卷写入 artifact_patch.volume_outlines 或 result_patch.volume_outlines。",
+                        f"volume_outlines 必须只包含 volume_no={volume_no} 的一个对象。",
+                        f"本卷规划约 {scale_plan['chapters_per_volume']} 章。",
+                    ],
+                }
             return {
-                "mode": "single_volume",
-                "target_volume_no": volume_no,
-                "item_key": f"volume:{volume_no}",
+                "mode": "volume_batch",
+                "target_volume_numbers": volume_numbers,
+                "item_key": f"volumes:{'-'.join(str(number) for number in volume_numbers)}",
                 "hard_rules": [
-                    f"本轮只讨论并输出第{volume_no}卷卷纲候选。",
-                    "不得把全部分卷或相邻卷写入 artifact_patch.volume_outlines 或 result_patch.volume_outlines。",
-                    f"volume_outlines 必须只包含 volume_no={volume_no} 的一个对象。",
-                    f"本卷规划约 {scale_plan['chapters_per_volume']} 章。",
+                    f"本轮按请求规模输出 {len(volume_numbers)} 个卷纲候选。",
+                    "volume_outlines 必须覆盖 target_volume_numbers 中的全部卷号，不得只输出第一卷样例。",
+                    f"每卷默认约 {scale_plan['chapters_per_volume']} 章，具体区间从规模参数动态推导。",
                 ],
             }
         return {
@@ -3111,15 +3343,17 @@ class OutlineDebateService:
         last_agent = spoken[-1] if spoken else ""
         character_candidates = self._character_candidates_for_policy(None, phase, request, turns, context, include_fallback=False)
         setting_candidates = self._setting_candidates_for_policy(None, phase, request, turns, context, include_fallback=False)
-        if character_candidates and CHARACTER_GENERATOR_AGENT not in spoken_set and last_agent != CHARACTER_GENERATOR_AGENT:
+        character_gate = self._candidate_generation_gate("character", phase, request, turns, phase_run)
+        setting_gate = self._candidate_generation_gate("setting", phase, request, turns, phase_run)
+        if character_gate["enabled"] and character_candidates and CHARACTER_GENERATOR_AGENT not in spoken_set and last_agent != CHARACTER_GENERATOR_AGENT:
             return CHARACTER_GENERATOR_AGENT
-        if setting_candidates and SETTING_GENERATOR_AGENT not in spoken_set and last_agent != SETTING_GENERATOR_AGENT:
+        if setting_gate["enabled"] and setting_candidates and SETTING_GENERATOR_AGENT not in spoken_set and last_agent != SETTING_GENERATOR_AGENT:
             return SETTING_GENERATOR_AGENT
 
         text = self._debate_signal_text(request, turns, phase_run)
-        if self._has_candidate_positive_signal(text, "character") and CHARACTER_GENERATOR_AGENT not in spoken_set:
+        if character_gate["enabled"] and self._has_candidate_positive_signal(text, "character") and CHARACTER_GENERATOR_AGENT not in spoken_set:
             return CHARACTER_GENERATOR_AGENT
-        if self._has_candidate_positive_signal(text, "setting") and SETTING_GENERATOR_AGENT not in spoken_set:
+        if setting_gate["enabled"] and self._has_candidate_positive_signal(text, "setting") and SETTING_GENERATOR_AGENT not in spoken_set:
             return SETTING_GENERATOR_AGENT
 
         if MARKET_POSITION_AGENT not in spoken_set and self._should_include_market_agent(phase, text):
@@ -3129,6 +3363,60 @@ class OutlineDebateService:
         if CONTINUITY_AUDITOR_AGENT not in spoken_set:
             return CONTINUITY_AUDITOR_AGENT
         return ""
+
+    def _candidate_generation_gate(
+        self,
+        kind: str,
+        phase: str,
+        request: OutlineDebateRunRequest,
+        turns: list[dict[str, Any]],
+        phase_run: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        text = self._debate_signal_text(request, turns, phase_run)
+        compact = "".join(text.split())
+        if kind == "character":
+            structured = any(turn.get("character_candidate") or turn.get("character_candidates") for turn in turns)
+            explicit_terms = ("@角色生成", "角色生成", "角色候选", "人物卡", "新增角色", "补角色", "主角", "反派", "盟友", "导师", "对手", "背叛者", "关键人物")
+            object_terms = ("角色", "人物", "主角", "反派", "对手", "盟友", "导师", "背叛", "见证者")
+        else:
+            structured = any(turn.get("setting_candidate") or turn.get("setting_candidates") for turn in turns)
+            explicit_terms = ("@设定生成", "设定生成", "设定候选", "新增设定", "补设定", "世界规则", "规则成本", "组织", "地点", "物件", "制度")
+            object_terms = ("设定", "规则", "组织", "地点", "物件", "资源", "禁忌", "制度", "世界观")
+        impact_terms = ("重要", "核心", "主线", "卷纲", "章纲", "伏笔", "正典", "冲突", "危机", "高潮", "代价", "关系", "首次", "first_needed_in", "importance_level", "importance_score")
+        if structured:
+            return {"enabled": True, "reason": "已有结构化候选输出，需要进入候选处理。"}
+        if any(term in compact for term in explicit_terms):
+            return {"enabled": True, "reason": "用户、主持或议事文本明确要求生成候选。"}
+        if any(term in compact for term in object_terms) and any(term in compact for term in impact_terms):
+            return {"enabled": True, "reason": "提及对象同时影响主线、伏笔、正典、冲突或首次需要时机。"}
+        if phase in {"book", "volumes"} and any(term in compact for term in object_terms) and any(term in compact for term in ("中等", "medium", "S级", "A级", "核心", "关键")):
+            return {"enabled": True, "reason": "总纲/卷纲阶段出现中等以上重要对象。"}
+        return {"enabled": False, "reason": "未达到重要性、明确点名或主线影响触发门槛；仅作为轻量提及处理。"}
+
+    def _default_agent_decision(self, agent_name: str) -> str:
+        if agent_name == CONTINUITY_AUDITOR_AGENT:
+            return "pass"
+        return "revise"
+
+    def _default_agent_audit_status(self, agent_name: str) -> str:
+        if agent_name == CONTINUITY_AUDITOR_AGENT:
+            return "passed_with_notes"
+        return ""
+
+    def _default_agent_scores(self, agent_name: str) -> dict[str, int]:
+        if agent_name == STORY_DIRECTOR_AGENT:
+            return {"story_promise": 72, "selling": 68, "structure": 70, "character": 65, "setting": 65, "continuity": 70}
+        if agent_name == MARKET_POSITION_AGENT:
+            return {"selling": 72, "hook_strength": 70, "payoff_signal": 64, "genre_fit": 72, "reader_pressure": 68}
+        if agent_name == STRUCTURE_DOCTOR_AGENT:
+            return {"structure": 70, "causality": 68, "rhythm_fit": 70, "chapter_density": 66, "crisis_climax_result": 68}
+        if agent_name == CHARACTER_GENERATOR_AGENT:
+            return {"character": 68, "function_fit": 66, "motivation_strength": 64, "relationship_pressure": 64, "duplicate_safety": 70}
+        if agent_name == SETTING_GENERATOR_AGENT:
+            return {"setting": 68, "conflict_utility": 66, "rule_cost": 64, "reveal_timing": 64, "continuity_safety": 70}
+        if agent_name == CONTINUITY_AUDITOR_AGENT:
+            return {"continuity": 72, "canon_safety": 70, "timeline_safety": 68, "foreshadowing_safety": 66, "confirmation_safety": 70}
+        return {}
 
     def _should_include_market_agent(self, phase: str, text: str) -> bool:
         compact = "".join(text.split())
@@ -3250,7 +3538,11 @@ class OutlineDebateService:
             "confidence": 0.65,
             "result_patch": {},
             "character_candidate": {},
+            "character_candidates": [],
+            "character_count_plan": {},
             "setting_candidate": {},
+            "setting_candidates": [],
+            "setting_count_plan": {},
             "decisions": [],
         }
         turn_context = orchestrator.turn_context(
@@ -3290,9 +3582,10 @@ class OutlineDebateService:
                     "必须逐条遵循 context.focus_constraints.hard_rules；"
                     "请围绕 context.agenda、context.deliberation_state、context.requirement、项目资料、用户插话和上游阶段结果提出结构化意见；"
                     "必须回应前序发言，必要时提出 objections；必须给出 proposed_decisions、uncertainties、confidence。"
-                    "artifact_patch 用于写入待确认大纲：总纲阶段写 book_outline，卷纲阶段写 volume_outlines，章纲阶段写 chapter_outlines。"
-                    "当阶段为章纲时，chapter_outlines 只能包含 context.focus_constraints.target_chapter_no 对应的单章对象，不得输出“前三章”或多章候选。"
-                    "如你是角色或设定生成 Agent，凡发现未入库新对象都必须给出待确认档案；用户确认后由服务层直接入库。"
+                    "artifact_patch 用于写入待确认大纲：总纲阶段写 book_outline，卷纲阶段写 volume_outlines，章纲阶段可写 chapter_windows 与 chapter_outlines。"
+                    "当章纲阶段 mode=single_chapter 时，chapter_outlines 只能包含 context.focus_constraints.target_chapter_no 对应的单章对象；"
+                    "当章纲阶段 mode=chapter_batch 时，必须按 context.focus_constraints.chapter_ranges 与 scale_plan 动态覆盖全部请求章节，不得只输出前三章或单章样例。"
+                    "如你是角色或设定生成 Agent，必须先输出功能审计；只有达到候选触发门槛的新对象才给出待确认档案，用户确认后由服务层直接入库。"
                 ),
                 context=turn_context,
                 fallback=output_contract,
@@ -3300,6 +3593,15 @@ class OutlineDebateService:
                 require_remote=True,
                 allow_fallback=False,
             )
+        raw_decision = payload.get("decision")
+        raw_scores = payload.get("scores")
+        decision = self._string_or(raw_decision, self._default_agent_decision(agent_name))
+        scores = raw_scores if isinstance(raw_scores, dict) and raw_scores else self._default_agent_scores(agent_name)
+        decision_source = "model" if isinstance(raw_decision, str) and raw_decision.strip() else "service_default"
+        score_source = "model" if isinstance(raw_scores, dict) and raw_scores else "service_default"
+        if request.local_preview:
+            decision_source = "local_preview" if isinstance(raw_decision, str) and raw_decision.strip() else decision_source
+            score_source = "local_preview" if isinstance(raw_scores, dict) and raw_scores else score_source
         return {
             "id": generate_id("turn"),
             "phase": phase,
@@ -3316,9 +3618,31 @@ class OutlineDebateService:
             "risks": self._list_of_strings(payload.get("risks"), local_preview_payload["risks"] if request.local_preview else []),
             "uncertainties": self._list_of_strings(payload.get("uncertainties"), local_preview_payload["uncertainties"] if request.local_preview else []),
             "confidence": self._bounded_float(payload.get("confidence"), 0.65, 0.0, 1.0),
+            "decision": decision,
+            "decision_source": decision_source,
+            "audit_status": self._string_or(payload.get("audit_status"), self._default_agent_audit_status(agent_name)),
+            "scores": scores,
+            "score_source": score_source,
+            "blocking_items": payload.get("blocking_items") if isinstance(payload.get("blocking_items"), list) else [],
+            "must_fix_before_confirm": payload.get("must_fix_before_confirm") if isinstance(payload.get("must_fix_before_confirm"), list) else [],
+            "challenge_targets": payload.get("challenge_targets") if isinstance(payload.get("challenge_targets"), list) else [],
+            "response_to_objections": payload.get("response_to_objections") if isinstance(payload.get("response_to_objections"), list) else [],
+            "adopted": payload.get("adopted") if isinstance(payload.get("adopted"), list) else [],
+            "rejected": payload.get("rejected") if isinstance(payload.get("rejected"), list) else [],
+            "pending": payload.get("pending") if isinstance(payload.get("pending"), list) else [],
+            "next_agent": self._string_or(payload.get("next_agent"), local_preview_payload.get("next_agent", "") if request.local_preview else ""),
+            "reader_promise_audit": payload.get("reader_promise_audit") if isinstance(payload.get("reader_promise_audit"), dict) else {},
+            "structure_audit": payload.get("structure_audit") if isinstance(payload.get("structure_audit"), dict) else {},
+            "character_function_audit": payload.get("character_function_audit") if isinstance(payload.get("character_function_audit"), dict) else {},
+            "setting_function_audit": payload.get("setting_function_audit") if isinstance(payload.get("setting_function_audit"), dict) else {},
+            "candidate_trigger": payload.get("candidate_trigger") if isinstance(payload.get("candidate_trigger"), dict) else {},
             "result_patch": payload.get("result_patch") if isinstance(payload.get("result_patch"), dict) else (payload.get("artifact_patch") if isinstance(payload.get("artifact_patch"), dict) else {}),
             "character_candidate": payload.get("character_candidate") if isinstance(payload.get("character_candidate"), dict) else {},
+            "character_candidates": payload.get("character_candidates") if isinstance(payload.get("character_candidates"), list) else [],
+            "character_count_plan": payload.get("character_count_plan") if isinstance(payload.get("character_count_plan"), dict) else {},
             "setting_candidate": payload.get("setting_candidate") if isinstance(payload.get("setting_candidate"), dict) else {},
+            "setting_candidates": payload.get("setting_candidates") if isinstance(payload.get("setting_candidates"), list) else [],
+            "setting_count_plan": payload.get("setting_count_plan") if isinstance(payload.get("setting_count_plan"), dict) else {},
             "decisions": payload.get("decisions") if isinstance(payload.get("decisions"), list) else [],
             "_quality_gate": payload.get("_quality_gate", {}),
             "_llm": llm_meta,
@@ -3385,8 +3709,12 @@ class OutlineDebateService:
             ("建议决议", turn.get("proposed_decisions")),
             ("候选大纲补丁", turn.get("artifact_patch")),
             ("结果补丁", turn.get("result_patch")),
+            ("角色数量规划", turn.get("character_count_plan")),
             ("角色候选", turn.get("character_candidate")),
+            ("角色候选列表", turn.get("character_candidates")),
+            ("设定数量规划", turn.get("setting_count_plan")),
             ("设定候选", turn.get("setting_candidate")),
+            ("设定候选列表", turn.get("setting_candidates")),
             ("风险", turn.get("risks")),
             ("不确定项", turn.get("uncertainties")),
             ("决议草案", turn.get("decisions")),
@@ -3581,39 +3909,52 @@ class OutlineDebateService:
                 "source_turn_ids": source_turn_ids,
                 "_provenance": provenance,
             }
-            return self._merge_result_patches(result, turns, ("book_outline", "discussion_summary"), deliberation_state)
+            merged = self._merge_result_patches(result, turns, ("book_outline", "discussion_summary"), deliberation_state)
+            return self._attach_phase_conclusion(project, phase, request, turns, merged)
         if phase == "volumes":
-            target_volume_no = self._target_volume_no(request)
+            volume_numbers = self._volume_numbers_for_request(request)
+            target_volume_no = volume_numbers[0] if volume_numbers else self._target_volume_no(request)
             result = {
                 "generation_kind": generation_kind,
                 "scale_plan": scale_plan,
                 "target_volume_no": target_volume_no,
+                "target_volume_numbers": volume_numbers,
                 "expected_volume_count": scale_plan["volume_count"],
-                "item_key": f"volume:{target_volume_no}",
-                "volume_outlines": [self._volume_candidate_from_debate(target_volume_no, project, request, turns)],
+                "item_key": f"volumes:{'-'.join(str(number) for number in volume_numbers)}" if len(volume_numbers) > 1 else f"volume:{target_volume_no}",
+                "volume_outlines": [self._volume_candidate_from_debate(volume_no, project, request, turns) for volume_no in volume_numbers],
                 "upstream_book_run_id": session.get("phase_runs", {}).get("book", {}).get("id", ""),
                 "requires_user_confirmation": True,
                 "synthesis_source": "debate_state",
                 "source_turn_ids": source_turn_ids,
                 "_provenance": provenance,
             }
-            return self._restrict_itemized_result(phase, request, self._merge_result_patches(result, turns, ("volume_outlines",), deliberation_state))
+            merged = self._restrict_itemized_result(phase, request, self._merge_result_patches(result, turns, ("volume_outlines",), deliberation_state))
+            merged = self._ensure_complete_volume_batch(project, request, turns, merged)
+            enriched = self._attach_outline_quality_metrics(phase, request, merged)
+            return self._attach_phase_conclusion(project, phase, request, turns, enriched)
         target_volume_no = self._target_volume_no(request)
         target_chapter_no = self._target_chapter_no(request)
+        chapter_windows = self._chapter_windows_from_debate(project, request, turns)
         result = {
             "generation_kind": generation_kind,
             "scale_plan": scale_plan,
             "target_volume_no": target_volume_no,
             "target_chapter_no": target_chapter_no,
-            "item_key": f"chapter:{target_chapter_no}",
-            "chapter_outlines": self._chapter_candidates_from_debate(project, request, turns),
+            "expected_chapter_count": len(self._chapter_candidates_for_request(request)),
+            "expected_chapter_window_count": len(chapter_windows),
+            "item_key": f"chapters:{len(self._chapter_candidates_for_request(request))}" if not request.target_chapter_no else f"chapter:{target_chapter_no}",
+            "chapter_windows": chapter_windows,
+            "chapter_outlines": self._chapter_candidates_from_debate(project, request, turns, chapter_windows),
             "upstream_volume_run_id": session.get("phase_runs", {}).get("volumes", {}).get("id", ""),
             "requires_user_confirmation": True,
             "synthesis_source": "debate_state",
             "source_turn_ids": source_turn_ids,
             "_provenance": provenance,
         }
-        return self._restrict_itemized_result(phase, request, self._merge_result_patches(result, turns, ("chapter_outlines",), deliberation_state))
+        merged = self._restrict_itemized_result(phase, request, self._merge_result_patches(result, turns, ("chapter_windows", "chapter_outlines"), deliberation_state))
+        merged = self._ensure_complete_chapter_batch(project, request, turns, merged)
+        enriched = self._attach_outline_quality_metrics(phase, request, merged)
+        return self._attach_phase_conclusion(project, phase, request, turns, enriched)
 
     def _merge_result_patches(
         self,
@@ -3663,57 +4004,623 @@ class OutlineDebateService:
         model_name = "多线群像并进" if any(key in project.genre for key in ("权谋", "战争", "群像")) else "动态长篇升级"
         scale_plan = self._scale_plan(project, request)
         chapters_per_volume = scale_plan["chapters_per_volume"]
+        phase_count = self._volume_phase_count(chapters_per_volume)
+        chapter_start, chapter_end = self._volume_chapter_bounds(volume_no, chapters_per_volume)
+        stage_axis = STATE_CHANGE_AXES[(volume_no - 1) % len(STATE_CHANGE_AXES)]
+        volume_function = self._debate_sentence(turns, ("StructureDoctorAgent", "StoryDirectorAgent"), f"围绕{stage_axis}变化承接上游总纲，并改变主角处境。")
+        main_conflict = self._debate_sentence(turns, ("StructureDoctorAgent", "MarketPositionAgent"), f"本卷通过{stage_axis}升级持续压迫主线冲突。")
+        ending_hook = self._debate_sentence(turns, ("ContinuityAuditorAgent", "StructureDoctorAgent"), f"本卷末让{stage_axis}问题升级为下一卷必须回应的新压力。")
         return {
             "volume_no": volume_no,
-            "title": f"第{volume_no}卷：{self._short_label(self._debate_sentence(turns, ('StructureDoctorAgent', 'StoryDirectorAgent'), '阶段压力'))}",
-            "chapter_range": f"{(volume_no - 1) * chapters_per_volume + 1}-{volume_no * chapters_per_volume}",
-            "volume_function": self._debate_sentence(turns, ("StructureDoctorAgent", "StoryDirectorAgent"), "承接上游总纲并改变主角处境。"),
+            "title": f"第{volume_no}卷：{self._short_label(self._debate_sentence(turns, ('StructureDoctorAgent', 'StoryDirectorAgent'), f'{stage_axis}升级'))}",
+            "chapter_range": f"{chapter_start}-{chapter_end}",
+            "volume_function": f"第{volume_no}卷围绕{stage_axis}推进：{volume_function}",
             "rhythm_model": {
                 "model_name": model_name,
                 "why_this_model": self._debate_sentence(turns, ("StructureDoctorAgent",), "根据类型、读者体验和阶段冲突选择。"),
-                "phase_count": 4,
-                "chapter_distribution": self._phase_distribution(chapters_per_volume, 4),
+                "phase_count": phase_count,
+                "chapter_distribution": self._phase_distribution(chapters_per_volume, phase_count),
+                "absolute_chapter_distribution": self._absolute_phase_distribution(chapter_start, chapter_end, phase_count),
             },
-            "core_goal": self._debate_sentence(turns, ("StoryDirectorAgent", "MarketPositionAgent"), "阶段目标待确认。"),
-            "volume_hook": self._debate_sentence(turns, ("ContinuityAuditorAgent", "StructureDoctorAgent"), "卷末钩子待确认。"),
+            "core_goal": f"第{volume_no}卷目标：{self._debate_sentence(turns, ('StoryDirectorAgent', 'MarketPositionAgent'), f'让主角在{stage_axis}上付出代价并获得阶段突破。')}",
+            "main_conflict": main_conflict,
+            "ending_hook": ending_hook,
+            "volume_hook": ending_hook,
+            "character_arc": f"主角围绕{stage_axis}从被动承压转为主动承担代价，关系网络至少改变一次。",
+            "setting_reveal_plan": [f"第{chapter_start}-{chapter_end}章逐步展示与{stage_axis}相关的规则成本、限制和误导。"],
+            "foreshadowing_plan": [f"本卷开端种下{stage_axis}伏笔，中段提醒或误导，卷末完成阶段兑现并转入下一卷压力。"],
             "risks": self._list_from_turns(turns, "risks")[:4],
         }
 
-    def _chapter_candidates_from_debate(self, project: models.Project, request: OutlineDebateRunRequest, turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _volume_phase_count(self, chapters_per_volume: int) -> int:
+        if chapters_per_volume >= 80:
+            return 6
+        if chapters_per_volume >= 45:
+            return 5
+        if chapters_per_volume >= 20:
+            return 4
+        return max(2, min(3, chapters_per_volume))
+
+    def _volume_chapter_bounds(self, volume_no: int, chapters_per_volume: int) -> tuple[int, int]:
+        start = (volume_no - 1) * chapters_per_volume + 1
+        return start, start + chapters_per_volume - 1
+
+    def _absolute_phase_distribution(self, start_chapter_no: int, end_chapter_no: int, phase_count: int) -> str:
+        total = max(1, end_chapter_no - start_chapter_no + 1)
+        segment = max(1, total // max(1, phase_count))
+        ranges = []
+        start = start_chapter_no
+        for index in range(1, phase_count + 1):
+            end = end_chapter_no if index == phase_count else min(end_chapter_no, start + segment - 1)
+            ranges.append(f"{start}-{end}")
+            start = end + 1
+        return " / ".join(ranges)
+
+    def _chapter_window_size(self, request: OutlineDebateRunRequest) -> int:
+        scale_plan = self._scale_plan_from_request_only(request)
+        requested_count = len(self._chapter_candidates_for_request(request))
+        if requested_count <= 1:
+            return 1
+        explicit_size = self._bounded_int(scale_plan.get("chapter_window_size"), 0, 0, 300)
+        if explicit_size:
+            return max(1, min(explicit_size, requested_count))
+        chapters_per_volume = self._bounded_int(scale_plan.get("chapters_per_volume") or request.chapters_per_volume, request.chapters_per_volume or requested_count, 1, 300)
+        return max(1, min(requested_count, round(chapters_per_volume / DEFAULT_CHAPTER_WINDOWS_PER_VOLUME)))
+
+    def _scale_plan_from_request_only(self, request: OutlineDebateRunRequest) -> dict[str, int]:
+        source = request.scale_plan if isinstance(request.scale_plan, dict) else {}
+        volume_count = self._bounded_int(source.get("volume_count") or request.volume_count, request.volume_count or 1, 1, 30)
+        chapters_per_volume = self._bounded_int(source.get("chapters_per_volume") or request.chapters_per_volume, request.chapters_per_volume or 1, 1, 300)
+        chapter_count = self._bounded_int(source.get("chapter_count"), volume_count * chapters_per_volume, 1, 6000)
+        chapter_window_size = self._bounded_int(
+            source.get("chapter_window_size"),
+            max(1, round(chapters_per_volume / DEFAULT_CHAPTER_WINDOWS_PER_VOLUME)),
+            1,
+            300,
+        )
+        return {
+            "volume_count": volume_count,
+            "chapters_per_volume": chapters_per_volume,
+            "chapter_count": chapter_count,
+            "chapter_window_size": chapter_window_size,
+        }
+
+    def _chapter_windows_from_debate(self, project: models.Project, request: OutlineDebateRunRequest, turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        windows: list[dict[str, Any]] = []
+        window_size = self._chapter_window_size(request)
+        premise_label = self._short_label(project.premise or project.title)
+        chapter_ranges = self._chapter_ranges_for_request(request)
+        final_requested_chapter = max(int(chapter_range["end_chapter_no"]) for chapter_range in chapter_ranges) if chapter_ranges else 1
+        for chapter_range in chapter_ranges:
+            volume_no = int(chapter_range["volume_no"])
+            current = int(chapter_range["start_chapter_no"])
+            end_no = int(chapter_range["end_chapter_no"])
+            local_window_no = 1
+            while current <= end_no:
+                window_end = min(end_no, current + window_size - 1)
+                axis = STATE_CHANGE_AXES[(len(windows)) % len(STATE_CHANGE_AXES)]
+                window_no = len(windows) + 1
+                function = self._window_function_for_index(window_no)
+                is_volume_final = window_end == end_no
+                is_final_window = window_end == final_requested_chapter
+                stage_goal = f"围绕「{premise_label}」让{axis}发生可见变化，并完成{function}。"
+                main_pressure = self._safe_debate_sentence(turns, ("StructureDoctorAgent", "MarketPositionAgent"), "反对力量必须把抽象压力落到可行动的选择上。")
+                foreshadowing_plan = self._window_foreshadowing_plan(axis, current, window_end, is_volume_final, is_final_window)
+                mini_crisis = f"窗口危机：主角必须在{axis}继续恶化前作出不可逆选择。"
+                mini_climax = f"窗口高潮：第{window_end}章执行选择并兑现{axis}的阶段代价。"
+                transition_hook = (
+                    f"第{window_end}章完成卷末功能，并把{axis}压力转入下一卷。"
+                    if is_volume_final and not is_final_window
+                    else (
+                        f"第{window_end}章完成阶段收束，并留下后续创作方向钩子。"
+                        if is_final_window
+                        else f"第{window_end}章把{axis}的新问题交给下一窗口。"
+                    )
+                )
+                windows.append(
+                    {
+                        "window_no": window_no,
+                        "volume_no": volume_no,
+                        "local_window_no": local_window_no,
+                        "start_chapter_no": current,
+                        "end_chapter_no": window_end,
+                        "chapter_range": f"{current}-{window_end}",
+                        "window_range": f"{current}-{window_end}",
+                        "window_size": window_end - current + 1,
+                        "window_axis": axis,
+                        "window_function": function,
+                        "stage_goal": stage_goal,
+                        "window_goal": stage_goal,
+                        "reader_promise": self._safe_debate_sentence(turns, ("MarketPositionAgent",), f"读者在本窗口期待看到{axis}升级、代价兑现和新钩子。"),
+                        "main_pressure": main_pressure,
+                        "opposition_pressure": main_pressure,
+                        "state_change_goal": f"{axis}从窗口开局状态推进到必须承担代价的新状态。",
+                        "new_information": f"本窗口揭示一条与{axis}相关的新信息，改变主角判断。",
+                        "relationship_change": f"至少一组关系因{axis}压力出现信任、债务或立场变化。",
+                        "resource_change": f"主角资源、筹码或行动空间因{axis}变化出现增减。",
+                        "rule_or_setting_reveal": f"展示一条与{axis}有关的规则、限制、成本或误导。",
+                        **foreshadowing_plan,
+                        "mini_crisis": mini_crisis,
+                        "mini_climax": mini_climax,
+                        "transition_hook": transition_hook,
+                        "payoff_expectation": self._safe_debate_sentence(turns, ("MarketPositionAgent", "ContinuityAuditorAgent"), "本窗口至少种下、提醒或回收一个可追踪期待。"),
+                        "volume_function_role": "volume_climax" if is_volume_final else "mid_volume_window",
+                        "final_function_role": "book_or_phase_turn" if is_final_window else "",
+                        "risk": f"{axis}变化若没有具体代价，窗口会退化为事件流水账。",
+                        "source": "debate_state_window_synthesis",
+                    }
+                )
+                current = window_end + 1
+                local_window_no += 1
+        return windows
+
+    def _window_function_for_index(self, window_no: int) -> str:
+        functions = ("建立压力", "扩大误差", "付出代价", "揭示规则", "反转目标", "兑现伏笔", "重组关系", "打开新局")
+        return functions[(window_no - 1) % len(functions)]
+
+    def _window_foreshadowing_plan(self, axis: str, start_chapter_no: int, end_chapter_no: int, is_volume_final: bool, is_final_window: bool) -> dict[str, list[str]]:
+        return {
+            "foreshadowing_to_plant": [f"第{start_chapter_no}章种下{axis}异常或代价的证据。"],
+            "foreshadowing_to_remind": [f"窗口中段提醒{axis}伏笔仍在影响选择。"],
+            "foreshadowing_to_mislead": [f"用{axis}相关误导制造错误判断，但保留可回溯证据。"],
+            "foreshadowing_to_payoff": [
+                (
+                    f"第{end_chapter_no}章完成卷末/阶段兑现。"
+                    if is_volume_final or is_final_window
+                    else f"第{end_chapter_no}章完成窗口级小兑现。"
+                )
+            ],
+        }
+
+    def _chapter_candidates_from_debate(
+        self,
+        project: models.Project,
+        request: OutlineDebateRunRequest,
+        turns: list[dict[str, Any]],
+        chapter_windows: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
         candidates = []
         scale_plan = self._scale_plan(project, request)
+        windows = chapter_windows or self._chapter_windows_from_debate(project, request, turns)
+        window_by_chapter: dict[int, dict[str, Any]] = {}
+        for window in windows:
+            for chapter_no in range(int(window["start_chapter_no"]), int(window["end_chapter_no"]) + 1):
+                window_by_chapter[chapter_no] = window
         for volume_no, chapter_no in self._chapter_candidates_for_request(request):
-            crisis, climax, outcome = self._distinct_chapter_beats(turns)
+            window = window_by_chapter.get(chapter_no) or {
+                "window_no": 1,
+                "volume_no": volume_no,
+                "start_chapter_no": chapter_no,
+                "end_chapter_no": chapter_no,
+                "window_range": f"{chapter_no}-{chapter_no}",
+                "window_axis": STATE_CHANGE_AXES[(chapter_no - 1) % len(STATE_CHANGE_AXES)],
+                "window_function": "建立压力",
+                "window_goal": "完成本章必要状态改变。",
+                "opposition_pressure": "反对力量制造选择压力。",
+                "payoff_expectation": "保留可追踪期待。",
+            }
+            window_start = int(window.get("start_chapter_no") or chapter_no)
+            window_end = int(window.get("end_chapter_no") or chapter_no)
+            within_window = chapter_no - window_start + 1
+            axis = str(window.get("window_axis") or STATE_CHANGE_AXES[(chapter_no - 1) % len(STATE_CHANGE_AXES)])
+            state_change = self._chapter_state_change(axis, chapter_no, window_start, window_end)
+            foreshadowing_use = self._chapter_foreshadowing_use(chapter_no, window_start, window_end)
+            state_change_text = self._state_change_text(state_change)
+            foreshadowing_use_text = self._foreshadowing_use_text(foreshadowing_use)
+            crisis, climax, outcome = self._distinct_chapter_beats(turns, chapter_no, state_change_text, window)
+            short_goal = self._short_label(str(window.get("window_goal") or project.premise or project.title))
+            is_volume_end = chapter_no == window_end and str(window.get("volume_function_role") or "") == "volume_climax"
+            is_final_turn = chapter_no == window_end and str(window.get("final_function_role") or "") == "book_or_phase_turn"
+            milestone_function = "book_or_phase_turn" if is_final_turn else ("volume_climax" if is_volume_end else "")
+            title = f"第{chapter_no}章：{self._chapter_title_for_window(chapter_no, within_window, axis, short_goal)}"
+            conflict = self._chapter_conflict_for_window(project, chapter_no, axis, window, within_window)
+            core_event = f"主角围绕{axis}作出一次可见行动，迫使局面从窗口开局状态推进到第{within_window}个变化点。"
+            hook = f"章末把{axis}的新问题交给{self._next_chapter_label(chapter_no, window_end)}。"
+            outline_body = self._chapter_outline_body(
+                title=title,
+                project=project,
+                chapter_no=chapter_no,
+                volume_no=volume_no,
+                window=window,
+                core_event=core_event,
+                conflict=conflict,
+                crisis=crisis,
+                climax=climax,
+                outcome=outcome,
+                hook=hook,
+                state_change_text=state_change_text,
+                foreshadowing_use_text=foreshadowing_use_text,
+                milestone_function=milestone_function,
+            )
             candidates.append(
                 {
                     "chapter_no": chapter_no,
                     "volume_no": volume_no,
-                    "title": f"第{chapter_no}章：{self._short_label(self._debate_sentence(turns, ('StructureDoctorAgent', 'StoryDirectorAgent'), '选择与后果'))}",
-                    "outline": self._debate_sentence(turns, ("StoryDirectorAgent", "StructureDoctorAgent"), project.premise),
+                    "window_no": int(window.get("window_no") or 1),
+                    "title": title,
+                    "outline": outline_body,
+                    "outline_summary": f"本章承接第{window.get('window_no')}窗口「{short_goal}」，让{state_change_text}，并通过{foreshadowing_use_text}维持下一步追读。",
                     "pov_character": "主角",
-                    "core_event": self._debate_sentence(turns, ("StoryDirectorAgent",), "本章核心事件待确认。"),
-                    "conflict": self._debate_sentence(turns, ("MarketPositionAgent", "StructureDoctorAgent"), "本章冲突待确认。"),
+                    "core_event": core_event,
+                    "conflict": conflict,
                     "crisis": crisis,
                     "climax": climax,
                     "result": outcome,
-                    "cliffhanger": self._debate_sentence(turns, ("MarketPositionAgent", "ContinuityAuditorAgent"), "章末钩子待确认。"),
+                    "hook": hook,
+                    "cliffhanger": hook,
+                    "state_change": state_change,
+                    "state_change_text": state_change_text,
+                    "foreshadowing_use": foreshadowing_use,
+                    "reader_promise": str(window.get("reader_promise") or "本章继续兑现窗口级追读承诺。"),
+                    "continuity_risk": f"若{axis}变化没有被后续章节承接，将形成状态断裂。",
+                    "milestone_function": milestone_function,
+                    "source_window": str(window.get("window_range") or f"{window_start}-{window_end}"),
+                    "source_window_detail": {
+                        "window_no": int(window.get("window_no") or 1),
+                        "window_range": str(window.get("window_range") or f"{window_start}-{window_end}"),
+                        "window_function": str(window.get("window_function") or ""),
+                        "mini_climax": str(window.get("mini_climax") or ""),
+                        "transition_hook": str(window.get("transition_hook") or ""),
+                    },
                     "word_target": scale_plan["chapter_word_target"],
                     "word_range": [scale_plan["chapter_word_min"], scale_plan["chapter_word_max"]],
                 }
             )
         return candidates
 
-    def _distinct_chapter_beats(self, turns: list[dict[str, Any]]) -> tuple[str, str, str]:
+    def _chapter_title_for_window(self, chapter_no: int, within_window: int, axis: str, short_goal: str) -> str:
+        labels = ("开口", "逼近", "试探", "反压", "折返", "摊牌", "余震", "换局")
+        label = labels[(within_window - 1) % len(labels)]
+        return self._short_label(f"{axis}{label}{chapter_no}-{short_goal}")
+
+    def _chapter_conflict_for_window(
+        self,
+        project: models.Project,
+        chapter_no: int,
+        axis: str,
+        window: dict[str, Any],
+        within_window: int,
+    ) -> str:
+        pressure = str(window.get("main_pressure") or window.get("opposition_pressure") or "").strip()
+        if self._contains_outline_template(pressure, chapter_no) or "窗口划分" in pressure or "scale_plan" in pressure:
+            pressure = ""
+        if pressure:
+            return pressure
+        premise = self._short_label(project.premise or project.title)
+        return f"围绕「{premise}」，外部压力把{axis}问题具体化为第{within_window}个选择障碍，主角必须用行动、资源或关系信用换取推进空间。"
+
+    def _chapter_outline_body(
+        self,
+        *,
+        title: str,
+        project: models.Project,
+        chapter_no: int,
+        volume_no: int,
+        window: dict[str, Any],
+        core_event: str,
+        conflict: str,
+        crisis: str,
+        climax: str,
+        outcome: str,
+        hook: str,
+        state_change_text: str,
+        foreshadowing_use_text: str,
+        milestone_function: str,
+    ) -> str:
+        window_no = int(window.get("window_no") or 1)
+        window_range = str(window.get("window_range") or window.get("chapter_range") or "")
+        milestone = {
+            "volume_climax": "本章承担卷末功能，需要完成本卷阶段危机、兑现主要代价，并把压力转入下一卷。",
+            "book_or_phase_turn": "本章承担阶段收束或下一阶段钩子功能，需要完成当前大纲范围的核心回收，并打开后续创作压力。",
+        }.get(milestone_function, "本章承担窗口内推进功能，需要让行动、阻碍和后果都服务下一章。")
+        lines = [
+            f"{title}",
+            f"所属位置：第{volume_no}卷，第{chapter_no}章；来源窗口：第{window_no}窗口（{window_range}）。",
+            f"窗口目标：{window.get('stage_goal') or window.get('window_goal') or project.premise}",
+            f"剧情定位：{milestone}",
+            f"核心事件：{core_event}",
+            f"冲突设计：{conflict}",
+            f"危机选择：{crisis}",
+            f"高潮执行：{climax}",
+            f"结果后果：{outcome}",
+            f"状态变化：{state_change_text}",
+            f"伏笔用途：{foreshadowing_use_text}",
+            f"读者承诺：{window.get('reader_promise') or '本章继续兑现窗口级追读承诺。'}",
+            f"连续性风险：若本章的状态变化没有在后续章节承接，会削弱窗口因果链。",
+            f"章末钩子：{hook}",
+        ]
+        return "\n".join(line for line in lines if str(line).strip())
+
+    def _attach_phase_conclusion(
+        self,
+        project: models.Project,
+        phase: str,
+        request: OutlineDebateRunRequest,
+        turns: list[dict[str, Any]],
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        enriched = self._ensure_stage_outline_bodies(project, phase, request, turns, dict(result))
+        conclusion = self._phase_conclusion(project, phase, request, turns, enriched)
+        enriched["stage_conclusion"] = conclusion
+        enriched["stage_conclusion_text"] = conclusion.get("body", "")
+        return enriched
+
+    def _ensure_stage_outline_bodies(
+        self,
+        project: models.Project,
+        phase: str,
+        request: OutlineDebateRunRequest,
+        turns: list[dict[str, Any]],
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        if phase != "chapters":
+            return result
+        windows = result.get("chapter_windows") if isinstance(result.get("chapter_windows"), list) else self._chapter_windows_from_debate(project, request, turns)
+        fallback_items = self._chapter_candidates_from_debate(project, request, turns, windows)
+        fallback_by_key = {self._item_key_for_candidate("chapters", item): item for item in fallback_items if isinstance(item, dict)}
+        incoming_items = result.get("chapter_outlines") if isinstance(result.get("chapter_outlines"), list) else []
+        incoming_by_key = {
+            self._item_key_for_candidate("chapters", item): item
+            for item in incoming_items
+            if isinstance(item, dict)
+        }
+        expanded: list[dict[str, Any]] = []
+        for volume_no, chapter_no in self._chapter_candidates_for_request(request):
+            item_key = f"chapter:{chapter_no}"
+            fallback = fallback_by_key.get(item_key) or self._chapter_candidates_from_debate(project, request, turns, windows)[0]
+            merged = self._merge_nonempty_outline(fallback, incoming_by_key.get(item_key, {}))
+            outline = str(merged.get("outline") or "")
+            if not self._outline_body_is_substantial(outline):
+                merged["outline"] = fallback.get("outline", outline)
+                merged["outline_expanded_from_stage_conclusion"] = True
+            merged["volume_no"] = int(merged.get("volume_no") or volume_no)
+            merged["chapter_no"] = int(merged.get("chapter_no") or chapter_no)
+            expanded.append(merged)
+        enriched = dict(result)
+        enriched["chapter_windows"] = windows
+        enriched["chapter_outlines"] = expanded
+        if any(item.get("outline_expanded_from_stage_conclusion") for item in expanded):
+            enriched["outline_expansion_policy"] = {
+                "applied": True,
+                "reason": "short_or_generic_chapter_outline_expanded_from_stage_conclusion",
+            }
+        return enriched
+
+    def _outline_body_is_substantial(self, outline: str) -> bool:
+        text = str(outline or "").strip()
+        if not text or self._contains_outline_template(text):
+            return False
+        required_labels = ("核心事件", "冲突", "危机", "高潮", "结果", "钩子")
+        label_hits = sum(1 for label in required_labels if label in text)
+        return label_hits >= 4 and len(text) >= 180
+
+    def _phase_conclusion(
+        self,
+        project: models.Project,
+        phase: str,
+        request: OutlineDebateRunRequest,
+        turns: list[dict[str, Any]],
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        adopted = self._turn_digest(turns, ("adopted", "proposed_decisions", "claims"), limit=8)
+        risks = self._turn_digest(turns, ("blocking_items", "must_fix_before_confirm", "risks", "uncertainties"), limit=8)
+        title = f"{PHASE_CONFIG[phase]['label']}阶段结论"
+        lines = [f"# {title}", "", f"作品：{project.title}", f"阶段目标：{request.requirement or PHASE_CONFIG[phase]['label']}", ""]
+        if adopted:
+            lines.append("## 采纳的讨论结论")
+            lines.extend(f"- {item}" for item in adopted)
+            lines.append("")
+        if phase == "book":
+            book_outline = result.get("book_outline") if isinstance(result.get("book_outline"), dict) else {}
+            lines.append("## 总纲正文")
+            for label, key in [("作品承诺", "core_promise"), ("主线冲突", "main_conflict"), ("终局方向", "ending_direction"), ("读者体验", "reader_experience")]:
+                if book_outline.get(key):
+                    lines.append(f"- {label}：{book_outline[key]}")
+        elif phase == "volumes":
+            lines.append("## 分卷结论")
+            for item in result.get("volume_outlines", []) if isinstance(result.get("volume_outlines"), list) else []:
+                if not isinstance(item, dict):
+                    continue
+                lines.extend(
+                    [
+                        f"### 第{item.get('volume_no')}卷 {item.get('title', '')}",
+                        f"- 章节区间：{item.get('chapter_range', '')}",
+                        f"- 本卷功能：{item.get('volume_function', '')}",
+                        f"- 核心目标：{item.get('core_goal', '')}",
+                        f"- 主线冲突：{item.get('main_conflict', '')}",
+                        f"- 卷末钩子：{item.get('ending_hook') or item.get('volume_hook') or ''}",
+                    ]
+                )
+                rhythm = item.get("rhythm_model") if isinstance(item.get("rhythm_model"), dict) else {}
+                if rhythm:
+                    lines.append(f"- 节奏模型：{rhythm.get('model_name', '')}；分布：{rhythm.get('absolute_chapter_distribution') or rhythm.get('chapter_distribution') or ''}")
+        else:
+            windows = result.get("chapter_windows") if isinstance(result.get("chapter_windows"), list) else []
+            chapters = result.get("chapter_outlines") if isinstance(result.get("chapter_outlines"), list) else []
+            lines.append("## 章纲阶段结论")
+            lines.append(f"- 已形成章节窗口：{len(windows)} 个。")
+            lines.append(f"- 已形成章节章纲：{len(chapters)} 章。")
+            lines.append("")
+            lines.append("## 窗口结构")
+            for window in windows:
+                if not isinstance(window, dict):
+                    continue
+                lines.extend(
+                    [
+                        f"### 第{window.get('window_no')}窗口（{window.get('window_range') or window.get('chapter_range')}）",
+                        f"- 阶段目标：{window.get('stage_goal') or window.get('window_goal')}",
+                        f"- 主压力：{window.get('main_pressure') or window.get('opposition_pressure')}",
+                        f"- 小危机：{window.get('mini_crisis')}",
+                        f"- 小高潮：{window.get('mini_climax')}",
+                        f"- 过渡钩子：{window.get('transition_hook')}",
+                    ]
+                )
+            milestone_chapters = [
+                item
+                for item in chapters
+                if isinstance(item, dict) and item.get("milestone_function") in {"volume_climax", "book_or_phase_turn"}
+            ]
+            if milestone_chapters:
+                lines.append("")
+                lines.append("## 关键里程碑章节")
+                for item in milestone_chapters:
+                    lines.append(f"- 第{item.get('chapter_no')}章：{item.get('title')}；功能：{item.get('milestone_function')}；结果：{item.get('result')}")
+            if chapters:
+                lines.append("")
+                lines.append("## 逐章大纲正文")
+                for item in chapters:
+                    if not isinstance(item, dict):
+                        continue
+                    lines.extend(
+                        [
+                            f"### 第{item.get('chapter_no')}章 {item.get('title', '')}",
+                            f"- 所属卷：第{item.get('volume_no')}卷；来源窗口：{item.get('source_window') or item.get('window_no') or '未标明'}",
+                            f"- 核心事件：{item.get('core_event', '')}",
+                            f"- 冲突设计：{item.get('conflict', '')}",
+                            f"- 危机选择：{item.get('crisis', '')}",
+                            f"- 高潮执行：{item.get('climax', '')}",
+                            f"- 结果后果：{item.get('result') or item.get('outcome') or ''}",
+                            f"- 状态变化：{item.get('state_change_text') or self._state_change_text(item.get('state_change'))}",
+                            f"- 伏笔用途：{item.get('foreshadowing_use_text') or self._foreshadowing_use_text(item.get('foreshadowing_use'))}",
+                            f"- 章末钩子：{item.get('hook') or item.get('cliffhanger') or item.get('chapter_hook') or ''}",
+                        ]
+                    )
+        if risks:
+            lines.append("")
+            lines.append("## 风险与确认边界")
+            lines.extend(f"- {item}" for item in risks)
+        return {
+            "title": title,
+            "phase": phase,
+            "body": "\n".join(line for line in lines if str(line).strip() or line == ""),
+            "source_turn_count": len(turns),
+            "source_turn_ids": [str(turn.get("id") or "") for turn in turns if turn.get("id")],
+        }
+
+    def _turn_digest(self, turns: list[dict[str, Any]], keys: tuple[str, ...], limit: int = 8) -> list[str]:
+        items: list[str] = []
+        for turn in turns:
+            for key in keys:
+                value = turn.get(key)
+                if isinstance(value, list):
+                    for entry in value:
+                        text = self._digest_text(entry)
+                        if text and text not in items:
+                            items.append(text)
+                elif isinstance(value, dict):
+                    text = self._digest_text(value)
+                    if text and text not in items:
+                        items.append(text)
+                elif isinstance(value, str):
+                    text = self._digest_text(value)
+                    if text and text not in items:
+                        items.append(text)
+                if len(items) >= limit:
+                    return items[:limit]
+        return items[:limit]
+
+    def _digest_text(self, value: Any) -> str:
+        if isinstance(value, dict):
+            text = str(value.get("decision") or value.get("title") or value.get("evidence") or value.get("required_fix") or value.get("rationale") or value.get("reason") or "")
+        else:
+            text = str(value or "")
+        text = " ".join(text.split())
+        if not text or self._contains_outline_template(text):
+            return ""
+        return text[:240]
+
+    def _chapter_state_change(self, axis: str, chapter_no: int, window_start: int, window_end: int) -> dict[str, str]:
+        if chapter_no == window_start:
+            return {
+                "type": axis,
+                "before": "隐性问题或背景压力",
+                "after": "当前必须处理的明面压力",
+                "cost": "主角失去回避空间，必须投入资源或关系信用。",
+            }
+        if chapter_no == window_end:
+            return {
+                "type": axis,
+                "before": "窗口内持续升级的压力",
+                "after": "本窗口完成收束，并打开下一窗口无法回避的新代价",
+                "cost": "阶段目标推进，但主角承担卷内或窗口级后果。",
+            }
+        return {
+            "type": axis,
+            "before": "主角仍有多种可选路径",
+            "after": "行动空间收窄，必须牺牲一项资源、关系或认知确定性",
+            "cost": "可用选择减少一档，反对力量获得新筹码。",
+        }
+
+    def _chapter_foreshadowing_use(self, chapter_no: int, window_start: int, window_end: int) -> dict[str, list[str]]:
+        use = {"plant": [], "remind": [], "mislead": [], "payoff": []}
+        if chapter_no == window_start:
+            use["plant"].append("种下一个可追踪伏笔")
+        elif chapter_no == window_end:
+            use["payoff"].append("回收或阶段性兑现一个伏笔")
+        else:
+            action = FORESHADOWING_ACTIONS[(chapter_no - window_start) % len(FORESHADOWING_ACTIONS)]
+            descriptions = {
+                "plant": "补种一个与窗口目标相关的次级伏笔",
+                "remind": "提醒上一窗口或本窗口伏笔",
+                "mislead": "制造一次可解释的误导",
+                "payoff": "阶段性兑现一个小伏笔",
+            }
+            use[action].append(descriptions[action])
+        if chapter_no not in {window_start, window_end} and not use["remind"]:
+            use["remind"].append("用细节提醒读者窗口伏笔仍有效")
+        return use
+
+    def _state_change_text(self, state_change: Any) -> str:
+        if isinstance(state_change, dict):
+            change_type = str(state_change.get("type") or "状态")
+            before = str(state_change.get("before") or "旧状态")
+            after = str(state_change.get("after") or "新状态")
+            cost = str(state_change.get("cost") or "代价待追踪")
+            return f"{change_type}从「{before}」转为「{after}」，代价是{cost}"
+        return str(state_change or "状态发生可见变化")
+
+    def _foreshadowing_use_text(self, foreshadowing_use: Any) -> str:
+        if isinstance(foreshadowing_use, dict):
+            parts = []
+            for key in ("plant", "remind", "mislead", "payoff"):
+                values = foreshadowing_use.get(key) if isinstance(foreshadowing_use.get(key), list) else []
+                if values:
+                    parts.append(f"{key}:{'；'.join(str(value) for value in values)}")
+            return "；".join(parts) or "保持伏笔账本连续"
+        return str(foreshadowing_use or "保持伏笔账本连续")
+
+    def _next_chapter_label(self, chapter_no: int, window_end: int) -> str:
+        return f"第{chapter_no + 1}章" if chapter_no < window_end else "下一窗口"
+
+    def _distinct_chapter_beats(
+        self,
+        turns: list[dict[str, Any]],
+        chapter_no: int | None = None,
+        state_change: str = "",
+        window: dict[str, Any] | None = None,
+    ) -> tuple[str, str, str]:
         crisis = self._debate_sentence(turns, ("StructureDoctorAgent",), "本章危机待确认。")
         climax = self._debate_sentence(turns, ("StoryDirectorAgent", "StructureDoctorAgent"), "本章高潮待确认。")
         outcome = self._debate_sentence(turns, ("ContinuityAuditorAgent",), "本章结果待确认。")
-        if len({crisis, climax, outcome}) == 3:
+        if self._contains_outline_template(crisis, chapter_no or 0):
+            crisis = ""
+        if self._contains_outline_template(climax, chapter_no or 0):
+            climax = ""
+        if self._contains_outline_template(outcome, chapter_no or 0):
+            outcome = ""
+        if (
+            len({crisis, climax, outcome}) == 3
+            and all((crisis, climax, outcome))
+        ):
             return crisis, climax, outcome
-        base = crisis or climax or outcome or "本章结构待确认"
+        axis = str((window or {}).get("window_axis") or "压力")
+        target = f"第{chapter_no}章" if chapter_no else "本章"
+        state = state_change or f"{axis}发生不可逆变化"
+        base = crisis or climax or outcome or state
         return (
-            f"危机：围绕「{self._short_label(base)}」形成不可逆选择。",
-            f"高潮：执行该选择，并让行动产生可见代价。",
-            f"结果：承接代价，改变局面并留下下一章必须回应的问题。",
+            f"危机：{target}围绕「{self._short_label(base)}」形成不可逆选择，若退让则{axis}继续恶化。",
+            f"高潮：{target}主角围绕{axis}执行该选择，并让行动产生可见代价。",
+            f"结果：{state}，改变局面并留下后续必须回应的问题。",
         )
 
     def _debate_sentence(self, turns: list[dict[str, Any]], agent_suffixes: tuple[str, ...], fallback: str) -> str:
@@ -3729,6 +4636,22 @@ class OutlineDebateService:
                         return text[:500]
         return fallback
 
+    def _safe_debate_sentence(self, turns: list[dict[str, Any]], agent_suffixes: tuple[str, ...], fallback: str, chapter_no: int = 0) -> str:
+        text = self._debate_sentence(turns, agent_suffixes, fallback)
+        if self._contains_outline_template(text, chapter_no):
+            return fallback
+        return text
+
+    def _contains_outline_template(self, value: Any, chapter_no: int = 0) -> bool:
+        text = str(value or "")
+        if not text.strip():
+            return False
+        for pattern in OUTLINE_TEMPLATE_BLOCKLIST:
+            expected = pattern.replace("{chapter_no}", str(chapter_no)) if chapter_no else pattern.replace("{chapter_no}", "")
+            if expected and expected in text:
+                return True
+        return False
+
     def _short_label(self, text: str) -> str:
         compact = str(text).replace("\n", " ").strip()
         for separator in ("。", "；", ";", ".", "，", ","):
@@ -3743,6 +4666,269 @@ class OutlineDebateService:
             values.extend(str(item).strip() for item in turn.get(key, []) if str(item).strip())
         return values
 
+    def _ensure_complete_volume_batch(
+        self,
+        project: models.Project,
+        request: OutlineDebateRunRequest,
+        turns: list[dict[str, Any]],
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        expected_numbers = self._volume_numbers_for_request(request)
+        existing = result.get("volume_outlines") if isinstance(result.get("volume_outlines"), list) else []
+        existing_by_no = {
+            int(item.get("volume_no") or 0): item
+            for item in existing
+            if isinstance(item, dict) and int(item.get("volume_no") or 0) > 0
+        }
+        repaired: list[dict[str, Any]] = []
+        repaired_numbers: list[int] = []
+        for volume_no in expected_numbers:
+            fallback = self._volume_candidate_from_debate(volume_no, project, request, turns)
+            existing_item = existing_by_no.get(volume_no, {})
+            merged = self._merge_nonempty_outline(fallback, existing_item)
+            missing_required = any(
+                merged.get(key) in (None, "", [], {})
+                for key in ("volume_function", "main_conflict", "ending_hook", "character_arc", "setting_reveal_plan", "foreshadowing_plan")
+            )
+            if missing_required:
+                merged = fallback
+                repaired_numbers.append(volume_no)
+            repaired.append(merged)
+        enriched = dict(result)
+        enriched["volume_outlines"] = repaired
+        if repaired_numbers or len(existing) != len(expected_numbers):
+            enriched["repair_policy"] = {
+                "applied": True,
+                "reason": "model_patch_missing_or_incomplete_volume_outlines",
+                "repaired_volume_numbers": repaired_numbers or [number for number in expected_numbers if number not in existing_by_no],
+            }
+        return enriched
+
+    def _ensure_complete_chapter_batch(
+        self,
+        project: models.Project,
+        request: OutlineDebateRunRequest,
+        turns: list[dict[str, Any]],
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        metrics = self._outline_quality_metrics("chapters", request, result)
+        result = self._ensure_stage_outline_bodies(project, "chapters", request, turns, result)
+        if metrics.get("status") == "passed":
+            return result
+        repaired_windows = self._chapter_windows_from_debate(project, request, turns)
+        repaired_chapters = self._chapter_candidates_from_debate(project, request, turns, repaired_windows)
+        enriched = dict(result)
+        enriched["chapter_windows"] = repaired_windows
+        enriched["chapter_outlines"] = repaired_chapters
+        enriched["repair_policy"] = {
+            "applied": True,
+            "reason": "model_patch_failed_strict_chapter_quality_gate",
+            "original_quality_status": metrics.get("status"),
+            "original_blocking_items": metrics.get("blocking_items", [])[:10],
+        }
+        return enriched
+
+    def _merge_nonempty_outline(self, fallback: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(fallback)
+        for key, value in incoming.items():
+            if value in (None, "", [], {}):
+                continue
+            if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                merged[key] = self._deep_merge_dicts(merged[key], value)
+            else:
+                merged[key] = value
+        return merged
+
+    def _expected_chapter_window_count(self, request: OutlineDebateRunRequest) -> int:
+        window_size = max(1, self._chapter_window_size(request))
+        count = 0
+        for chapter_range in self._chapter_ranges_for_request(request):
+            length = max(1, int(chapter_range["end_chapter_no"]) - int(chapter_range["start_chapter_no"]) + 1)
+            count += (length + window_size - 1) // window_size
+        return max(1, count)
+
+    def _attach_outline_quality_metrics(self, phase: str, request: OutlineDebateRunRequest, result: dict[str, Any]) -> dict[str, Any]:
+        if phase not in {"volumes", "chapters"}:
+            return result
+        enriched = dict(result)
+        metrics = self._outline_quality_metrics(phase, request, enriched)
+        enriched["quality_metrics"] = metrics
+        enriched["blocking_items"] = metrics.get("blocking_items", [])
+        return enriched
+
+    def _outline_quality_metrics(self, phase: str, request: OutlineDebateRunRequest, result: dict[str, Any]) -> dict[str, Any]:
+        blocking_items: list[dict[str, Any]] = []
+        metrics: dict[str, Any] = {"phase": phase}
+        if phase == "volumes":
+            expected_numbers = self._volume_numbers_for_request(request)
+            volumes = result.get("volume_outlines") if isinstance(result.get("volume_outlines"), list) else []
+            actual_numbers = [int(item.get("volume_no") or 0) for item in volumes if isinstance(item, dict)]
+            missing_numbers = [number for number in expected_numbers if number not in actual_numbers]
+            metrics.update(
+                {
+                    "expected_volume_count": len(expected_numbers),
+                    "actual_volume_count": len(volumes),
+                    "volume_count_match": len(volumes) == len(expected_numbers) and not missing_numbers,
+                    "missing_volume_numbers": missing_numbers,
+                    "rhythm_model_coverage": self._coverage(volumes, lambda item: isinstance(item.get("rhythm_model"), dict) and bool(item["rhythm_model"].get("model_name"))),
+                    "volume_required_field_coverage": self._coverage(
+                        volumes,
+                        lambda item: all(item.get(key) not in (None, "", [], {}) for key in ("volume_function", "main_conflict", "ending_hook", "character_arc", "setting_reveal_plan", "foreshadowing_plan")),
+                    ),
+                }
+            )
+            if missing_numbers or len(volumes) != len(expected_numbers):
+                blocking_items.append(self._quality_block("count_mismatch", f"卷纲数量不匹配：期望 {len(expected_numbers)}，实际 {len(volumes)}，缺失 {missing_numbers}"))
+            if metrics["volume_required_field_coverage"] < 1.0:
+                blocking_items.append(self._quality_block("volume_required_field_missing", f"卷纲关键字段覆盖不足：{metrics['volume_required_field_coverage']}"))
+        if phase == "chapters":
+            expected_chapters = self._chapter_candidates_for_request(request)
+            expected_numbers = [chapter_no for _volume_no, chapter_no in expected_chapters]
+            expected_volume_end_numbers = sorted({int(chapter_range["end_chapter_no"]) for chapter_range in self._chapter_ranges_for_request(request)})
+            expected_final_chapter_no = expected_volume_end_numbers[-1] if expected_volume_end_numbers else 0
+            chapters = result.get("chapter_outlines") if isinstance(result.get("chapter_outlines"), list) else []
+            windows = result.get("chapter_windows") if isinstance(result.get("chapter_windows"), list) else []
+            actual_numbers = [int(item.get("chapter_no") or 0) for item in chapters if isinstance(item, dict)]
+            missing_numbers = [number for number in expected_numbers if number not in actual_numbers]
+            template_hits = self._template_hits(chapters)
+            title_duplicates = self._duplicate_count([str(item.get("title") or "").strip() for item in chapters if isinstance(item, dict)])
+            ccr_distinct_count = sum(
+                1
+                for item in chapters
+                if isinstance(item, dict)
+                and len({str(item.get("crisis") or "").strip(), str(item.get("climax") or "").strip(), str(item.get("result") or "").strip()}) == 3
+            )
+            metrics.update(
+                {
+                    "expected_chapter_count": len(expected_numbers),
+                    "actual_chapter_count": len(chapters),
+                    "chapter_count_match": len(chapters) == len(expected_numbers) and not missing_numbers,
+                    "missing_chapter_numbers": missing_numbers[:30],
+                    "expected_chapter_window_count": self._expected_chapter_window_count(request),
+                    "actual_chapter_window_count": len(windows),
+                    "chapter_window_count_match": len(windows) == self._expected_chapter_window_count(request),
+                    "window_required_field_coverage": self._coverage(windows, self._window_has_required_fields),
+                    "window_mini_climax_coverage": self._coverage(windows, lambda item: bool(item.get("mini_climax"))),
+                    "foreshadowing_window_coverage": self._coverage(windows, self._window_has_two_foreshadowing_categories),
+                    "template_blocking_count": len(template_hits),
+                    "template_hits": template_hits[:20],
+                    "state_change_coverage": self._coverage(chapters, self._chapter_has_state_change),
+                    "foreshadowing_use_coverage": self._coverage(chapters, self._chapter_has_foreshadowing_use),
+                    "source_window_coverage": self._coverage(chapters, self._chapter_has_source_window),
+                    "crisis_climax_result_distinct_rate": round(ccr_distinct_count / max(1, len(chapters)), 4),
+                    "duplicate_title_count": title_duplicates,
+                    "expected_volume_end_chapters": expected_volume_end_numbers,
+                    "volume_end_function_coverage": self._coverage(
+                        [item for item in chapters if isinstance(item, dict) and int(item.get("chapter_no") or 0) in expected_volume_end_numbers],
+                        lambda item: item.get("milestone_function") in {"volume_climax", "book_or_phase_turn"},
+                    ),
+                    "final_chapter_turn_present": any(
+                        isinstance(item, dict)
+                        and int(item.get("chapter_no") or 0) == expected_final_chapter_no
+                        and item.get("milestone_function") == "book_or_phase_turn"
+                        for item in chapters
+                    ),
+                }
+            )
+            if missing_numbers or len(chapters) != len(expected_numbers):
+                blocking_items.append(self._quality_block("count_mismatch", f"章纲数量不匹配：期望 {len(expected_numbers)}，实际 {len(chapters)}，缺失前30项 {missing_numbers[:30]}"))
+            if len(windows) != self._expected_chapter_window_count(request):
+                blocking_items.append(self._quality_block("window_mismatch", f"章节窗口数量不匹配：期望 {self._expected_chapter_window_count(request)}，实际 {len(windows)}"))
+            if metrics["window_required_field_coverage"] < 1.0:
+                blocking_items.append(self._quality_block("window_required_field_missing", f"章节窗口关键字段覆盖不足：{metrics['window_required_field_coverage']}"))
+            if metrics["window_mini_climax_coverage"] < 1.0:
+                blocking_items.append(self._quality_block("window_mini_climax_missing", f"mini_climax 覆盖率不足：{metrics['window_mini_climax_coverage']}"))
+            if metrics["foreshadowing_window_coverage"] < 0.8:
+                blocking_items.append(self._quality_block("foreshadowing_window_missing", f"伏笔窗口覆盖率不足：{metrics['foreshadowing_window_coverage']}"))
+            if template_hits:
+                blocking_items.append(self._quality_block("template_placeholder", f"章纲存在模板占位或待确认句：{len(template_hits)} 处"))
+            if metrics["state_change_coverage"] < 0.95:
+                blocking_items.append(self._quality_block("state_change_missing", f"state_change 覆盖率不足：{metrics['state_change_coverage']}"))
+            if metrics["foreshadowing_use_coverage"] < 0.9:
+                blocking_items.append(self._quality_block("foreshadowing_use_missing", f"foreshadowing_use 覆盖率不足：{metrics['foreshadowing_use_coverage']}"))
+            if metrics["crisis_climax_result_distinct_rate"] < 0.95:
+                blocking_items.append(self._quality_block("crisis_climax_result_duplicate", f"危机/高潮/结果分离率不足：{metrics['crisis_climax_result_distinct_rate']}"))
+            if metrics["volume_end_function_coverage"] < 1.0:
+                blocking_items.append(self._quality_block("volume_end_function_missing", f"卷末章节功能覆盖不足：{metrics['volume_end_function_coverage']}"))
+            if not metrics["final_chapter_turn_present"]:
+                blocking_items.append(self._quality_block("final_chapter_turn_missing", f"最终章节 {expected_final_chapter_no} 缺少阶段收束或下一阶段钩子功能。"))
+        metrics["blocking_items"] = blocking_items
+        metrics["status"] = "failed" if blocking_items else "passed"
+        return metrics
+
+    def _quality_block(self, issue_type: str, evidence: str) -> dict[str, str]:
+        return {"severity": "blocking", "type": issue_type, "evidence": evidence, "required_fix": "重新生成或修订候选，直到满足严格验收指标。"}
+
+    def _coverage(self, items: list[Any], predicate: Any) -> float:
+        if not items:
+            return 0.0
+        passed = sum(1 for item in items if isinstance(item, dict) and predicate(item))
+        return round(passed / len(items), 4)
+
+    def _window_has_required_fields(self, item: dict[str, Any]) -> bool:
+        required = (
+            "stage_goal",
+            "reader_promise",
+            "main_pressure",
+            "state_change_goal",
+            "new_information",
+            "relationship_change",
+            "resource_change",
+            "rule_or_setting_reveal",
+            "mini_crisis",
+            "mini_climax",
+            "transition_hook",
+            "risk",
+        )
+        return all(item.get(key) not in (None, "", [], {}) for key in required)
+
+    def _window_has_two_foreshadowing_categories(self, item: dict[str, Any]) -> bool:
+        count = 0
+        for key in ("foreshadowing_to_plant", "foreshadowing_to_remind", "foreshadowing_to_mislead", "foreshadowing_to_payoff"):
+            value = item.get(key)
+            if isinstance(value, list) and value:
+                count += 1
+        return count >= 2
+
+    def _chapter_has_state_change(self, item: dict[str, Any]) -> bool:
+        value = item.get("state_change")
+        return isinstance(value, dict) and all(value.get(key) for key in ("type", "before", "after", "cost"))
+
+    def _chapter_has_foreshadowing_use(self, item: dict[str, Any]) -> bool:
+        value = item.get("foreshadowing_use")
+        if not isinstance(value, dict):
+            return False
+        return any(isinstance(value.get(key), list) and value.get(key) for key in ("plant", "remind", "mislead", "payoff"))
+
+    def _chapter_has_source_window(self, item: dict[str, Any]) -> bool:
+        if isinstance(item.get("source_window"), str) and item.get("source_window").strip():
+            return True
+        detail = item.get("source_window_detail")
+        return isinstance(detail, dict) and bool(detail.get("window_no"))
+
+    def _duplicate_count(self, values: list[str]) -> int:
+        seen: set[str] = set()
+        duplicates = 0
+        for value in values:
+            if not value:
+                continue
+            if value in seen:
+                duplicates += 1
+            seen.add(value)
+        return duplicates
+
+    def _template_hits(self, chapters: list[Any]) -> list[dict[str, Any]]:
+        hits: list[dict[str, Any]] = []
+        for item in chapters:
+            if not isinstance(item, dict):
+                continue
+            chapter_no = int(item.get("chapter_no") or 0)
+            text = " ".join(str(item.get(key) or "") for key in ("title", "outline", "core_event", "conflict", "crisis", "climax", "result", "cliffhanger"))
+            if self._contains_outline_template(text, chapter_no):
+                matched = next((pattern.replace("{chapter_no}", str(chapter_no)) for pattern in OUTLINE_TEMPLATE_BLOCKLIST if pattern.replace("{chapter_no}", str(chapter_no)) in text), "template")
+                hits.append({"chapter_no": chapter_no, "pattern": matched})
+        return hits
+
     def _deep_merge_dicts(self, base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
         merged = dict(base)
         for key, value in patch.items():
@@ -3756,6 +4942,7 @@ class OutlineDebateService:
         aliases = {
             "book_outline": ("book_outline", "book_outline_candidate", "outline", "macro_outline", "全书总纲", "总纲候选"),
             "volume_outlines": ("volume_outlines", "volume_outline_candidates", "volumes", "volume_candidates", "逐卷大纲", "卷纲候选", "卷纲列表"),
+            "chapter_windows": ("chapter_windows", "chapter_outline_windows", "windows", "章纲窗口", "章节窗口"),
             "chapter_outlines": ("chapter_outlines", "chapter_outline_candidates", "chapters", "chapter_candidates", "章纲候选", "章纲列表"),
         }.get(key, (key,))
         for alias in aliases:
@@ -4046,7 +5233,9 @@ class OutlineDebateService:
         id_field = self._item_no_field(phase)
         target_number = self._target_volume_no(request) if phase == "volumes" else self._target_chapter_no(request)
         allowed_numbers = {target_number}
-        if phase == "chapters" and request.chapter_ranges and not request.target_chapter_no:
+        if phase == "volumes" and not request.target_volume_no:
+            allowed_numbers = set(self._volume_numbers_for_request(request))
+        if phase == "chapters" and not request.target_chapter_no:
             allowed_numbers = {chapter_no for _volume_no, chapter_no in self._chapter_candidates_for_request(request)}
         values = self._coerce_outline_items(phase, result.get(list_key))
         filtered = [
@@ -4128,19 +5317,70 @@ class OutlineDebateService:
 
     def _character_candidate(self, project: models.Project, phase: str, request: OutlineDebateRunRequest, turns: list[dict[str, Any]]) -> dict[str, Any]:
         fallback_name = self._fallback_character_candidate_name(project, phase)
+        importance_score = 78 if phase == "book" else 58
+        identity = f"{fallback_name}是{PHASE_CONFIG[phase]['label']}中把制度压力落到主角身上的关键角色。"
+        story_function = "把抽象秩序变成可对抗、可谈判、可误判的人。"
+        relationship_hooks = ["与主角存在资源、身份或秘密冲突", "可连接未来伏笔回收与关系反转"]
+        long_term_goal = "维持自身代表的秩序或完成与主角目标相冲突的私人目标。"
+        immediate_goal = "在首次登场阶段迫使主角付出一次可见代价。"
+        inner_wound = "相信秩序必须优先于个体选择，因此容易把人当成规则零件。"
+        ability = "能调动制度资源、人情债或信息差制造压迫。"
+        ability_cost = "每次强行推进秩序都会暴露其派系利益和私人软肋。"
         fallback = {
             "name": fallback_name,
+            "aliases": [],
+            "role": "supporting",
             "role_type": "supporting",
             "importance_level": "major" if phase == "book" else "medium",
+            "importance_score": importance_score,
+            "title": identity,
+            "one_sentence_pitch": f"{fallback_name}让主角第一次意识到，对手不是单个人，而是一套会反击的规则。",
+            "identity": identity,
+            "opening_situation": f"首次在{PHASE_CONFIG[phase]['label']}中作为压力执行者或关系阻断者出现。",
+            "world_rule_connection": "其身份、权限或秘密必须绑定当前世界规则，不能只作为普通阻碍。",
+            "long_term_desire": long_term_goal,
+            "long_term_goal": long_term_goal,
+            "immediate_goal": immediate_goal,
+            "inner_wound": inner_wound,
+            "ability": ability,
+            "ability_cost": ability_cost,
+            "weakness": "过度依赖规则授权，面对主角的非典型选择时容易误判。",
+            "secret": "与当前阶段的旧案、利益链或规则漏洞存在未公开关联。",
+            "growth_arc": "从规则执行者或关系压力源，逐步暴露其真实立场、代价与可被反转的弱点。",
+            "character_arc": "从规则执行者或关系压力源，逐步暴露其真实立场、代价与可被反转的弱点。",
             "summary": f"{fallback_name}用于承载阶段压力、制度执行和主角关系代价。",
-            "story_function": "把抽象秩序变成可对抗、可谈判、可误判的人。",
+            "appearance": "外在设计需能体现其权力来源、职业痕迹或与主角阶层的反差。",
+            "personality": f"{inner_wound}；说话与行动习惯应体现其执行压力的方式。",
+            "profile": f"{identity} {story_function}",
+            "goals": [long_term_goal, immediate_goal],
+            "motivations": ["维护自身秩序位置", "压制主角造成的规则裂缝"],
+            "secrets": ["与当前阶段核心规则或旧案存在未公开关联"],
+            "abilities": [ability, ability_cost],
+            "weaknesses": ["过度依赖规则授权", "容易低估主角的非典型选择"],
+            "reader_satisfaction": "读者期待看到主角用选择、证据或关系反击这名角色背后的规则。",
+            "long_form_potential": "可随卷推进从执行压力、私人秘密、派系利益到关系反转逐层展开。",
+            "writing_risk": "避免只当工具人登场，必须让其私人目标和世界规则同时成立。",
+            "risk": "避免只当工具人登场，必须让其私人目标和世界规则同时成立。",
+            "revision_hint": "若角色显得扁平，优先补强私人欲望、能力代价和与主角的互相误判。",
+            "tags": ["大纲议事", PHASE_CONFIG[phase]["label"], "压力角色"],
             "first_needed_in": {"stage": phase, "reason": request.requirement or "大纲议事发现角色承载缺口"},
-            "relationship_hooks": ["与主角存在资源/身份/秘密冲突", "可连接未来伏笔回收"],
+            "relationship_hooks": relationship_hooks,
+            "relationship_hook": relationship_hooks[0],
+            "conflict_seed": f"{fallback_name}越试图完成“{immediate_goal}”，越会把主角推向更高代价的选择。",
+            "related_entity_ids": [],
+            "related_character_ids": [],
+            "relations": relationship_hooks,
+            "current_status": "active",
+            "updated_reason": "outline_debate_candidate",
             "duplicate_check": {"strategy": "提交正典前按同名、同职能、同阵营扫描重复项", "status": "pending"},
             "activity_status": "candidate",
             "status": "candidate",
             "source": "outline_debate",
-            "canon_write_suggestion": {"requires_user_approval": True, "target": "characters"},
+            "canon_write_suggestion": {
+                "requires_user_approval": False,
+                "target": "characters",
+                "write_policy": "direct_on_outline_confirmation",
+            },
         }
         generated = self._candidate_from_turn(turns, "CharacterGeneratorAgent", "character_candidate")
         candidate = self._deep_merge_dicts(fallback, generated) if generated else fallback
@@ -4149,25 +5389,41 @@ class OutlineDebateService:
         candidate["status"] = "candidate"
         candidate["source"] = "outline_debate"
         suggestion = candidate.get("canon_write_suggestion") if isinstance(candidate.get("canon_write_suggestion"), dict) else {}
-        suggestion.update({"requires_user_approval": True, "target": "characters"})
+        suggestion.update({"requires_user_approval": False, "target": "characters", "write_policy": "direct_on_outline_confirmation"})
         candidate["canon_write_suggestion"] = suggestion
         return candidate
 
     def _setting_candidate(self, project: models.Project, phase: str, request: OutlineDebateRunRequest, turns: list[dict[str, Any]]) -> dict[str, Any]:
         fallback_title = self._fallback_setting_candidate_title(project, phase)
+        importance_score = 76 if phase == "book" else 56
+        content = f"{fallback_title}用于解释阶段压迫来源、资源分配和主角破局代价。"
         fallback = {
             "title": fallback_title,
+            "name": fallback_title,
             "ref_type": "world_fact",
             "category": "politics" if "权谋" in project.genre else "magic_rule",
-            "content": f"{fallback_title}用于解释阶段压迫来源、资源分配和主角破局代价。",
+            "entity_type": "",
+            "content": content,
+            "description": content,
+            "importance_level": "major" if phase == "book" else "medium",
+            "importance_score": importance_score,
+            "confidence": 0.82,
+            "current_status": "active",
+            "related_entity_ids": [],
             "first_needed_in": {"stage": phase, "reason": request.requirement or "大纲议事发现设定驱动缺口"},
             "conflict_utility": "让主角目标和既有秩序产生明确碰撞。",
             "foreshadowing_utility": "可在前期以制度细节、禁忌或异常判罚预埋。",
+            "limitation": "规则必须有边界和可被主角利用或误读的缝隙。",
+            "cost": "触碰该设定会带来身份、资源、关系或时间线代价。",
             "continuity_check": {"uncertainties": ["是否与既有故事圣经冲突"], "status": "pending_user_review"},
             "activity_status": "candidate",
             "status": "candidate",
             "source": "outline_debate",
-            "canon_write_suggestion": {"requires_user_approval": True, "target": "world_facts"},
+            "canon_write_suggestion": {
+                "requires_user_approval": False,
+                "target": "world_facts",
+                "write_policy": "direct_on_outline_confirmation",
+            },
         }
         generated = self._candidate_from_turn(turns, "SettingGeneratorAgent", "setting_candidate")
         candidate = self._deep_merge_dicts(fallback, generated) if generated else fallback
@@ -4176,7 +5432,7 @@ class OutlineDebateService:
         candidate["status"] = "candidate"
         candidate["source"] = "outline_debate"
         suggestion = candidate.get("canon_write_suggestion") if isinstance(candidate.get("canon_write_suggestion"), dict) else {}
-        suggestion.update({"requires_user_approval": True, "target": "world_facts"})
+        suggestion.update({"requires_user_approval": False, "target": suggestion.get("target") or candidate.get("ref_type") or "world_facts", "write_policy": "direct_on_outline_confirmation"})
         candidate["canon_write_suggestion"] = suggestion
         return candidate
 
@@ -4256,7 +5512,7 @@ class OutlineDebateService:
                         "type": "character_candidate",
                         "title": character_candidate["name"],
                         "payload": character_candidate,
-                        "requires_user_confirmation": True,
+                        "requires_user_confirmation": False,
                     }
                 )
         if candidate_policy["setting_gap"]["required"]:
@@ -4267,7 +5523,7 @@ class OutlineDebateService:
                         "type": "setting_candidate",
                         "title": setting_candidate["title"],
                         "payload": setting_candidate,
-                        "requires_user_confirmation": True,
+                        "requires_user_confirmation": False,
                     }
                 )
         return artifacts, candidate_policy
@@ -4283,16 +5539,24 @@ class OutlineDebateService:
         text = self._debate_signal_text(request, turns)
         character_candidates = self._character_candidates_for_policy(project, phase, request, turns, context, include_fallback=True)
         setting_candidates = self._setting_candidates_for_policy(project, phase, request, turns, context, include_fallback=True)
+        character_gate = self._candidate_generation_gate("character", phase, request, turns)
+        setting_gate = self._candidate_generation_gate("setting", phase, request, turns)
         character_blocked = self._has_candidate_negative_signal(text, "character")
         setting_blocked = self._has_candidate_negative_signal(text, "setting")
         character_signal = self._has_candidate_positive_signal(text, "character")
         setting_signal = self._has_candidate_positive_signal(text, "setting")
-        character_required = False if character_blocked else bool(character_candidates) or character_signal
-        setting_required = False if setting_blocked else bool(setting_candidates) or setting_signal
+        if not character_gate["enabled"]:
+            character_candidates = []
+        if not setting_gate["enabled"]:
+            setting_candidates = []
+        character_required = False if character_blocked else character_gate["enabled"] and (bool(character_candidates) or character_signal)
+        setting_required = False if setting_blocked else setting_gate["enabled"] and (bool(setting_candidates) or setting_signal)
         if character_required and not character_candidates:
             character_candidates = [self._character_candidate(project, phase, request, turns)]
         if setting_required and not setting_candidates:
             setting_candidates = [self._setting_candidate(project, phase, request, turns)]
+        character_count_plan = self._character_count_plan_for_policy(project, phase, request, turns, character_candidates)
+        setting_count_plan = self._setting_count_plan_for_policy(project, phase, request, turns, setting_candidates)
         return {
             "phase": phase,
             "character_gap": {
@@ -4300,9 +5564,15 @@ class OutlineDebateService:
                 "reason": (
                     "用户明确要求不新增角色"
                     if character_blocked
-                    else ("讨论中出现未入库角色，已生成候选" if character_candidates else ("讨论文本明确要求生成角色" if character_required else "未发现新角色"))
+                    else (
+                        f"未达到角色候选触发门槛：{character_gate['reason']}"
+                        if not character_gate["enabled"]
+                        else ("讨论中出现未入库角色，已生成候选" if character_candidates else ("讨论文本明确要求生成角色" if character_required else "未发现新角色"))
+                    )
                 ),
-                "source": "user_blocked" if character_blocked else ("appeared_object" if character_candidates else ("discussion_signal" if character_required else "not_needed")),
+                "source": "user_blocked" if character_blocked else ("gate_blocked" if not character_gate["enabled"] else ("appeared_object" if character_candidates else ("discussion_signal" if character_required else "not_needed"))),
+                "trigger_gate": character_gate,
+                "character_count_plan": {} if character_blocked else character_count_plan,
                 "candidates": [] if character_blocked else character_candidates,
             },
             "setting_gap": {
@@ -4310,9 +5580,15 @@ class OutlineDebateService:
                 "reason": (
                     "用户明确要求不新增设定"
                     if setting_blocked
-                    else ("讨论中出现未入库设定，已生成候选" if setting_candidates else ("讨论文本明确要求生成设定" if setting_required else "未发现新设定"))
+                    else (
+                        f"未达到设定候选触发门槛：{setting_gate['reason']}"
+                        if not setting_gate["enabled"]
+                        else ("讨论中出现未入库设定，已生成候选" if setting_candidates else ("讨论文本明确要求生成设定" if setting_required else "未发现新设定"))
+                    )
                 ),
-                "source": "user_blocked" if setting_blocked else ("appeared_object" if setting_candidates else ("discussion_signal" if setting_required else "not_needed")),
+                "source": "user_blocked" if setting_blocked else ("gate_blocked" if not setting_gate["enabled"] else ("appeared_object" if setting_candidates else ("discussion_signal" if setting_required else "not_needed"))),
+                "trigger_gate": setting_gate,
+                "setting_count_plan": {} if setting_blocked else setting_count_plan,
                 "candidates": [] if setting_blocked else setting_candidates,
             },
         }
@@ -4335,7 +5611,13 @@ class OutlineDebateService:
                     dumps(turn.get("artifact_patch", {})),
                     dumps(turn.get("result_patch", {})),
                     dumps(turn.get("character_candidate", {})),
+                    dumps(turn.get("character_candidates", [])),
                     dumps(turn.get("setting_candidate", {})),
+                    dumps(turn.get("setting_candidates", [])),
+                    dumps(turn.get("character_function_audit", {})),
+                    dumps(turn.get("setting_function_audit", {})),
+                    dumps(turn.get("blocking_items", [])),
+                    dumps(turn.get("must_fix_before_confirm", [])),
                 ]
             )
         return "\n".join(text_parts)
@@ -4360,7 +5642,7 @@ class OutlineDebateService:
         candidates = self._filter_new_named_candidates(candidates, context, "character")
         if not candidates and include_fallback and self._has_candidate_positive_signal(self._debate_signal_text(request, turns), "character") and project is not None:
             candidates = [self._character_candidate(project, phase, request, turns)]
-        return candidates
+        return self._sort_candidates_by_importance(candidates, "name")
 
     def _setting_candidates_for_policy(
         self,
@@ -4382,7 +5664,91 @@ class OutlineDebateService:
         candidates = self._filter_new_named_candidates(candidates, context, "setting")
         if not candidates and include_fallback and self._has_candidate_positive_signal(self._debate_signal_text(request, turns), "setting") and project is not None:
             candidates = [self._setting_candidate(project, phase, request, turns)]
-        return candidates
+        return self._sort_candidates_by_importance(candidates, "title")
+
+    def _character_count_plan_for_policy(
+        self,
+        project: models.Project,
+        phase: str,
+        request: OutlineDebateRunRequest,
+        turns: list[dict[str, Any]],
+        candidates: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        generated = self._plan_from_turns(turns, "character_count_plan")
+        if generated:
+            return generated
+        genre_text = f"{getattr(project, 'genre', '')} {getattr(project, 'channel', '')} {request.requirement}".lower()
+        volume_count = self._bounded_int(getattr(request, "volume_count", None), 3, 1, 30)
+        chapters_per_volume = self._bounded_int(getattr(request, "chapters_per_volume", None), 20, 1, 200)
+        chapter_count = max(1, volume_count * chapters_per_volume)
+        if any(token in genre_text for token in ("群像", "史诗", "epic", "家族", "朝堂", "战争")):
+            planned_total = max(60, min(180, int(chapter_count * 1.2)))
+            benchmark_type = "epic_or_ensemble"
+        elif any(token in genre_text for token in ("推理", "悬疑", "mystery", "探案")):
+            planned_total = max(18, min(45, int(chapter_count * 0.45)))
+            benchmark_type = "mystery_or_suspense"
+        elif any(token in genre_text for token in ("言情", "romance", "情感")):
+            planned_total = max(16, min(36, int(chapter_count * 0.35)))
+            benchmark_type = "romance_or_relationship"
+        elif any(token in genre_text for token in ("玄幻", "奇幻", "fantasy", "科幻", "仙侠")):
+            planned_total = max(45, min(120, int(chapter_count * 0.9)))
+            benchmark_type = "speculative_adventure"
+        else:
+            planned_total = max(24, min(80, int(chapter_count * 0.6)))
+            benchmark_type = "general_long_form"
+        core = 1 if planned_total < 36 else 2
+        major = max(4, min(12, round(planned_total * 0.14)))
+        supporting = max(8, min(40, round(planned_total * 0.34)))
+        minor = max(0, planned_total - core - major - supporting)
+        phase_new = len(candidates)
+        return {
+            "benchmark_type": benchmark_type,
+            "planned_total_characters": planned_total,
+            "importance_distribution": {
+                "core": core,
+                "major": major,
+                "supporting": supporting,
+                "minor": minor,
+            },
+            "new_characters_this_phase": phase_new,
+            "phase": phase,
+            "ordering_rule": "character_candidates 按 importance_score 从高到低输出；同分时核心剧情功能优先。",
+            "benchmark_notes": [
+                "史诗奇幻或家族群像可承载极大人物表，但大纲阶段只提前规划重要性分布。",
+                "推理/悬疑应控制嫌疑人与证人数量，保证读者能跟踪线索公平性。",
+                "言情/关系线以少量核心关系和中等规模配角网为宜。",
+            ],
+        }
+
+    def _setting_count_plan_for_policy(
+        self,
+        project: models.Project,
+        phase: str,
+        request: OutlineDebateRunRequest,
+        turns: list[dict[str, Any]],
+        candidates: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        generated = self._plan_from_turns(turns, "setting_count_plan")
+        if generated:
+            return generated
+        return {
+            "phase": phase,
+            "new_settings_this_phase": len(candidates),
+            "ordering_rule": "setting_candidates 按 importance_score 从高到低输出，先规则/组织/地点，后物件/场景细节。",
+            "direct_update_policy": "direct_on_outline_confirmation",
+            "policy_note": "用户确认对应大纲阶段或条目后直接写入设定库，不进入二次人工审批队列。",
+        }
+
+    def _plan_from_turns(self, turns: list[dict[str, Any]], key: str) -> dict[str, Any]:
+        for turn in turns:
+            value = turn.get(key)
+            if isinstance(value, dict) and value:
+                return value
+            for patch_key in ("artifact_patch", "result_patch"):
+                patch = turn.get(patch_key)
+                if isinstance(patch, dict) and isinstance(patch.get(key), dict) and patch.get(key):
+                    return patch[key]
+        return {}
 
     def _candidate_dicts_from_turns(self, turns: list[dict[str, Any]], kind: str) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
@@ -4442,18 +5808,96 @@ class OutlineDebateService:
         if not name or self._is_placeholder_candidate_name(name):
             return {}
         fallback = self._character_candidate(project, phase, request, []) if project is not None else {}
+        merged = {**fallback, **raw}
+        score = self._bounded_int(merged.get("importance_score"), self._importance_score_for_sort(merged), 0, 100)
+        role_type = self._string_or(merged.get("role_type") or merged.get("role") or raw.get("角色类型"), fallback.get("role_type") or "supporting")
+        long_term_goal = self._first_string(merged.get("long_term_goal"), merged.get("long_term_desire"), fallback.get("long_term_goal"), fallback="完成长期目标")
+        immediate_goal = self._first_string(merged.get("immediate_goal"), fallback.get("immediate_goal"), fallback="在首次登场阶段制造选择压力")
+        inner_wound = self._first_string(merged.get("inner_wound"), fallback.get("inner_wound"), fallback="尚未明确的内在伤口")
+        ability = self._first_string(merged.get("ability"), fallback.get("ability"), fallback="尚未明确的优势或能力")
+        ability_cost = self._first_string(merged.get("ability_cost"), fallback.get("ability_cost"), fallback="优势使用会带来可见代价")
+        weakness = self._first_string(merged.get("weakness"), fallback.get("weakness"), fallback="尚未明确的弱点")
+        secret = self._first_string(merged.get("secret"), fallback.get("secret"), fallback="")
+        relationship_hooks = self._clean_string_values(merged.get("relationship_hooks"), merged.get("relationship_hook"), fallback.get("relationship_hooks"))
+        goals = self._clean_string_values(merged.get("goals"), long_term_goal, immediate_goal)
+        motivations = self._clean_string_values(
+            merged.get("motivations"),
+            merged.get("motivation"),
+            merged.get("conflict_seed"),
+            merged.get("reader_satisfaction"),
+            fallback.get("motivations"),
+        )
+        secrets = self._clean_string_values(merged.get("secrets"), secret)
+        abilities = self._clean_string_values(merged.get("abilities"), ability, ability_cost)
+        weaknesses = self._clean_string_values(merged.get("weaknesses"), weakness, inner_wound)
+        if ability_cost and ability_cost not in weaknesses:
+            weaknesses.append(ability_cost)
+        summary = self._first_string(
+            merged.get("summary"),
+            merged.get("one_sentence_pitch"),
+            merged.get("identity"),
+            raw.get("简介"),
+            fallback.get("summary"),
+            fallback=f"{name}是大纲议事中出现的新角色候选。",
+        )
+        character_arc = self._first_string(merged.get("character_arc"), merged.get("growth_arc"), merged.get("arc"), fallback.get("character_arc"), fallback="")
         candidate = {
-            **fallback,
-            **raw,
+            **merged,
             "name": name,
-            "role_type": self._string_or(raw.get("role_type") or raw.get("角色类型"), fallback.get("role_type") or "supporting"),
-            "summary": self._string_or(raw.get("summary") or raw.get("简介"), fallback.get("summary") or f"{name}是大纲议事中出现的新角色候选。"),
-            "story_function": self._string_or(raw.get("story_function") or raw.get("剧情功能"), fallback.get("story_function") or "承载新出现的剧情压力和关系冲突。"),
+            "aliases": self._clean_string_values(merged.get("aliases")),
+            "role": role_type,
+            "role_type": role_type,
+            "importance_level": self._string_or(merged.get("importance_level"), self._importance_level_from_score(score)),
+            "importance_score": score,
+            "title": self._first_string(merged.get("title"), merged.get("identity"), fallback.get("title"), fallback=role_type),
+            "one_sentence_pitch": self._first_string(merged.get("one_sentence_pitch"), fallback.get("one_sentence_pitch"), fallback=summary),
+            "identity": self._first_string(merged.get("identity"), fallback.get("identity"), fallback=summary),
+            "opening_situation": self._first_string(merged.get("opening_situation"), fallback.get("opening_situation"), fallback=f"在{PHASE_CONFIG[phase]['label']}首次形成有效压力。"),
+            "world_rule_connection": self._first_string(merged.get("world_rule_connection"), fallback.get("world_rule_connection"), fallback="与当前世界规则或阶段制度压力相连。"),
+            "long_term_desire": long_term_goal,
+            "long_term_goal": long_term_goal,
+            "immediate_goal": immediate_goal,
+            "inner_wound": inner_wound,
+            "ability": ability,
+            "ability_cost": ability_cost,
+            "weakness": weakness,
+            "secret": secret,
+            "growth_arc": self._first_string(merged.get("growth_arc"), character_arc, fallback.get("growth_arc"), fallback=character_arc),
+            "character_arc": character_arc,
+            "summary": summary,
+            "appearance": self._first_string(merged.get("appearance"), fallback.get("appearance"), fallback=""),
+            "personality": self._first_string(merged.get("personality"), fallback.get("personality"), inner_wound, fallback=""),
+            "profile": self._first_string(merged.get("profile"), fallback.get("profile"), summary, fallback=summary),
+            "goals": goals,
+            "motivations": motivations,
+            "secrets": secrets,
+            "abilities": abilities,
+            "weaknesses": weaknesses,
+            "reader_satisfaction": self._first_string(merged.get("reader_satisfaction"), fallback.get("reader_satisfaction"), fallback=""),
+            "long_form_potential": self._first_string(merged.get("long_form_potential"), fallback.get("long_form_potential"), fallback=""),
+            "writing_risk": self._first_string(merged.get("writing_risk"), merged.get("risk"), fallback.get("writing_risk"), fallback=""),
+            "risk": self._first_string(merged.get("risk"), merged.get("writing_risk"), fallback.get("risk"), fallback=""),
+            "revision_hint": self._first_string(merged.get("revision_hint"), fallback.get("revision_hint"), fallback=""),
+            "tags": self._clean_string_values(merged.get("tags"), fallback.get("tags")),
+            "story_function": self._string_or(merged.get("story_function") or raw.get("剧情功能"), fallback.get("story_function") or "承载新出现的剧情压力和关系冲突。"),
             "first_needed_in": raw.get("first_needed_in") if isinstance(raw.get("first_needed_in"), dict) else {"stage": phase, "reason": request.requirement or "大纲议事出现新角色"},
+            "relationship_hooks": relationship_hooks,
+            "relationship_hook": self._first_string(merged.get("relationship_hook"), relationship_hooks[0] if relationship_hooks else "", fallback=""),
+            "conflict_seed": self._first_string(merged.get("conflict_seed"), fallback.get("conflict_seed"), fallback=""),
+            "related_entity_ids": self._clean_string_values(merged.get("related_entity_ids")),
+            "related_character_ids": self._clean_string_values(merged.get("related_character_ids")),
+            "relations": merged.get("relations") if isinstance(merged.get("relations"), list) else relationship_hooks,
+            "current_status": self._string_or(merged.get("current_status"), "active"),
+            "updated_reason": self._first_string(merged.get("updated_reason"), fallback.get("updated_reason"), fallback="outline_debate_candidate"),
+            "activity_status": "candidate",
+            "status": "candidate",
+            "source": "outline_debate",
             "canon_write_suggestion": {
                 **(fallback.get("canon_write_suggestion") if isinstance(fallback.get("canon_write_suggestion"), dict) else {}),
                 **(raw.get("canon_write_suggestion") if isinstance(raw.get("canon_write_suggestion"), dict) else {}),
-                "requires_user_approval": True,
+                "requires_user_approval": False,
+                "target": "characters",
+                "write_policy": "direct_on_outline_confirmation",
             },
         }
         return candidate
@@ -4471,17 +5915,40 @@ class OutlineDebateService:
         if not title or self._is_placeholder_candidate_name(title):
             return {}
         fallback = self._setting_candidate(project, phase, request, []) if project is not None else {}
+        merged = {**fallback, **raw}
+        ref_type = self._string_or(merged.get("ref_type"), fallback.get("ref_type") or ("entity" if merged.get("entity_type") else "world_fact"))
+        score = self._bounded_int(merged.get("importance_score"), self._importance_score_for_sort(merged), 0, 100)
+        content = self._first_string(merged.get("content"), merged.get("description"), raw.get("内容"), fallback.get("content"), fallback=f"{title}是大纲议事中出现的新设定候选。")
+        target = "entities" if ref_type in {"entity", "entities", "story_entity", "story_entities"} else "world_facts"
         candidate = {
-            **fallback,
-            **raw,
+            **merged,
             "title": title,
-            "ref_type": self._string_or(raw.get("ref_type"), fallback.get("ref_type") or ("entity" if raw.get("entity_type") else "world_fact")),
-            "category": self._string_or(raw.get("category") or raw.get("entity_type"), fallback.get("category") or "world_rule"),
-            "content": self._string_or(raw.get("content") or raw.get("内容"), fallback.get("content") or f"{title}是大纲议事中出现的新设定候选。"),
+            "name": self._first_string(merged.get("name"), title, fallback=title),
+            "ref_type": ref_type,
+            "category": self._string_or(merged.get("category") or merged.get("entity_type"), fallback.get("category") or "world_rule"),
+            "entity_type": self._string_or(merged.get("entity_type") or merged.get("category"), fallback.get("entity_type") or ""),
+            "content": content,
+            "description": self._first_string(merged.get("description"), content, fallback=content),
+            "importance_level": self._string_or(merged.get("importance_level"), self._importance_level_from_score(score)),
+            "importance_score": score,
+            "confidence": self._bounded_float(merged.get("confidence"), 0.82, 0.0, 1.0),
+            "current_status": self._string_or(merged.get("current_status"), "active"),
+            "related_entity_ids": self._clean_string_values(merged.get("related_entity_ids")),
+            "first_needed_in": merged.get("first_needed_in") if isinstance(merged.get("first_needed_in"), dict) else {"stage": phase, "reason": request.requirement or "大纲议事出现新设定"},
+            "conflict_utility": self._first_string(merged.get("conflict_utility"), fallback.get("conflict_utility"), fallback=""),
+            "foreshadowing_utility": self._first_string(merged.get("foreshadowing_utility"), fallback.get("foreshadowing_utility"), fallback=""),
+            "limitation": self._first_string(merged.get("limitation"), fallback.get("limitation"), fallback=""),
+            "cost": self._first_string(merged.get("cost"), fallback.get("cost"), fallback=""),
+            "continuity_check": merged.get("continuity_check") if isinstance(merged.get("continuity_check"), dict) else fallback.get("continuity_check", {}),
+            "activity_status": "candidate",
+            "status": "candidate",
+            "source": "outline_debate",
             "canon_write_suggestion": {
                 **(fallback.get("canon_write_suggestion") if isinstance(fallback.get("canon_write_suggestion"), dict) else {}),
                 **(raw.get("canon_write_suggestion") if isinstance(raw.get("canon_write_suggestion"), dict) else {}),
-                "requires_user_approval": True,
+                "requires_user_approval": False,
+                "target": target,
+                "write_policy": "direct_on_outline_confirmation",
             },
         }
         return candidate
@@ -4616,6 +6083,9 @@ class OutlineDebateService:
             checks.append(self._rhythm_model_check(result))
         if phase == "chapters":
             checks.append(self._crisis_climax_result_check(result))
+        quality_check = self._outline_quality_check(result)
+        if quality_check:
+            checks.append(quality_check)
         duplicate_check = self._duplicate_candidate_check(artifacts, context)
         if duplicate_check:
             checks.append(duplicate_check)
@@ -4629,6 +6099,19 @@ class OutlineDebateService:
             "status": status,
             "checked_at": utcnow().isoformat(),
             "checks": checks,
+        }
+
+    def _outline_quality_check(self, result: dict[str, Any]) -> dict[str, Any] | None:
+        metrics = result.get("quality_metrics") if isinstance(result.get("quality_metrics"), dict) else {}
+        if not metrics:
+            return None
+        blocking_items = metrics.get("blocking_items") if isinstance(metrics.get("blocking_items"), list) else []
+        return {
+            "validator": "outline_quality_gate",
+            "status": "failed" if blocking_items else "passed",
+            "message": "大纲候选通过严格质量指标" if not blocking_items else "大纲候选未通过严格质量指标",
+            "metrics": {key: value for key, value in metrics.items() if key != "blocking_items"},
+            "issues": [str(item.get("evidence") or item) for item in blocking_items if isinstance(item, dict)],
         }
 
     def _schema_validation_check(self, phase: str, result: dict[str, Any]) -> dict[str, Any]:
@@ -4646,10 +6129,20 @@ class OutlineDebateService:
                 if not isinstance(item, dict):
                     issues.append(f"volume_outlines[{index}] 不是 object")
                     continue
-                for key in ("volume_no", "title", "volume_function", "rhythm_model", "core_goal", "volume_hook"):
+                for key in ("volume_no", "title", "volume_function", "rhythm_model", "core_goal", "volume_hook", "main_conflict", "ending_hook", "character_arc", "setting_reveal_plan", "foreshadowing_plan"):
                     if item.get(key) in (None, "", [], {}):
                         issues.append(f"volume_outlines[{index}].{key} 为空")
         else:
+            chapter_windows = result.get("chapter_windows") if isinstance(result.get("chapter_windows"), list) else []
+            if not chapter_windows:
+                issues.append("chapter_windows 为空")
+            for index, item in enumerate(chapter_windows, start=1):
+                if not isinstance(item, dict):
+                    issues.append(f"chapter_windows[{index}] 不是 object")
+                    continue
+                for key in ("window_no", "volume_no", "chapter_range", "stage_goal", "main_pressure", "state_change_goal", "mini_crisis", "mini_climax", "transition_hook"):
+                    if item.get(key) in (None, "", [], {}):
+                        issues.append(f"chapter_windows[{index}].{key} 为空")
             chapter_outlines = result.get("chapter_outlines") if isinstance(result.get("chapter_outlines"), list) else []
             if not chapter_outlines:
                 issues.append("chapter_outlines 为空")
@@ -4657,7 +6150,7 @@ class OutlineDebateService:
                 if not isinstance(item, dict):
                     issues.append(f"chapter_outlines[{index}] 不是 object")
                     continue
-                for key in ("chapter_no", "title", "outline", "pov_character", "core_event", "conflict", "crisis", "climax", "result", "cliffhanger"):
+                for key in ("chapter_no", "title", "outline", "pov_character", "core_event", "conflict", "crisis", "climax", "result", "cliffhanger", "state_change", "foreshadowing_use", "source_window"):
                     if item.get(key) in (None, "", [], {}):
                         issues.append(f"chapter_outlines[{index}].{key} 为空")
         return {

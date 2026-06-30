@@ -202,10 +202,13 @@ export function StudioLayout() {
     <Layout className="studio-shell">
       <Sider width={236} className="studio-sider">
         <div className="brand">
-          <div className="brand-icon">NS</div>
+          <div className="brand-icon" aria-hidden="true">
+            <span className="brand-icon-main">叙</span>
+            <span className="brand-icon-sub">NE</span>
+          </div>
           <div className="brand-copy">
-            <Typography.Text strong>Novel Studio</Typography.Text>
-            <Typography.Text type="secondary">专业长篇创作工作室</Typography.Text>
+            <Typography.Text strong>叙界推演引擎</Typography.Text>
+            <Typography.Text type="secondary">长篇小说正典工作室</Typography.Text>
           </div>
         </div>
         <Menu mode="inline" selectedKeys={[location.pathname]} items={dashboardItems} onClick={({ key }) => navigate(key)} className="studio-menu" />
@@ -213,9 +216,11 @@ export function StudioLayout() {
       <Layout>
         <Header className="studio-header" style={{ background: token.colorBgContainer }}>
           <Typography.Text type="secondary" className="studio-header-signal">
-            <span>本地优先</span>
-            <span>LangGraph 多 Agent</span>
-            <span>动态设定集</span>
+            <span className="studio-signal-primary">本地正典引擎</span>
+            <span>创作 Star 立项</span>
+            <span>Agent 议事流</span>
+            <span>章节生产闭环</span>
+            <span>版本快照可回滚</span>
           </Typography.Text>
           <Button
             className="studio-header-action"

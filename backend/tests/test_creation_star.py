@@ -63,6 +63,47 @@ def create_project(client: TestClient) -> str:
     return data["project"]["id"]
 
 
+def add_unrelated_graph_edge(project_id: str) -> str:
+    db = SessionLocal()
+    try:
+        source = models.GraphNode(
+            id="gn_existing_source",
+            project_id=project_id,
+            node_type="entity",
+            ref_id="existing_source",
+            label="旧势力",
+            importance_level="medium",
+            importance_score=50,
+        )
+        target = models.GraphNode(
+            id="gn_existing_target",
+            project_id=project_id,
+            node_type="entity",
+            ref_id="existing_target",
+            label="旧地点",
+            importance_level="medium",
+            importance_score=50,
+        )
+        edge = models.GraphEdge(
+            id="ged_existing_unrelated",
+            project_id=project_id,
+            source_node_id=source.id,
+            target_node_id=target.id,
+            edge_type="manual_relation",
+            label="旧关系",
+            importance_score=40,
+            confidence=0.7,
+            evidence="提交创作 Star 前已存在的人工关系。",
+        )
+        db.add_all([source, target])
+        db.flush()
+        db.add(edge)
+        db.commit()
+        return edge.id
+    finally:
+        db.close()
+
+
 def test_creation_star_options_draw_and_commit_flow() -> None:
     reset_database()
     client = TestClient(app)
@@ -360,6 +401,7 @@ def test_creation_session_decoupled_steps_and_single_card_loading() -> None:
 
     state_before_commit = assert_success(client.get(f"/api/projects/{project_id}/state"))["state"]
     assert not any(fact["title"] == "核心命题" for fact in state_before_commit["world_facts"])
+    unrelated_edge_id = add_unrelated_graph_edge(project_id)
 
     incomplete_approval = client.post(
         f"/api/projects/{project_id}/creation/sessions/{session_id}/commit",
@@ -412,6 +454,32 @@ def test_creation_session_decoupled_steps_and_single_card_loading() -> None:
     assert creation_profile["constitution_review"]["status"] == "passed_with_notes"
     assert creation_profile["canon_candidates"]["story_bible_candidate"]["main_conflict"]
     assert creation_profile["confirmed_canon"]["core_conflict_system"]["core_conflict"]
+
+    db = SessionLocal()
+    try:
+        unrelated_versions = (
+            db.query(models.CanonVersion)
+            .filter(
+                models.CanonVersion.project_id == project_id,
+                models.CanonVersion.ref_type == "graph_edge",
+                models.CanonVersion.ref_id == unrelated_edge_id,
+            )
+            .all()
+        )
+        creation_edge_versions = (
+            db.query(models.CanonVersion)
+            .join(models.GraphEdge, models.GraphEdge.id == models.CanonVersion.ref_id)
+            .filter(
+                models.CanonVersion.project_id == project_id,
+                models.CanonVersion.ref_type == "graph_edge",
+                models.GraphEdge.edge_type.in_(["creation_star_related", "driven_by"]),
+            )
+            .all()
+        )
+    finally:
+        db.close()
+    assert unrelated_versions == []
+    assert creation_edge_versions
 
 
 def test_creation_star_draw_calls_llm_client(monkeypatch) -> None:

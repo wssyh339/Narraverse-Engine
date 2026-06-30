@@ -44,6 +44,12 @@ const confirmActionLabels: Record<OutlineDebatePhase, string> = {
   chapters: "确认本章",
 };
 
+const confirmAllActionLabels: Record<OutlineDebatePhase, string> = {
+  book: "确认总纲",
+  volumes: "确认全部卷纲",
+  chapters: "确认全部章纲",
+};
+
 const phaseIcons: Record<OutlineDebatePhase, ReactNode> = {
   book: <BookOpen size={14} />,
   volumes: <Layers size={14} />,
@@ -102,6 +108,39 @@ function detectTargetAgent(value: string) {
 function compactNumber(value?: number) {
   const numeric = Number(value || 0);
   return numeric > 0 ? numeric.toLocaleString("zh-CN") : "未设定";
+}
+
+function stageConclusionFromRun(run?: OutlineDebatePhaseRun | null) {
+  const result = run?.result ?? {};
+  const conclusion = result.stage_conclusion;
+  const title =
+    conclusion && typeof conclusion === "object" && "title" in conclusion
+      ? String((conclusion as Record<string, unknown>).title || "")
+      : `${run?.phase_label || "当前"}阶段结论`;
+  const body = typeof result.stage_conclusion_text === "string" ? result.stage_conclusion_text : "";
+  return { title, body };
+}
+
+function itemizedCandidateList(session: OutlineDebateSession | null, phase: OutlineDebatePhase) {
+  const candidate = session?.confirmed_candidates?.[phase];
+  if (!candidate) return [];
+  const key = phase === "volumes" ? "volume_outlines" : phase === "chapters" ? "chapter_outlines" : "";
+  const value = key ? candidate[key] : [];
+  return Array.isArray(value) ? value : [];
+}
+
+function buildFullChapterRanges(volumeCount: number, chaptersPerVolume: number) {
+  const safeVolumeCount = Math.max(1, Number(volumeCount || 1));
+  const safeChaptersPerVolume = Math.max(1, Number(chaptersPerVolume || 1));
+  return Array.from({ length: safeVolumeCount }, (_, index) => {
+    const volumeNo = index + 1;
+    const start = index * safeChaptersPerVolume + 1;
+    return {
+      volume_no: volumeNo,
+      start_chapter_no: start,
+      end_chapter_no: start + safeChaptersPerVolume - 1,
+    };
+  });
 }
 
 function phaseStatus(session: OutlineDebateSession | null, phase: OutlineDebatePhase, fullyConfirmed = false) {
@@ -222,10 +261,20 @@ export function OutlineDebatePanel({
   const activeConfirmationItem = activeItemKey ? activeRun?.confirmation_items?.find((item) => item.item_key === activeItemKey) : undefined;
   const activeItemAlreadyConfirmed = Boolean(activeItemKey && activeConfirmationItem?.candidate_status === "confirmed");
   const confirmedRefreshBlocked = Boolean(activePhase === "book" ? activeRun?.candidate_status === "confirmed" : activeItemAlreadyConfirmed);
+  const activeStageConclusion = stageConclusionFromRun(activeRun);
+  const activeConfirmationItems = activeRun?.confirmation_items ?? [];
+  const pendingItemCount = activeConfirmationItems.filter((item) => item.candidate_status === "pending_confirmation").length;
   const summaryTargetWords = Number(scalePlan?.target_words || targetWords || 0);
   const summaryVolumeCount = Number(scalePlan?.volume_count || volumeCount || 0);
   const summaryChapterCount = Number(scalePlan?.chapter_count || summaryVolumeCount * (scalePlan?.chapters_per_volume || chaptersPerVolume || 0));
   const summaryChapterTarget = Number(scalePlan?.chapter_word_target || chapterWordTarget || 0);
+  const plannedVolumeCount = Math.max(1, Number(scalePlan?.volume_count || volumeCount || 1));
+  const plannedChaptersPerVolume = Math.max(1, Number(scalePlan?.chapters_per_volume || chaptersPerVolume || 1));
+  const plannedChapterCount = Math.max(1, Number(scalePlan?.chapter_count || plannedVolumeCount * plannedChaptersPerVolume));
+  const confirmedVolumeCount = itemizedCandidateList(session, "volumes").length;
+  const confirmedChapterCount = itemizedCandidateList(session, "chapters").length;
+  const activeConfirmedCount = activePhase === "volumes" ? confirmedVolumeCount : activePhase === "chapters" ? confirmedChapterCount : 0;
+  const activePlannedCount = activePhase === "volumes" ? plannedVolumeCount : activePhase === "chapters" ? plannedChapterCount : 0;
   const canConfirmActivePhase = Boolean(
     session &&
       activeRun?.status === "succeeded" &&
@@ -234,16 +283,20 @@ export function OutlineDebatePanel({
         ? activeRun.candidate_status === "pending_confirmation"
         : activeConfirmationItem?.candidate_status === "pending_confirmation" || activeRun.candidate_status === "pending_confirmation"),
   );
+  const canConfirmAllActivePhase = Boolean(
+    session &&
+      activeRun?.status === "succeeded" &&
+      !running &&
+      activePhase !== "book" &&
+      pendingItemCount > 0,
+  );
   const phaseFullyConfirmed = (phase: OutlineDebatePhase) => {
     const run = session?.phase_runs?.[phase];
     if (!run || run.candidate_status !== "confirmed" || !session?.confirmed_candidates?.[phase]) return false;
     if (phase === "book") return true;
-    const plannedCount =
-      phase === "volumes"
-        ? Math.max(1, Number(scalePlan?.volume_count || volumeCount || 1))
-        : Math.max(1, Number(scalePlan?.chapter_count || (volumeCount || 1) * (chaptersPerVolume || 1)));
+    const plannedCount = phase === "volumes" ? plannedVolumeCount : plannedChapterCount;
     const expectedCount = Math.max(plannedCount, Number(run.expected_item_count || 0), run.confirmation_items?.length || 0);
-    const confirmedCount = (run.confirmation_items ?? []).filter((item) => item.candidate_status === "confirmed").length;
+    const confirmedCount = itemizedCandidateList(session, phase).length;
     return confirmedCount >= expectedCount;
   };
   const allCandidatesConfirmed = Boolean(session && (["book", "volumes", "chapters"] as OutlineDebatePhase[]).every(phaseFullyConfirmed));
@@ -352,7 +405,7 @@ export function OutlineDebatePanel({
     let finalEventType = "";
     try {
       const currentSession = await ensureSession();
-      const startChapter = Math.max(1, selectedChapterNo);
+      const chapterRanges = activePhase === "chapters" ? buildFullChapterRanges(plannedVolumeCount, plannedChaptersPerVolume) : undefined;
       await streamOutlineDebatePhase(
         projectId,
         currentSession.id,
@@ -367,9 +420,9 @@ export function OutlineDebatePanel({
           chapter_word_min: chapterWordMin,
           chapter_word_max: chapterWordMax,
           scale_plan: scalePlan,
-          target_volume_no: selectedVolumeNo,
-          target_chapter_no: startChapter,
-          chapter_ranges: [{ volume_no: selectedVolumeNo, start_chapter_no: startChapter, end_chapter_no: startChapter }],
+          target_volume_no: activePhase === "volumes" ? undefined : activePhase === "chapters" ? undefined : selectedVolumeNo,
+          target_chapter_no: activePhase === "chapters" ? undefined : Math.max(1, selectedChapterNo),
+          chapter_ranges: chapterRanges,
           refresh_phase: refreshPhase,
           join_discussion: joinDiscussion,
           finish_phase: Boolean(options.finishPhase),
@@ -424,6 +477,7 @@ export function OutlineDebatePanel({
 
   const interruptDiscussion = async () => {
     abortRef.current?.abort();
+    abortRef.current = null;
     if (!session) {
       message.info("当前还没有运行中的议事会话");
       return;
@@ -467,6 +521,25 @@ export function OutlineDebatePanel({
       message.success(activePhase === "book" ? "总纲已确认并写入总纲正文" : `${itemLabel}已确认并更新正典`);
     } catch (error) {
       message.error(error instanceof Error ? error.message : "确认条目失败");
+    }
+  };
+
+  const confirmAllActivePhase = async () => {
+    if (!session || !activeRun || activePhase === "book") {
+      message.warning("请先形成卷纲或章纲阶段结论");
+      return;
+    }
+    try {
+      const result = await studioApi.confirmOutlineDebatePhase(projectId, session.id, activePhase, {
+        confirm_all: true,
+        notes: `${confirmAllActionLabels[activePhase]}：用户在议事面板一次性确认本阶段全部待确认条目，服务层逐条写入正典。`,
+      });
+      setSession(result.session);
+      const confirmedRun = result.session.phase_runs?.[activePhase];
+      if (confirmedRun) onPhaseComplete?.(confirmedRun);
+      message.success(`${confirmAllActionLabels[activePhase]}已完成`);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "批量确认条目失败");
     }
   };
 
@@ -539,6 +612,11 @@ export function OutlineDebatePanel({
           <Button icon={<CheckCircle2 size={15} />} disabled={!canConfirmActivePhase} onClick={confirmActivePhase}>
             {activePhase === "volumes" ? `确认本卷 ${selectedVolumeNo}` : activePhase === "chapters" ? `确认本章 ${selectedChapterNo}` : confirmActionLabels[activePhase]}
           </Button>
+          {activePhase !== "book" ? (
+            <Button icon={<CheckCircle2 size={15} />} disabled={!canConfirmAllActivePhase} onClick={confirmAllActivePhase}>
+              {confirmAllActionLabels[activePhase]}
+            </Button>
+          ) : null}
           <Button icon={<BookOpen size={15} />} disabled={running || !allCandidatesConfirmed || alreadyCommitted} onClick={commitConfirmedCandidates}>
             {alreadyCommitted ? "已写入正式大纲" : "写入正式大纲"}
           </Button>
@@ -557,6 +635,7 @@ export function OutlineDebatePanel({
             <Space size={6} wrap>
               {currentSpeakerLabel ? <Tag color="processing">当前发言：{currentSpeakerLabel}</Tag> : null}
               <Tag color={activeCandidateStatus.color}>{activeCandidateStatus.text}</Tag>
+              {activePhase !== "book" ? <Tag>{activeConfirmedCount}/{activePlannedCount} 已确认</Tag> : null}
               {!userPinnedToLatest && events.length ? (
                 <Button className="outline-debate-scroll-back" size="small" icon={<ArrowDown size={13} />} onClick={scrollToLatest}>
                   回到最新发言
@@ -596,6 +675,14 @@ export function OutlineDebatePanel({
             )}
             <div className="outline-debate-stream-end" ref={streamEndRef} />
           </div>
+          {!running && activeStageConclusion.body ? (
+            <div className="outline-debate-stage-conclusion">
+              <Typography.Text strong>{activeStageConclusion.title}</Typography.Text>
+              <Typography.Paragraph className="outline-debate-stage-conclusion-text">
+                {activeStageConclusion.body}
+              </Typography.Paragraph>
+            </div>
+          ) : null}
         </div>
       </div>
       {joinDiscussion ? (

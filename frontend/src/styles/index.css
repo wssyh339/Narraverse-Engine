@@ -183,24 +183,78 @@ textarea.ant-input::placeholder {
   display: flex;
   gap: 12px;
   align-items: center;
-  padding: 22px 18px 18px;
+  padding: 20px 16px 18px;
 }
 
 .brand-icon {
+  position: relative;
   display: grid;
-  width: 40px;
-  height: 40px;
+  width: 48px;
+  height: 48px;
   place-items: center;
-  border-radius: var(--studio-radius-sm);
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--studio-accent-strong) 28%, transparent);
+  border-radius: 18px;
   color: #ffffff;
-  background: linear-gradient(145deg, var(--studio-accent), var(--studio-accent-strong));
-  box-shadow: var(--studio-shadow-tight);
+  background:
+    radial-gradient(circle at 26% 18%, rgba(255, 255, 255, 0.24), transparent 30%),
+    linear-gradient(145deg, var(--studio-accent), var(--studio-accent-strong));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.28),
+    0 14px 30px color-mix(in srgb, var(--studio-accent-strong) 24%, transparent);
   font-weight: 800;
+}
+
+.brand-icon::before,
+.brand-icon::after {
+  position: absolute;
+  content: "";
+  pointer-events: none;
+}
+
+.brand-icon::before {
+  inset: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 13px;
+}
+
+.brand-icon::after {
+  right: -12px;
+  bottom: 5px;
+  width: 40px;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.36);
+  box-shadow: 0 -10px 0 rgba(255, 255, 255, 0.14), 0 10px 0 rgba(255, 255, 255, 0.14);
+  transform: rotate(-36deg);
+}
+
+.brand-icon-main {
+  position: relative;
+  z-index: 1;
+  font-size: 25px;
+  line-height: 1;
+  letter-spacing: -0.08em;
+}
+
+.brand-icon-sub {
+  position: absolute;
+  right: 7px;
+  bottom: 6px;
+  z-index: 1;
+  font-size: 9px;
+  line-height: 1;
+  letter-spacing: 0.08em;
+  opacity: 0.76;
 }
 
 .brand-copy,
 .brand .ant-typography {
   display: block;
+}
+
+.brand-copy .ant-typography-strong {
+  font-size: 16px;
+  letter-spacing: -0.02em;
 }
 
 .studio-menu {
@@ -221,13 +275,28 @@ textarea.ant-input::placeholder {
 .studio-header-signal {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 8px;
   color: var(--studio-text-muted);
 }
 
-.studio-header-signal span + span {
-  padding-left: 10px;
-  border-left: 1px solid var(--studio-border);
+.studio-header-signal span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid var(--studio-border);
+  border-radius: 999px;
+  background: var(--studio-surface-soft);
+  line-height: 1;
+}
+
+.studio-header-signal .studio-signal-primary {
+  border-color: color-mix(in srgb, var(--studio-accent) 38%, var(--studio-border));
+  color: var(--studio-accent-strong);
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--studio-accent) 14%, transparent), transparent),
+    var(--studio-surface);
+  font-weight: 600;
 }
 
 .studio-header-action {
@@ -463,20 +532,44 @@ textarea.ant-input::placeholder {
 }
 
 .hero-panel-focus {
+  position: relative;
   display: grid;
   grid-template-columns: 42px minmax(0, 1fr);
   gap: 14px;
   align-items: start;
+  overflow: hidden;
   padding: 18px;
+  border: 1px solid color-mix(in srgb, var(--studio-accent) 18%, var(--studio-border));
   border-radius: var(--studio-radius-sm);
-  background: var(--studio-surface);
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--studio-accent) 8%, transparent), transparent 46%),
+    var(--studio-surface);
+}
+
+.hero-panel-focus::after {
+  position: absolute;
+  right: -22px;
+  bottom: 8px;
+  width: 120px;
+  height: 1px;
+  background: color-mix(in srgb, var(--studio-accent) 36%, transparent);
+  box-shadow:
+    0 -14px 0 color-mix(in srgb, var(--studio-accent) 16%, transparent),
+    0 14px 0 color-mix(in srgb, var(--studio-accent) 16%, transparent);
+  content: "";
+  pointer-events: none;
+  transform: rotate(-28deg);
 }
 
 .hero-panel-focus svg {
+  position: relative;
+  z-index: 1;
   color: var(--studio-accent);
 }
 
 .hero-panel-focus > div {
+  position: relative;
+  z-index: 1;
   display: grid;
   gap: 4px;
 }

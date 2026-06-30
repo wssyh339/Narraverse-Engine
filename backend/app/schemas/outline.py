@@ -67,6 +67,7 @@ class OutlineDebateChapterAutopilotRequest(OutlineDebateRunRequest):
 
 class OutlineDebateConfirmRequest(APIModel):
     item_key: str = Field(default="", max_length=80)
+    confirm_all: bool = False
     notes: str = Field(default="", max_length=4000)
 
 

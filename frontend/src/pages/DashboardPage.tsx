@@ -72,9 +72,9 @@ export function DashboardPage() {
     <div className="dashboard-page">
       <section className="dashboard-hero">
         <div className="dashboard-hero-copy">
-          <Typography.Title level={1}>项目首页</Typography.Title>
+          <Typography.Title level={1}>作品中枢</Typography.Title>
           <Typography.Paragraph>
-            管理本地小说项目、查看写作进度，并继续最近工作。
+            从创作 Star 立项、Agent 议事到章节闭环，把世界观、人物和版本证据收进同一套本地正典。
           </Typography.Paragraph>
           <Space wrap size={10} className="dashboard-hero-actions">
             <Button type="primary" size="large" icon={<Plus size={17} />} loading={createStarProject.isPending} onClick={() => createStarProject.mutate()}>
@@ -96,28 +96,28 @@ export function DashboardPage() {
         </div>
         <div className="dashboard-hero-panel" aria-label="创作工作室概览">
           <div className="hero-panel-topline">
-            <span>Novel Studio</span>
-            <Tag color="green">本地优先</Tag>
+            <span>叙界推演引擎</span>
+            <Tag color="green">正典闭环</Tag>
           </div>
           <div className="hero-panel-focus">
             <Feather size={24} />
             <div>
-              <Typography.Text strong>从立项到定稿的连续工作台</Typography.Text>
-              <Typography.Text type="secondary">创作 Star、正文编辑、动态设定集和版本恢复保持在同一个项目上下文里。</Typography.Text>
+              <Typography.Text strong>一部小说，一条可追溯生产线</Typography.Text>
+              <Typography.Text type="secondary">抽卡、议事、正文、设定更新和回滚都绑定项目上下文。</Typography.Text>
             </div>
           </div>
           <div className="dashboard-stat-rail">
             <div>
               <span>{formatNumber(projectCount)}</span>
-              <small>项目总数</small>
+              <small>作品档案</small>
             </div>
             <div>
               <span>{formatNumber(activeCount)}</span>
-              <small>活跃项目</small>
+              <small>创作中</small>
             </div>
             <div>
               <span>{formatNumber(targetWords)}</span>
-              <small>计划总字数</small>
+              <small>目标字数</small>
             </div>
           </div>
         </div>

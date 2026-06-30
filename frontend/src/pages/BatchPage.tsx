@@ -161,13 +161,14 @@ export function BatchPage() {
   }, [job, jobId, projectId, recentJobsQuery.data?.jobs]);
 
   const mutation = useMutation({
-    mutationFn: (values: { chapter_start: number; chapter_end: number }) => studioApi.batchGenerate(projectId, values.chapter_start, values.chapter_end),
+    mutationFn: (values: { chapter_start: number; chapter_end: number }) =>
+      studioApi.batchGenerate(projectId, values.chapter_start, values.chapter_end, { fast_draft: true, local_fast_draft: true, draft_mode: "local_fast_draft" }),
     onSuccess: (result) => {
       setJob(result.job);
       setJobId(result.job.id);
       saveJobId(projectId, result.job.id);
       recentJobsQuery.refetch();
-      message.success("批量任务已创建，后台将逐章生成正文");
+      message.success("快速批量任务已创建，后台将逐章生成正文草稿");
     },
     onError: (error) => message.error(error instanceof Error ? error.message : "批量生成失败"),
   });
@@ -238,7 +239,7 @@ export function BatchPage() {
       <div className="page-heading">
         <div>
           <Typography.Title level={2}>批量生成与监控</Typography.Title>
-          <Typography.Text type="secondary">选择已确认章节范围，系统会创建可恢复任务并逐章提交正文与正典更新。</Typography.Text>
+          <Typography.Text type="secondary">选择已确认章节范围，系统会创建可恢复快速草稿任务并逐章提交正文与正典更新。</Typography.Text>
         </div>
       </div>
 

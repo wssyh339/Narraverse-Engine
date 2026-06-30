@@ -20,6 +20,7 @@ from app.agents.creation_star.service import creation_star_agent_service
 from app.agents.llm_io import call_agent_json
 from app.agents.prompts import AGENT_PROMPT_BINDINGS, AGENT_SPECS_BY_NAME, DEFAULT_AGENT_SPECS
 from app.agents.shared.prompt_catalog import get_prompt_entry, list_prompt_lifecycle_workflows, list_prompt_workflows, load_catalog_prompt
+from app.agents.shared.prompt_node_contracts import get_prompt_node_contract
 from app.core.config import LLMProviderResolver, get_settings
 from app.core.ids import generate_id
 from app.core.json import dumps, loads
@@ -830,7 +831,52 @@ class StudioService:
         entities = self._upsert_creation_entities(db, project_id, worldview, world_rules)
         facts = self._upsert_creation_world_facts(db, project_id, project_bible, world_rules, worldview)
         db.flush()
-        self._link_creation_graph(db, project_id, character, entities, facts, worldview)
+        creation_graph_edges = self._link_creation_graph(db, project_id, character, entities, facts, worldview)
+        db.flush()
+        canon_change_reason = request.user_note or "解耦创作 Star 确认入库"
+        self._sync_canon_ref(
+            db,
+            project_id,
+            "character",
+            character,
+            source_job_id=job.id,
+            source_agent="canon_curator",
+            change_reason=canon_change_reason,
+            confidence=0.95,
+        )
+        for entity in entities:
+            self._sync_canon_ref(
+                db,
+                project_id,
+                "entity",
+                entity,
+                source_job_id=job.id,
+                source_agent="canon_curator",
+                change_reason=canon_change_reason,
+                confidence=0.92,
+            )
+        for fact in facts:
+            self._sync_canon_ref(
+                db,
+                project_id,
+                "world_fact",
+                fact,
+                source_job_id=job.id,
+                source_agent="canon_curator",
+                change_reason=canon_change_reason,
+                confidence=0.9,
+            )
+        for edge in {edge.id: edge for edge in creation_graph_edges}.values():
+            self._sync_canon_ref(
+                db,
+                project_id,
+                "graph_edge",
+                edge,
+                source_job_id=job.id,
+                source_agent="canon_curator",
+                change_reason=canon_change_reason,
+                confidence=edge.confidence,
+            )
         output = {
             "project_seed": seed,
             "core_conflict_system": state.get("core_conflict_system", {}),
@@ -1397,11 +1443,16 @@ class StudioService:
         return {"configs": [self._serialize_agent_model_config(row) for row in self._agent_model_config_rows(db)]}
 
     def update_agent_model_config(self, db: Session, request: AgentModelConfigRequest) -> dict:
-        if request.agent_name not in AGENT_SPECS_BY_NAME:
-            raise _not_found("Agent 不存在")
-        workflow_ids = {workflow["id"] for workflow in self.list_workflows()["workflows"]}
-        if request.workflow_id not in workflow_ids:
+        workflow = next((workflow for workflow in self.list_workflows()["workflows"] if workflow["id"] == request.workflow_id), None)
+        if workflow is None:
             raise _not_found("工作流不存在")
+        configurable_agents = {
+            node.get("agent_name")
+            for node in workflow.get("nodes", [])
+            if node.get("agent_name") and node.get("configurable", True)
+        }
+        if request.agent_name not in AGENT_SPECS_BY_NAME and request.agent_name not in configurable_agents:
+            raise _not_found("Agent 不存在")
         provider_config = LLMProviderResolver(get_settings()).resolve(request.model)
         model_to_store = request.model if ":" in request.model else provider_config.model
         row = (
@@ -1548,7 +1599,7 @@ class StudioService:
         nodes: list[dict[str, Any]] = []
         for node in workflow.get("nodes", []):
             agent_name = node.get("agent_name")
-            row = configs.get((workflow_id, agent_name)) if agent_name else None
+            row = configs.get((workflow_id, agent_name)) if agent_name and node.get("configurable", True) else None
             if row:
                 nodes.append({**node, "provider": row.provider, "model": row.model, "model_config_id": row.id})
             else:
@@ -1564,11 +1615,59 @@ class StudioService:
                 "id": node_id,
                 "label": label,
                 "type": "agent",
+                "node_subtype": "formal_agent",
                 "agent_name": agent_name,
                 "description": agent_descriptions.get(agent_name, label),
                 "inputs": inputs,
                 "outputs": outputs,
                 "editable": True,
+                "configurable": True,
+                "node_runtime_status": "configurable_agent",
+                "runtime_note": "正式 11-Agent 角色，可编辑提示词并设置模型覆盖。",
+                "layer": layer,
+            }
+
+        def prompt_task_node(node_id: str, label: str, prompt_id: str, inputs: list[str], outputs: list[str], layer: int) -> dict[str, Any]:
+            entry = get_prompt_entry(prompt_id)
+            contract = get_prompt_node_contract(prompt_id)
+            return {
+                "id": node_id,
+                "label": label,
+                "type": "prompt",
+                "node_subtype": contract.node_subtype,
+                "agent_name": entry.prompt_id,
+                "default_agent_name": entry.default_agent,
+                "description": contract.description,
+                "inputs": inputs,
+                "outputs": outputs,
+                "required_inputs": list(contract.required_inputs),
+                "optional_inputs": list(contract.optional_inputs),
+                "produces": list(contract.produces),
+                "input_schema": contract.input_json_schema(),
+                "output_schema": contract.output_json_schema(),
+                "editable": True,
+                "configurable": True,
+                "node_runtime_status": "prompt_task",
+                "runtime_note": f"运行名 {entry.prompt_id}，通过正式 Agent {agent_descriptions.get(entry.default_agent, entry.default_agent)} 调用提示词 {prompt_id}。",
+                "prompt_id": entry.prompt_id,
+                "prompt_filename": entry.filename,
+                "layer": layer,
+            }
+
+        def runtime_agent_node(node_id: str, label: str, agent_name: str, description: str, inputs: list[str], outputs: list[str], layer: int) -> dict[str, Any]:
+            return {
+                "id": node_id,
+                "label": label,
+                "type": "agent",
+                "node_subtype": "runtime_agent",
+                "agent_name": agent_name,
+                "description": description,
+                "inputs": inputs,
+                "outputs": outputs,
+                "editable": False,
+                "configurable": False,
+                "node_runtime_status": "active_runtime",
+                "runtime_note": "后端运行时内部 Agent，真实参与工作流，但不走 /api/agents 的提示词编辑入口。",
                 "layer": layer,
             }
 
@@ -1582,6 +1681,9 @@ class StudioService:
                 "inputs": inputs,
                 "outputs": outputs,
                 "editable": True,
+                "configurable": False,
+                "node_runtime_status": "control",
+                "runtime_note": "后端工作流控制节点，不是可编辑 Agent。",
                 "layer": layer,
             }
 
@@ -1599,7 +1701,7 @@ class StudioService:
                         ["creation_session", "basic_info"],
                         0,
                     ),
-                    agent_node(
+                    prompt_task_node(
                         "worldview_cards",
                         "2 世界观抽卡",
                         "creation_worldview_draw",
@@ -1607,7 +1709,7 @@ class StudioService:
                         ["worldview_candidates", "prompt_snapshot"],
                         1,
                     ),
-                    agent_node(
+                    prompt_task_node(
                         "protagonist_cards",
                         "3 主角人设",
                         "creation_protagonist_draw",
@@ -1615,7 +1717,7 @@ class StudioService:
                         ["protagonist_candidates", "prompt_snapshot"],
                         2,
                     ),
-                    agent_node(
+                    prompt_task_node(
                         "market_position",
                         "4 书名与包装",
                         "creation_title_packaging",
@@ -1692,11 +1794,11 @@ class StudioService:
                 "label": "大纲议事引擎",
                 "nodes": [
                     control_node("debate_session", "议事会话", "创建三阶段大纲议事会话，保存每个阶段的 turns、decisions、artifacts 和 outline_topology。", ["project_id", "brief"], ["outline_debate_session"], 0),
-                    agent_node("debate_book", "讨论总纲", "outline_debate/StoryDirectorAgent", ["outline_debate_session", "project", "canon_context"], ["book_outline_candidate", "book_decisions"], 1),
-                    agent_node("debate_volumes", "逐卷讨论卷纲", "outline_debate/StructureDoctorAgent", ["book_outline_candidate", "target_volume_no", "rhythm_constraints"], ["volume_outline_candidate", "volume_decisions", "volume_canon_version"], 2),
-                    agent_node("debate_chapters", "逐章讨论章纲", "outline_debate/ContinuityAuditorAgent", ["volume_outline_candidate", "target_chapter_no"], ["chapter_outline_candidate", "chapter_decisions", "chapter_canon_version"], 3),
-                    agent_node("debate_character_generator", "大纲角色候选", "outline_debate/CharacterGeneratorAgent", ["phase_gap", "existing_characters"], ["character_candidate"], 4),
-                    agent_node("debate_setting_generator", "大纲设定候选", "outline_debate/SettingGeneratorAgent", ["phase_gap", "existing_settings"], ["setting_candidate"], 4),
+                    runtime_agent_node("debate_book", "讨论总纲", "outline_debate/StoryDirectorAgent", "主持总策划 Agent：主持总纲阶段，锁定作品承诺、主线冲突、长线伏笔和终局方向。", ["outline_debate_session", "project", "canon_context"], ["book_outline_candidate", "book_decisions"], 1),
+                    runtime_agent_node("debate_volumes", "逐卷讨论卷纲", "outline_debate/StructureDoctorAgent", "结构医生 Agent：逐卷选择节奏模型，检查阶段目标、因果递进和卷末钩子。", ["book_outline_candidate", "target_volume_no", "rhythm_constraints"], ["volume_outline_candidate", "volume_decisions", "volume_canon_version"], 2),
+                    runtime_agent_node("debate_chapters", "逐章讨论章纲", "outline_debate/ContinuityAuditorAgent", "连续性审计 Agent：逐章检查危机、高潮、结果、伏笔和正典风险。", ["volume_outline_candidate", "target_chapter_no"], ["chapter_outline_candidate", "chapter_decisions", "chapter_canon_version"], 3),
+                    runtime_agent_node("debate_character_generator", "大纲角色生成", "outline_debate/CharacterGeneratorAgent", "角色生成 Agent：只在大纲缺口需要时生成角色，并在确认后物化为正式角色正典。", ["phase_gap", "existing_characters"], ["character_candidate"], 4),
+                    runtime_agent_node("debate_setting_generator", "大纲设定生成", "outline_debate/SettingGeneratorAgent", "设定生成 Agent：只在大纲缺口需要时生成地点、组织、规则或物件，并在确认后物化为正式设定。", ["phase_gap", "existing_settings"], ["setting_candidate"], 4),
                     control_node("debate_user_confirm", "逐项确认", "总纲按阶段确认；卷纲与章纲按 item_key 确认，确认后写入对应大纲记录，并把角色/设定候选同步物化为正式正典与版本。", ["phase_artifacts", "item_key"], ["approved_outline_candidates", "canon_versions", "canon_materializations"], 5),
                 ],
                 "edges": [
@@ -3984,6 +4086,10 @@ class StudioService:
         options = request.generation_options if isinstance(request.generation_options, dict) else {}
         return bool(options.get("fast_draft") or options.get("draft_mode") == "fast_draft")
 
+    def _batch_local_fast_draft_enabled(self, request: BatchGenerateRequest) -> bool:
+        options = request.generation_options if isinstance(request.generation_options, dict) else {}
+        return bool(options.get("local_fast_draft") or options.get("instant_local_draft") or options.get("draft_mode") in {"local_fast_draft", "instant_local_draft"})
+
     def _clean_fast_draft_text(self, text: str, chapter_no: int) -> str:
         cleaned = str(text or "").strip()
         cleaned = re.sub(r"^```(?:markdown|text)?", "", cleaned).strip()
@@ -4150,54 +4256,62 @@ class StudioService:
         db.commit()
         db.refresh(child_job)
 
-        system_prompt = (
-            "你是长篇小说快速正文 Agent。请直接输出中文小说正文，不要输出解释、目录、Markdown 标题或大纲。"
-            "必须遵守正典、章纲、视角和风格；正文要有完整场景推进、对话、行动、危机、高潮和结果。"
-        )
         target_min_words, target_max_words = self._fast_draft_length_band(chapter_max_words)
-        user_payload = {
-            "project": serialize_project(project),
-            "chapter": serialize_chapter(chapter),
-            "canon_context": canon_context,
-            "previous_summaries": previous_summaries,
-            "target_words": chapter_max_words,
-            "target_word_min": target_min_words,
-            "target_word_max": target_max_words,
-            "instruction": (
-                f"生成第{chapter.chapter_no}章《{chapter.title}》完整正文，正文长度控制在 {target_min_words}-{target_max_words} 个中文字符之间，"
-                f"接近 {chapter_max_words} 字，不要超过 {target_max_words} 字，并在自然句子边界收束。"
-                "保持悬疑、制度压迫和规则漏洞爽点。只输出正文。"
-            ),
-        }
-        result = llm_client.generate(system_prompt, dumps(user_payload), request.model)
-        text = self._clean_fast_draft_text(result.content, chapter.chapter_no)
-        raw_word_count = self._fast_draft_text_length(text)
-        used_remote = bool(result.used_remote_model)
-        model_name = result.model
-        provider_name = result.provider
-        expansion_count = 0
-        while self._fast_draft_text_length(text) < target_min_words and expansion_count < 2:
-            current_words = self._fast_draft_text_length(text)
-            remaining_min = max(1, target_min_words - current_words)
-            remaining_max = max(remaining_min, target_max_words - current_words)
-            expand_payload = {
-                **user_payload,
-                "existing_text": text,
-                "current_words": current_words,
-                "remaining_word_min": remaining_min,
-                "remaining_word_max": remaining_max,
+        if self._batch_local_fast_draft_enabled(request):
+            text = self._local_fast_draft_text(project, chapter, previous_summaries, target_min_words, target_max_words)
+            raw_word_count = self._fast_draft_text_length(text)
+            used_remote = False
+            model_name = "local_fast_draft"
+            provider_name = "local"
+            expansion_count = 0
+        else:
+            system_prompt = (
+                "你是长篇小说快速正文 Agent。请直接输出中文小说正文，不要输出解释、目录、Markdown 标题或大纲。"
+                "必须遵守正典、章纲、视角和风格；正文要有完整场景推进、对话、行动、危机、高潮和结果。"
+            )
+            user_payload = {
+                "project": serialize_project(project),
+                "chapter": serialize_chapter(chapter),
+                "canon_context": canon_context,
+                "previous_summaries": previous_summaries,
+                "target_words": chapter_max_words,
+                "target_word_min": target_min_words,
+                "target_word_max": target_max_words,
                 "instruction": (
-                    f"在不重复原文的前提下续写第{chapter.chapter_no}章，只补足 {remaining_min}-{remaining_max} 个中文字符。"
-                    f"合并后总长度必须控制在 {target_min_words}-{target_max_words} 字之间，并在自然句子边界收束。只输出可直接续接的正文段落。"
+                    f"生成第{chapter.chapter_no}章《{chapter.title}》完整正文，正文长度控制在 {target_min_words}-{target_max_words} 个中文字符之间，"
+                    f"接近 {chapter_max_words} 字，不要超过 {target_max_words} 字，并在自然句子边界收束。"
+                    "保持悬疑、制度压迫和规则漏洞爽点。只输出正文。"
                 ),
             }
-            expansion = llm_client.generate(system_prompt, dumps(expand_payload), request.model)
-            text = (text.rstrip() + "\n\n" + self._clean_fast_draft_text(expansion.content, chapter.chapter_no)).strip()
+            result = llm_client.generate(system_prompt, dumps(user_payload), request.model)
+            text = self._clean_fast_draft_text(result.content, chapter.chapter_no)
             raw_word_count = self._fast_draft_text_length(text)
-            used_remote = bool(result.used_remote_model or expansion.used_remote_model)
-            model_name = expansion.model or result.model
-            provider_name = expansion.provider or result.provider
-            expansion_count += 1
+            used_remote = bool(result.used_remote_model)
+            model_name = result.model
+            provider_name = result.provider
+            expansion_count = 0
+            while self._fast_draft_text_length(text) < target_min_words and expansion_count < 2:
+                current_words = self._fast_draft_text_length(text)
+                remaining_min = max(1, target_min_words - current_words)
+                remaining_max = max(remaining_min, target_max_words - current_words)
+                expand_payload = {
+                    **user_payload,
+                    "existing_text": text,
+                    "current_words": current_words,
+                    "remaining_word_min": remaining_min,
+                    "remaining_word_max": remaining_max,
+                    "instruction": (
+                        f"在不重复原文的前提下续写第{chapter.chapter_no}章，只补足 {remaining_min}-{remaining_max} 个中文字符。"
+                        f"合并后总长度必须控制在 {target_min_words}-{target_max_words} 字之间，并在自然句子边界收束。只输出可直接续接的正文段落。"
+                    ),
+                }
+                expansion = llm_client.generate(system_prompt, dumps(expand_payload), request.model)
+                text = (text.rstrip() + "\n\n" + self._clean_fast_draft_text(expansion.content, chapter.chapter_no)).strip()
+                raw_word_count = self._fast_draft_text_length(text)
+                used_remote = bool(result.used_remote_model or expansion.used_remote_model)
+                model_name = expansion.model or result.model
+                provider_name = expansion.provider or result.provider
+                expansion_count += 1
         text = self._trim_fast_draft_text_to_band(text, target_min_words, target_max_words)
 
         summary = f"第{chapter.chapter_no}章《{chapter.title}》完成快速正文，围绕{chapter.core_event or chapter.outline}推进。"
@@ -4260,6 +4374,50 @@ class StudioService:
         db.refresh(chapter)
         db.refresh(child_job)
         return {"job": serialize_job(child_job), "chapter": serialize_chapter(chapter)}
+
+    def _local_fast_draft_text(
+        self,
+        project: models.Project,
+        chapter: models.Chapter,
+        previous_summaries: list[dict[str, Any]],
+        target_min_words: int,
+        target_max_words: int,
+    ) -> str:
+        title = chapter.title or f"第{chapter.chapter_no}章"
+        premise = project.premise or project.initial_idea or project.title
+        outline = chapter.outline or chapter.core_event or "主角面对新的压力并作出选择。"
+        core_event = chapter.core_event or outline
+        conflict = chapter.conflict or "反对力量把压力落到具体行动上。"
+        crisis = chapter.crisis or "主角必须在退让与冒险之间作出不可逆选择。"
+        climax = chapter.climax or "主角执行选择，让局面产生可见变化。"
+        outcome = chapter.outcome or chapter.turn_point or chapter.summary or "局面改变，并留下下一章必须回应的问题。"
+        hook = chapter.cliffhanger or "新的问题在章末浮出水面。"
+        previous_tail = "；".join(str(item.get("summary") or item.get("title") or "") for item in previous_summaries[-2:] if isinstance(item, dict))
+        viewpoint = chapter.pov_character or "林小满"
+        beat_templates = [
+            f"{viewpoint}站在这一章的开端时，最先感到的不是胜算，而是从四面八方压下来的荒诞感。{premise}这件事仍像一根细刺，扎在她的判断里。{previous_tail or '前面的余波还没有散去'}，她知道自己不能再把所有问题都当成玩笑。",
+            f"眼前的麻烦很快变得具体。{core_event}周围人的目光、规矩的缝隙、资源的短缺和关系里的试探一起逼近。她习惯用一句不合时宜的俏皮话把气氛打歪，可这一次，笑声刚冒头，就被更重的沉默压了回去。",
+            f"{conflict}这不是单纯的阻拦，而像一张写满条款的网。每一条都在提醒她：接地气的创意可以让她看见路，也会让她暴露位置。宋小鱼若在旁边，必定会先翻白眼，再伸手替她挡住最危险的一下；若不在旁边，那份空缺反而让她更清楚自己必须独自扛住这一段。",
+            f"她试着拆解局面，把荒唐拆成可执行的小步。第一步是确认规则，第二步是找到规则没写清的角落，第三步则是把一句看似不体面的念头塞进那个角落。她越想越觉得好笑，也越想越害怕，因为好笑意味着可能成功，害怕意味着成功之后一定有人追来。",
+            f"危机真正到来时，没有锣鼓，也没有谁郑重宣布。{crisis}她忽然明白，所谓选择从来不是挑一条轻松的路，而是在两种代价里承认自己更愿意承担哪一种。她能退，可退回去以后，之前所有灵感、所有欠下的人情、所有已经被点亮的希望都会一起熄灭。",
+            f"于是她行动了。{climax}那一瞬间，空气像被一句冷笑话切开，紧绷的规则出现细小的裂纹。她没有把自己伪装成庄重的天才，也没有假装懂那些高高在上的术语，只是把最接近生活的念头推到前面，让它替自己撞门。",
+            f"撞门的声音比预想中更响。有人错愕，有人恼怒，也有人忍不住笑出声。笑声一旦出现，局面就不再只属于审查和禁令。{outcome}她看见压力换了一种形状，从看不见的威胁变成了必须立刻处理的后果。",
+            f"代价随后抵达。灵感的余波像涟漪一样散开，熟悉的危险感贴着脊背往上爬。她知道某些人会记录这次异常，某些规则会因此收紧，某些关系会被迫站队。但她也第一次如此确定：只要还有人能从荒诞里获得一点勇气，这条路就不算白走。",
+            f"章末，{hook}她没有立刻庆祝，只把那句差点脱口而出的玩笑咽回去，换成一次更谨慎的呼吸。远处似乎有新的目光落下，近处也有未解决的债等着清算。她朝前走了一步，知道下一步不会更轻松，却已经没有回头的理由。",
+        ]
+        paragraphs: list[str] = []
+        index = 0
+        while self._fast_draft_text_length("\n\n".join(paragraphs)) < target_min_words:
+            base = beat_templates[index % len(beat_templates)]
+            cycle = index // len(beat_templates)
+            if cycle:
+                base = (
+                    f"事情又向前推了一层。第{chapter.chapter_no}章的压力没有因为一次行动就消失，反而把更多细节逼到台前。"
+                    f"{base}"
+                )
+            paragraphs.append(base)
+            index += 1
+        return self._trim_fast_draft_text_to_band("\n\n".join(paragraphs), target_min_words, target_max_words)
 
     def _run_batch_generate_job(self, job_id: str) -> None:
         with SessionLocal() as db:
@@ -6481,34 +6639,40 @@ class StudioService:
         entities: list[models.StoryEntity],
         facts: list[models.WorldFact],
         worldview: dict[str, Any],
-    ) -> None:
+    ) -> list[models.GraphEdge]:
         character_node = self._ensure_graph_node(db, project_id, "character", character.id, character.name, character.importance_level, character.importance_score)
+        edges: list[models.GraphEdge] = []
         for entity in entities:
             entity_node = self._ensure_graph_node(db, project_id, "entity", entity.id, entity.name, entity.importance_level, entity.importance_score)
-            self._ensure_graph_edge(
-                db,
-                project_id,
-                character_node.id,
-                entity_node.id,
-                "creation_star_related",
-                "创作 Star 关联",
-                82,
-                confidence=0.9,
-                evidence=str(worldview.get("title", "")),
+            edges.append(
+                self._ensure_graph_edge(
+                    db,
+                    project_id,
+                    character_node.id,
+                    entity_node.id,
+                    "creation_star_related",
+                    "创作 Star 关联",
+                    82,
+                    confidence=0.9,
+                    evidence=str(worldview.get("title", "")),
+                )
             )
         for fact in facts[:4]:
             fact_node = self._ensure_graph_node(db, project_id, "world_fact", fact.id, fact.title, fact.importance_level, fact.importance_score)
-            self._ensure_graph_edge(
-                db,
-                project_id,
-                character_node.id,
-                fact_node.id,
-                "driven_by",
-                "驱动主线",
-                88,
-                confidence=0.9,
-                evidence=fact.content,
+            edges.append(
+                self._ensure_graph_edge(
+                    db,
+                    project_id,
+                    character_node.id,
+                    fact_node.id,
+                    "driven_by",
+                    "驱动主线",
+                    88,
+                    confidence=0.9,
+                    evidence=fact.content,
+                )
             )
+        return edges
 
     def _as_str_list(self, value: Any) -> list[str]:
         if value is None:
@@ -6683,16 +6847,26 @@ class StudioService:
             )
         for label, key in [
             ("核心目标", "core_goal"),
+            ("主线冲突", "main_conflict"),
             ("主线", "main_track"),
             ("暗线", "hidden_track"),
             ("人物线", "character_track"),
             ("世界揭示", "world_reveal"),
             ("阻力压力", "opposition_pressure"),
             ("主角变化", "protagonist_change"),
+            ("人物弧光", "character_arc"),
         ]:
             value = item.get(key)
             if value:
                 lines.append(f"{label}：{value if isinstance(value, str) else dumps(value)}")
+        for label, key in [
+            ("设定揭示计划", "setting_reveal_plan"),
+            ("伏笔计划", "foreshadowing_plan"),
+        ]:
+            value = item.get(key)
+            if isinstance(value, list) and value:
+                lines.append(f"{label}：")
+                lines.extend(f"- {entry}" for entry in value)
         phases = item.get("phases")
         if isinstance(phases, list) and phases:
             lines.append("阶段设计：")
@@ -6704,8 +6878,8 @@ class StudioService:
                 if isinstance(events, list):
                     for event in events[:5]:
                         lines.append(f"  - {event}")
-        if item.get("volume_hook"):
-            lines.append(f"卷末钩子：{item['volume_hook']}")
+        if item.get("ending_hook") or item.get("volume_hook"):
+            lines.append(f"卷末钩子：{item.get('ending_hook') or item.get('volume_hook')}")
         if item.get("risks"):
             lines.append(f"风险：{', '.join([str(risk) for risk in item['risks']])}")
         return "\n".join([line for line in lines if line.strip()])
@@ -6715,11 +6889,14 @@ class StudioService:
         volume_no = int(item.get("volume_no") or 1)
         chapter_hook = str(item.get("chapter_hook") or item.get("cliffhanger") or item.get("hook") or "")
         outcome = str(item.get("outcome") or item.get("result") or "")
+        outline = str(item.get("outline") or item.get("outline_body") or item.get("story_function") or "")
+        if "\n" not in outline and any(item.get(key) for key in ("core_event", "conflict", "crisis", "climax", "result", "state_change", "foreshadowing_use", "source_window")):
+            outline = self._format_dynamic_chapter_outline_text(item, outcome, chapter_hook)
         return {
             "chapter_no": chapter_no,
             "volume_no": volume_no,
             "title": str(item.get("title") or f"第{chapter_no}章"),
-            "outline": str(item.get("outline") or item.get("story_function") or ""),
+            "outline": outline,
             "pov_character": str(item.get("pov_character") or ""),
             "core_event": str(item.get("core_event") or item.get("action") or ""),
             "conflict": str(item.get("conflict") or item.get("opposition_force") or ""),
@@ -6737,6 +6914,36 @@ class StudioService:
             "continuity_risks": item.get("continuity_risks") if isinstance(item.get("continuity_risks"), list) else [],
             "word_target": int(item.get("word_target") or project.chapter_word_target),
         }
+
+    def _format_dynamic_chapter_outline_text(self, item: dict[str, Any], outcome: str, chapter_hook: str) -> str:
+        def as_text(value: Any) -> str:
+            if value in (None, "", [], {}):
+                return ""
+            if isinstance(value, str):
+                return value
+            return dumps(value)
+
+        source_window = item.get("source_window")
+        if isinstance(item.get("source_window_detail"), dict):
+            detail = item["source_window_detail"]
+            source_window = source_window or detail.get("window_range") or detail.get("window_no")
+        lines = [
+            f"章节定位：第{item.get('volume_no', '')}卷第{item.get('chapter_no', '')}章，来源窗口：{source_window or '未标明'}",
+            f"标题：{item.get('title', '')}",
+            f"核心事件：{item.get('core_event', '')}",
+            f"冲突设计：{item.get('conflict', '')}",
+            f"危机选择：{item.get('crisis', '')}",
+            f"高潮执行：{item.get('climax', '')}",
+            f"结果后果：{outcome}",
+            f"状态变化：{as_text(item.get('state_change'))}",
+            f"伏笔用途：{as_text(item.get('foreshadowing_use'))}",
+            f"读者承诺：{item.get('reader_promise', '')}",
+            f"连续性风险：{item.get('continuity_risk', '')}",
+            f"章末钩子：{chapter_hook}",
+        ]
+        if item.get("milestone_function"):
+            lines.insert(2, f"阶段功能：{item['milestone_function']}")
+        return "\n".join(line for line in lines if str(line).strip() and not str(line).endswith("："))
 
     def _chapter_outline_canon_payload(self, item: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
         raw_updates = item.get("canon_updates") if isinstance(item.get("canon_updates"), list) else []

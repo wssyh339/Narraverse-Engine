@@ -392,6 +392,7 @@ export interface OutlineDebatePhaseRun {
   result: Record<string, unknown>;
   last_confirmed_item_key?: string;
   last_canon_update?: Record<string, unknown>;
+  last_canon_updates?: Record<string, unknown>[];
   next_agent_name?: string;
 }
 
@@ -540,11 +541,12 @@ export const studioApi = {
     unwrap<{ session: OutlineDebateSession; phase_run: OutlineDebatePhaseRun; job: GenerationJob }>(
       api.post(`/projects/${projectId}/outline/debate/sessions/${sessionId}/${phase}/run`, payload),
     ),
-  confirmOutlineDebatePhase: (projectId: string, sessionId: string, phase: OutlineDebatePhase, payload: { notes?: string; item_key?: string } = {}) =>
+  confirmOutlineDebatePhase: (projectId: string, sessionId: string, phase: OutlineDebatePhase, payload: { notes?: string; item_key?: string; confirm_all?: boolean } = {}) =>
     unwrap<{
       session: OutlineDebateSession;
       phase_run: OutlineDebatePhaseRun;
       canon_update?: Record<string, unknown>;
+      canon_updates?: Record<string, unknown>[];
       book_commit?: { project: Project; story_bible: StoryBible; volumes: Volume[]; outline_plan: Record<string, unknown> };
       job: GenerationJob;
     }>(
@@ -831,8 +833,10 @@ export const studioApi = {
     unwrap<{ diff: string[]; left: VersionSnapshot; right: VersionSnapshot }>(api.post("/versions/compare", { left_version_id, right_version_id })),
   rollbackVersion: (versionId: string, user_note = "") =>
     unwrap<{ version: VersionSnapshot; rolled_back: boolean }>(api.post(`/versions/${versionId}/rollback`, { user_note })),
-  batchGenerate: (project_id: string, chapter_start: number, chapter_end: number) =>
-    unwrap<{ job: GenerationJob; chapters: Chapter[] }>(api.post("/write/batch-generate", { project_id, chapter_start, chapter_end })),
+  batchGenerate: (project_id: string, chapter_start: number, chapter_end: number, generation_options: Record<string, unknown> = {}) =>
+    unwrap<{ job: GenerationJob; chapters: Chapter[] }>(
+      api.post("/write/batch-generate", { project_id, chapter_start, chapter_end, generation_options }),
+    ),
   pauseJob: (job_id: string, reason = "") =>
     unwrap<{ job: GenerationJob }>(api.post("/write/pause", { job_id, reason })),
   resumeJob: (job_id: string, reason = "") =>

@@ -61,7 +61,7 @@
 - `LLM_PROVIDER=ollama`
 - 通用 OpenAI 兼容 `LLM_BASE_URL` + `LLM_API_KEY`
 
-Agent 配置中心允许为每个可视化工作流中的每个 Agent 保存显式模型覆盖。解析优先级为：请求体 `model` → `agent_model_configs` 中的 `workflow_id + agent_name` 覆盖 → Provider 专属默认模型 → `LLM_MODEL`。该能力只做人工显式配置，不做多模型自动路由优化。
+Agent 配置中心允许为每个可视化工作流中的每个可配置运行节点保存显式模型覆盖。解析优先级为：请求体 `model` → `agent_model_configs` 中的 `workflow_id + agent_name` 覆盖 → Provider 专属默认模型 → `LLM_MODEL`。其中 `agent_name` 对 11 个正式 Agent 使用正式角色名；对创作 Star 的独立 Prompt 任务使用运行名 `creation_worldview_draw`、`creation_protagonist_draw`、`creation_title_packaging`。该能力只做人工显式配置，不做多模型自动路由优化。
 
 API Key 只能来自环境变量。缺少 API Key 时，工作流允许本地降级生成可验证草案，但必须在配置和模型调用结果中标明未调用远程模型。真实 API 验收必须设置 `LLM_REQUIRE_REMOTE=true`，此时缺少 API Key 或远程调用失败不得本地降级。
 
@@ -200,7 +200,7 @@ MVP 阶段已有表继续保留；1.0 通过运行时 SQLite 轻量迁移补齐�
 重构原则：
 
 - 提示词是可复用模板，Agent 是角色职责，Workflow 决定调用顺序；不得把 `00`-`31` 正式提示词库或 `32`/`33`/`34` 创作 Star 专用补充提示词机械扩展为独立正式 Agent。
-- `creation_star` 不得默认绑定 `core_conflict_system` 与 `novel_constitution`；世界观抽卡必须单独调用 `creation_worldview_draw`，主角人设抽卡必须单独调用 `creation_protagonist_draw`，书名与包装抽卡必须单独调用 `creation_title_packaging`，并记录专用 Agent 运行名，便于 Agent 栏追踪实际应用。
+- `creation_star` 不得默认绑定 `core_conflict_system` 与 `novel_constitution`；世界观抽卡必须单独调用 `creation_worldview_draw`，主角人设抽卡必须单独调用 `creation_protagonist_draw`，书名与包装抽卡必须单独调用 `creation_title_packaging`，并记录专用 Agent 运行名，便于 Agent 栏追踪实际应用。三个运行名不是新增正式 Agent，但必须在 `/api/workflows` 中作为独立可配置节点展示，并可分别保存模型覆盖。
 - 保留 0.4 中的 11 个正式 Agent 作为对外稳定角色；新增“核心矛盾、小说宪法、章节卡、叙事账本、结构体检”等能力优先实现为 workflow node 或 prompt task。
 - 后端必须提供统一 Prompt Catalog，记录 `prompt_id`、文件名、所属工作流、默认 Agent 和标题。
 - `/api/workflows` 必须同时保留既有工作流结构，并新增“立项与小说宪法、全书与分卷规划、单章生产闭环、连载维护与体检、专项增强”五条提示词驱动工作流。
@@ -369,6 +369,7 @@ LangSmith 是可选观测与 Prompt/Eval 管理层：
 
 - Deep Agent 当前模式、是否允许写入、会话列表、待审批工具调用。
 - LangSmith 配置状态、隐私模式、Prompt 同步策略和 job trace 链接。
+- 创作 Star 三个抽卡 Prompt 运行名 `creation_worldview_draw`、`creation_protagonist_draw`、`creation_title_packaging` 必须作为独立模型配置目标展示；提示词正文编辑仍只面向 11 个正式 Agent 或已支持的 Prompt 模板入口。
 - 任意会上传正文或完整提示词的操作必须显示隐私模式，并且只能由后端执行。
 
 文档版本：2026-06-14
@@ -406,13 +407,15 @@ LangSmith 是可选观测与 Prompt/Eval 管理层：
 
 本地开发和 Docker Compose 必须以项目根目录 `.env` 作为启动配置的单一来源。新增或修改启动参数时，必须同时更新 `.env.example`、README 和本节环境变量清单。
 
-- 本地后端官方启动入口为 `scripts/dev-backend.sh`，脚本读取 `.env` 后按 `BACKEND_HOST`、`BACKEND_PORT` 启动 `uvicorn --app-dir backend app.main:app`。
-- 本地前端官方启动入口为 `scripts/dev-frontend.sh`，脚本读取 `.env` 后启动 `pnpm dev`，前端 Vite 配置必须从根目录 `.env` 读取 `FRONTEND_HOST`、`FRONTEND_PORT` 和 `VITE_API_BASE_URL`。
+- 本地开发官方一键启动入口为 `scripts/dev.sh`，脚本负责同时启动后端和前端，并在退出时清理两个子进程。
+- 本地后端独立启动入口为 `scripts/dev-backend.sh`，脚本读取 `.env` 后按 `BACKEND_HOST`、`BACKEND_PORT` 启动 `uvicorn --app-dir backend app.main:app`。
+- 本地前端独立启动入口为 `scripts/dev-frontend.sh`，脚本读取 `.env` 后启动 `pnpm dev`，前端 Vite 配置必须从根目录 `.env` 读取 `FRONTEND_HOST`、`FRONTEND_PORT` 和 `VITE_API_BASE_URL`。
 - 默认本地 SQLite 路径统一为 `DATABASE_URL=sqlite:///./data/novel_agent.db`；`backend/data/` 仅保留历史测试库和手动指定路径，不再作为 README 默认启动路径。
 - 默认任务产物目录统一为 `JOB_ARTIFACT_DIR=artifacts/runs`。
 - 前端默认 API 地址统一为 `VITE_API_BASE_URL=http://localhost:8000/api`；不得在文档或脚本中重新默认到 `/api/v1`。
 - Docker Compose 可以映射宿主机端口，但不得无条件覆盖 `.env` 中的 `DATABASE_URL`、`JOB_ARTIFACT_DIR`、`FRONTEND_ORIGIN` 或 `VITE_API_BASE_URL`。
 - `VITE_*` 变量属于前端构建期配置；Docker 模式下修改后必须重新 build。
+- GitHub Actions 最小 CI 固定在 `.github/workflows/ci.yml`，至少运行 `backend/tests/test_core_apis.py`、`backend/tests/test_agent_prompt_runtime_contract.py`、`frontend/tests/agents-page-contract.test.mjs` 和 `frontend/tests/frontend-contract.test.mjs`。真实 20 万字验收脚本 `scripts/run_real_20w_4000_flow.py` 必须保留 `--stage smoke --smoke-chapter-count 3` 的轻量入口，用于前几章正文生成与设定审计，不得要求每次验证都跑完整 50 章。
 
 文档版本：2026-06-15
 
@@ -1433,6 +1436,13 @@ cp .env.example .env
 
 ```bash
 docker compose up qdrant
+```
+
+一键启动本地前后端：
+
+```bash
+cd /Users/mac/Documents/长篇小说撰写agent
+./scripts/dev.sh
 ```
 
 启动后端：

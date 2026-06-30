@@ -15,6 +15,7 @@ backend/.pytest_cache/
 outputs/
 output/
 logs/
+.logs/
 
 .env
 
