@@ -67,7 +67,7 @@ test("project studio exposes five connected creation workspaces", () => {
   assert.match(layout, /listLlmModels/);
   assert.match(layout, /LLM 未配置/);
   assert.match(layout, /configuration_warning/);
-  assert.match(agents, /activeWorkflow\.nodes\.map/);
+  assert.match(agents, /runtimeNodeList\.map/);
   assert.match(agents, /打开节点配置/);
 });
 
@@ -137,13 +137,35 @@ test("pages expose loading, empty, and error states", () => {
 test("deployment files document startup and expose required scripts", () => {
   const packageJson = JSON.parse(read("package.json"));
   const readme = readRoot("README.md");
+  const ciWorkflowUrl = new URL("../../.github/workflows/ci.yml", import.meta.url);
 
   for (const script of ["dev", "build", "start"]) {
     assert.equal(typeof packageJson.scripts?.[script], "string");
   }
+  assert.equal(existsSync(ciWorkflowUrl), true);
   assert.match(readme, /安装|install/i);
   assert.match(readme, /启动|start|dev/i);
   assert.match(readme, /核心能力|功能|feature/i);
+});
+
+test("minimal CI runs backend and frontend contract suites", () => {
+  const workflow = readRoot(".github/workflows/ci.yml");
+
+  assert.match(workflow, /test_core_apis\.py/);
+  assert.match(workflow, /test_agent_prompt_runtime_contract\.py/);
+  assert.match(workflow, /agents-page-contract\.test\.mjs/);
+  assert.match(workflow, /frontend-contract\.test\.mjs/);
+  assert.match(workflow, /pnpm@11\.5\.1/);
+});
+
+test("real flow exposes a lightweight smoke stage with settings audit", () => {
+  const flow = readRoot("scripts/run_real_20w_4000_flow.py");
+
+  assert.match(flow, /"smoke"/);
+  assert.match(flow, /run_smoke/);
+  assert.match(flow, /smoke_chapter_count/);
+  assert.match(flow, /settings_audit/);
+  assert.match(flow, /chapter_end=min\(50, smoke_chapter_count\)/);
 });
 
 test("local startup is driven by the root env file", () => {

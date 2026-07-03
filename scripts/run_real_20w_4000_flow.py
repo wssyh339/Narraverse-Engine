@@ -11,7 +11,7 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
-LOG_DIR = ROOT / "logs" / "real_20w_4000_flow"
+LOG_DIR = ROOT / "logs" / "real_xianxia_20w_4000_flow"
 CONTEXT_PATH = LOG_DIR / "run_context.json"
 JSONL_PATH = LOG_DIR / "flow.jsonl"
 MARKDOWN_PATH = LOG_DIR / "flow.md"
@@ -19,11 +19,11 @@ NOVEL_PATH = LOG_DIR / "final_novel.md"
 
 DEFAULT_BASIC_INFO: dict[str, Any] = {
     "channel": "男频",
-    "genre": "都市异能悬疑",
-    "subgenres": ["近未来都市", "规则悬疑", "制度反抗"],
-    "tags": ["记忆交易", "身份注销", "规则漏洞", "追债", "推理升级", "制度压迫"],
-    "manual_tags": ["记忆抵押", "城市账本", "追债审判", "反垄断规则"],
-    "target_reader": "喜欢都市异能、悬疑追查、规则漏洞爽点和长篇成长线的读者",
+    "genre": "仙侠",
+    "subgenres": ["东方玄幻", "宗门修行", "天道悬疑", "劫数推演"],
+    "tags": ["凡人流", "宗门权谋", "天劫谜案", "古法器", "因果债", "群像修行"],
+    "manual_tags": ["九霄灵脉", "问劫台", "命契残卷", "宗门审判", "天道账簿"],
+    "target_reader": "喜欢仙侠修行、宗门权谋、天道谜案、凡人逆命和长篇升级线的读者",
     "volume_count": 5,
     "chapter_count": 50,
     "planned_chapter_count": 50,
@@ -31,11 +31,11 @@ DEFAULT_BASIC_INFO: dict[str, Any] = {
     "chapter_word_target": 4000,
     "chapter_word_min": 4000,
     "chapter_word_max": 4000,
-    "style": "冷峻、紧张、强钩子、规则感，少解释，多让规则在行动和代价中显形。",
+    "style": "古意凝练、节奏紧张、强钩子、仙侠意象清晰，少堆设定，多让修行规则在行动、代价和因果中显形。",
     "initial_idea": (
-        "现代近未来城市中，记忆可以被抵押、交易和追债。主角是被注销身份的底层账本修复师，"
-        "意外发现整座城市的晋升制度靠篡改普通人的失败记忆运行。他必须在追债、逃亡和审判之间，"
-        "重建被抹掉的真相。"
+        "九霄界诸宗以天劫定品阶，凡人少年沈砚在问劫台替人抄录劫数残卷时，发现天劫并非天道公判，"
+        "而是上古宗门用因果债操控灵脉和飞升名额的审判系统。为救被错判为魔胎的师妹，他必须在宗门追杀、"
+        "古器反噬和天道债簿的层层逼迫中，查清九霄灵脉崩坏的真相。"
     ),
 }
 
@@ -43,7 +43,7 @@ FLOW_REQUIREMENT = (
     "目标规模：20万字，5卷，50章，每章4000字。每卷10章。"
     "大纲讨论必须按总纲、逐卷卷纲、逐章章纲推进；每确认一卷/一章都更新正典。"
     "每章必须区分危机、高潮、结果；伏笔、角色、设定新增需要在确认后入正式正典。"
-    "题材方向：近未来都市、记忆交易、制度压迫、身份注销、规则漏洞爽点、悬疑追查。"
+    "题材方向：仙侠、凡人逆命、宗门权谋、天劫悬疑、因果债、古法器、灵脉危机与修行升级。"
 )
 
 
@@ -106,7 +106,7 @@ def log_event(kind: str, payload: dict[str, Any]) -> None:
     record = {"ts": now_iso(), "kind": kind, **payload}
     with JSONL_PATH.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-    if kind in {"stage", "problem", "artifact", "job"}:
+    if kind in {"stage", "problem", "artifact", "job", "chapter", "settings_audit"}:
         with MARKDOWN_PATH.open("a", encoding="utf-8") as handle:
             handle.write(f"## {record['ts']} {kind}\n\n")
             handle.write("```json\n")
@@ -146,8 +146,8 @@ def require_project_id(client: FlowClient, context: dict[str, Any], project_id: 
         save_context(context)
         return str(context["project_id"])
     project_payload = {
-        "title": "20万字真实流程草稿",
-        "genre": "都市异能悬疑",
+        "title": "九霄问劫录",
+        "genre": "仙侠",
         "target_reader": DEFAULT_BASIC_INFO["target_reader"],
         "premise": DEFAULT_BASIC_INFO["initial_idea"],
         "style_guide": DEFAULT_BASIC_INFO["style"],
@@ -339,6 +339,84 @@ def poll_job(client: FlowClient, job_id: str, timeout_seconds: int = 21600, inte
         time.sleep(interval)
 
 
+def text_length(text: str) -> int:
+    return len(str(text or "").replace("\r", "").replace("\n", "").replace(" ", ""))
+
+
+def settings_audit(client: FlowClient, context: dict[str, Any], project_id: str, chapter_no: int) -> dict[str, Any]:
+    endpoints = {
+        "settings_tree": f"/projects/{project_id}/settings/tree",
+        "settings_health": f"/projects/{project_id}/settings/health",
+        "version_timeline": f"/projects/{project_id}/settings/version-timeline",
+        "creation_profile": f"/projects/{project_id}/creation/profile",
+        "characters": f"/projects/{project_id}/characters",
+        "entities": f"/projects/{project_id}/entities",
+        "world_facts": f"/projects/{project_id}/world-facts",
+        "graph": f"/projects/{project_id}/graph",
+        "foreshadowing": f"/projects/{project_id}/foreshadowing",
+        "pending_proposals": f"/projects/{project_id}/settings/proposals?status=pending",
+    }
+    raw: dict[str, Any] = {}
+    errors: dict[str, str] = {}
+    for name, path in endpoints.items():
+        try:
+            raw[name] = client.request("GET", path, timeout=180)
+        except Exception as exc:
+            errors[name] = str(exc)
+
+    tree_nodes = raw.get("settings_tree", {}).get("nodes", [])
+    health = raw.get("settings_tree", {}).get("health") or raw.get("settings_health", {}).get("health") or {}
+    timeline = raw.get("version_timeline", {})
+    timeline_chapters = timeline.get("chapters", []) if isinstance(timeline, dict) else []
+    chapter_events = []
+    for item in timeline_chapters:
+        chapter = item.get("chapter") if isinstance(item, dict) else {}
+        if isinstance(chapter, dict) and int(chapter.get("chapter_no") or 0) == chapter_no:
+            chapter_events = item.get("events") or []
+            break
+
+    graph = raw.get("graph", {}).get("graph", {})
+    proposals = raw.get("pending_proposals", {}).get("proposals", [])
+    summary = {
+        "chapter_no": chapter_no,
+        "checked_at": now_iso(),
+        "api_sections_checked": sorted(endpoints),
+        "api_errors": errors,
+        "node_count": len(tree_nodes) if isinstance(tree_nodes, list) else 0,
+        "official_count": health.get("official_count"),
+        "versioned_count": health.get("versioned_count"),
+        "version_coverage": health.get("version_coverage"),
+        "character_count": len(raw.get("characters", {}).get("characters", [])),
+        "entity_count": len(raw.get("entities", {}).get("entities", [])),
+        "world_fact_count": len(raw.get("world_facts", {}).get("world_facts", [])),
+        "graph_node_count": len(graph.get("nodes", [])) if isinstance(graph, dict) else 0,
+        "graph_edge_count": len(graph.get("edges", [])) if isinstance(graph, dict) else 0,
+        "foreshadowing_count": len(raw.get("foreshadowing", {}).get("foreshadowing_items", [])),
+        "pending_proposal_count": len(proposals) if isinstance(proposals, list) else 0,
+        "current_chapter_timeline_event_count": len(chapter_events) if isinstance(chapter_events, list) else 0,
+        "has_creation_profile": bool(raw.get("creation_profile")),
+        "has_explicit_version_info": bool(health.get("versioned_count") or chapter_events),
+    }
+    problems: list[str] = []
+    if errors:
+        problems.append("设定页相关 API 存在读取错误")
+    if not summary["node_count"]:
+        problems.append("设定文件树没有节点")
+    if not summary["has_explicit_version_info"]:
+        problems.append("未发现明确版本信息或章节轴事件")
+    if summary["character_count"] == 0:
+        problems.append("角色板块为空")
+    if summary["world_fact_count"] == 0:
+        problems.append("世界观事实板块为空")
+    summary["problems"] = problems
+    context.setdefault("settings_audits", {})[str(chapter_no)] = summary
+    save_context(context)
+    log_event("settings_audit", summary)
+    if problems:
+        log_event("problem", {"stage": "settings_audit", "chapter_no": chapter_no, "problems": problems})
+    return summary
+
+
 def confirmed_chapter_numbers(client: FlowClient, project_id: str, session_id: str) -> set[int]:
     data = client.request("GET", f"/projects/{project_id}/outline/debate/sessions/{session_id}", timeout=120)
     session = data["session"]
@@ -370,23 +448,33 @@ def contiguous_segments(numbers: list[int]) -> list[tuple[int, int]]:
     return segments
 
 
-def run_outline(client: FlowClient, context: dict[str, Any], project_id: str) -> None:
-    if context.get("outline_committed"):
+def run_outline(client: FlowClient, context: dict[str, Any], project_id: str, chapter_end: int = 50, smoke: bool = False) -> None:
+    chapter_end = min(50, max(1, int(chapter_end)))
+    target_volume_count = min(5, (chapter_end + 9) // 10)
+    key_prefix = "smoke_" if smoke else ""
+    session_key = f"{key_prefix}outline_session_id"
+    book_key = f"{key_prefix}book_confirmed"
+    volumes_key = f"{key_prefix}confirmed_volumes"
+    chapters_key = f"{key_prefix}chapters_confirmed"
+    commit_key = f"{key_prefix}outline_committed"
+    commit_summary_key = f"{key_prefix}outline_commit"
+    if context.get(commit_key):
         log_event("stage", {"stage": "outline", "status": "skipped", "reason": "already committed"})
         return
-    log_event("stage", {"stage": "outline", "status": "started", "project_id": project_id})
-    session_id = context.get("outline_session_id")
+    log_event("stage", {"stage": "outline", "status": "started", "project_id": project_id, "chapter_end": chapter_end, "smoke": smoke})
+    session_id = context.get(session_key)
     if not session_id:
+        brief = FLOW_REQUIREMENT if not smoke else f"{FLOW_REQUIREMENT} 轻量 smoke 只确认前{chapter_end}章，用于接口、正典和设定审计验收。"
         data = client.request(
             "POST",
             f"/projects/{project_id}/outline/debate/sessions",
-            {"idempotency_key": f"real-20w-outline:{project_id}", "brief": FLOW_REQUIREMENT},
+            {"idempotency_key": f"real-20w-outline:{project_id}:{key_prefix}{chapter_end}", "brief": brief},
         )
         session_id = data["session"]["id"]
-        context["outline_session_id"] = session_id
+        context[session_key] = session_id
         save_context(context)
 
-    if not context.get("book_confirmed"):
+    if not context.get(book_key):
         log_event("stage", {"stage": "outline_book", "status": "running", "max_agent_turns": 6})
         client.request("POST", f"/projects/{project_id}/outline/debate/sessions/{session_id}/book/run", outline_payload({"max_agent_turns": 6}))
         client.request(
@@ -394,11 +482,11 @@ def run_outline(client: FlowClient, context: dict[str, Any], project_id: str) ->
             f"/projects/{project_id}/outline/debate/sessions/{session_id}/book/confirm",
             {"notes": "确认总纲，并写入故事圣经与分卷壳。"},
         )
-        context["book_confirmed"] = True
+        context[book_key] = True
         save_context(context)
 
-    confirmed_volumes = set(int(item) for item in context.get("confirmed_volumes", []))
-    for volume_no in range(1, 6):
+    confirmed_volumes = set(int(item) for item in context.get(volumes_key, []))
+    for volume_no in range(1, target_volume_count + 1):
         if volume_no in confirmed_volumes:
             continue
         log_event("stage", {"stage": "outline_volume", "status": "running", "volume_no": volume_no, "max_agent_turns": 4})
@@ -413,13 +501,13 @@ def run_outline(client: FlowClient, context: dict[str, Any], project_id: str) ->
             {"item_key": f"volume:{volume_no}", "notes": f"确认第{volume_no}卷卷纲，并更新正典。"},
         )
         confirmed_volumes.add(volume_no)
-        context["confirmed_volumes"] = sorted(confirmed_volumes)
+        context[volumes_key] = sorted(confirmed_volumes)
         save_context(context)
 
-    if not context.get("chapters_confirmed"):
-        for volume_no in range(1, 6):
+    if not context.get(chapters_key):
+        for volume_no in range(1, target_volume_count + 1):
             volume_start = (volume_no - 1) * 10 + 1
-            volume_end = volume_no * 10
+            volume_end = min(volume_no * 10, chapter_end)
             while True:
                 confirmed = confirmed_chapter_numbers(client, project_id, session_id)
                 missing = [chapter_no for chapter_no in range(volume_start, volume_end + 1) if chapter_no not in confirmed]
@@ -455,69 +543,137 @@ def run_outline(client: FlowClient, context: dict[str, Any], project_id: str) ->
                         )
                 break
         confirmed = confirmed_chapter_numbers(client, project_id, session_id)
-        if len([chapter_no for chapter_no in range(1, 51) if chapter_no in confirmed]) < 50:
+        if len([chapter_no for chapter_no in range(1, chapter_end + 1) if chapter_no in confirmed]) < chapter_end:
             raise RuntimeError(f"章纲确认不完整：已确认 {sorted(confirmed)}")
-        context["chapters_confirmed"] = True
+        context[chapters_key] = True
         save_context(context)
 
     data = client.request(
         "POST",
         f"/projects/{project_id}/outline/debate/sessions/{session_id}/commit",
-        {"overwrite_existing_chapters": True, "notes": "确认 20万字 50章完整大纲并写入正式章节。"},
+        {
+            "overwrite_existing_chapters": True,
+            "notes": "确认 20万字 50章完整大纲并写入正式章节。"
+            if not smoke
+            else f"轻量 smoke 确认前{chapter_end}章章纲并写入正式章节。",
+        },
     )
-    context["outline_committed"] = True
-    context["outline_commit"] = {
+    context[commit_key] = True
+    context[commit_summary_key] = {
         "volume_count": len(data.get("book_commit", {}).get("volumes", [])),
         "chapter_count": len(data.get("chapter_commit", {}).get("chapters", [])),
+        "chapter_end": chapter_end,
+        "smoke": smoke,
     }
     save_context(context)
-    log_event("stage", {"stage": "outline", "status": "committed", "summary": context["outline_commit"]})
+    log_event("stage", {"stage": "outline", "status": "committed", "summary": context[commit_summary_key]})
 
 
-def run_draft(client: FlowClient, context: dict[str, Any], project_id: str) -> None:
-    if context.get("draft_committed"):
+def run_draft(client: FlowClient, context: dict[str, Any], project_id: str, chapter_start: int = 1, chapter_end: int = 50, smoke: bool = False) -> None:
+    draft_key = "smoke_draft_committed" if smoke else "draft_committed"
+    completed_key = "smoke_completed_chapters" if smoke else "completed_chapters"
+    chapter_jobs_key = "smoke_chapter_jobs" if smoke else "chapter_jobs"
+    if context.get(draft_key):
         log_event("stage", {"stage": "draft", "status": "skipped", "reason": "already completed"})
         return
-    log_event("stage", {"stage": "draft", "status": "started", "project_id": project_id})
-    existing_batch_job_id = context.get("batch_job_id")
-    if existing_batch_job_id:
-        existing_job = client.request("GET", f"/jobs/{existing_batch_job_id}", timeout=120)["job"]
-        if existing_job.get("status") in {"cancelled", "failed"}:
-            log_event("stage", {"stage": "draft", "status": "discard_old_batch_job", "job_id": existing_batch_job_id, "old_status": existing_job.get("status")})
-            context.pop("batch_job_id", None)
+    chapter_start = max(1, int(chapter_start))
+    chapter_end = min(50, int(chapter_end))
+    log_event("stage", {"stage": "draft", "status": "started", "project_id": project_id, "mode": "sequential_chapter_jobs", "chapter_start": chapter_start, "chapter_end": chapter_end})
+    chapters = client.request("GET", f"/projects/{project_id}/chapters", timeout=120).get("chapters", [])
+    chapter_by_no = {int(item.get("chapter_no") or 0): item for item in chapters if item.get("chapter_no")}
+    missing = [chapter_no for chapter_no in range(chapter_start, chapter_end + 1) if chapter_no not in chapter_by_no]
+    if missing:
+        raise RuntimeError(f"缺少章节，无法逐章生成：{missing}")
+
+    completed = set(int(item) for item in context.get(completed_key, []))
+    context.setdefault(chapter_jobs_key, {})
+    for chapter_no in range(chapter_start, chapter_end + 1):
+        chapter = chapter_by_no[chapter_no]
+        chapter_id = chapter["id"]
+        current_text = chapter.get("final_text") or chapter.get("draft_text") or ""
+        if chapter_no in completed and text_length(current_text) >= 3900:
+            settings_audit(client, context, project_id, chapter_no)
+            continue
+        retryable_failure_markers = ("最低字数", "未达到最低", "below")
+        job = None
+        job_id = ""
+        for attempt, target_words, max_words in ((1, 4000, 4050), (2, 4000, 4050), (3, 4000, 4050)):
+            instruction = (
+                f"请生成仙侠长篇小说第{chapter_no}章正文，目标约{target_words}字，最低不少于4000字，尽量控制在{max_words}字以内。"
+                "必须承接已确认章纲、小说宪法、前文摘要和正典上下文；必须包含本章危机、高潮、结果；"
+                "新增角色、法器、宗门、灵脉规则、伏笔和关系变化必须在章后正典候选中注明来源与置信度。"
+                "只写本章核心行动链的3到4个必要场景，禁止展开支线、回忆长段和额外设定说明；"
+                "请在达到4000字后立刻收束结尾，避免超过4200字；若接近结尾仍不足4000字，才补充必要的行动、感官细节和后果承担段落。"
+            )
+            idem = f"xianxia-20w-draft:{project_id}:{chapter_no}:v{attempt}"
+            data = client.request(
+                "POST",
+                f"/projects/{project_id}/chapters/{chapter_id}/draft",
+                {
+                    "user_instruction": instruction,
+                    "async_mode": True,
+                    "max_words": max_words,
+                    "idempotency_key": idem,
+                },
+                timeout=120,
+            )
+            job_id = data["job"]["id"]
+            context[chapter_jobs_key][str(chapter_no)] = job_id
             save_context(context)
-    if not context.get("batch_job_id"):
-        data = client.request(
-            "POST",
-            "/write/batch-generate",
-            {
-                "project_id": project_id,
-                "chapter_start": 1,
-                "chapter_end": 50,
-                "generation_options": {"fast_draft": True, "purpose": "20w_real_browser_flow"},
-            },
-            timeout=120,
-        )
-        context["batch_job_id"] = data["job"]["id"]
+            log_event(
+                "chapter",
+                {
+                    "chapter_no": chapter_no,
+                    "status": "queued",
+                    "job_id": job_id,
+                    "attempt": attempt,
+                    "target_words": target_words,
+                    "max_words": max_words,
+                },
+            )
+            job = poll_job(client, job_id, timeout_seconds=7200, interval=10)
+            if job.get("status") == "succeeded":
+                break
+            error_text = str(job.get("error") or "")
+            retryable = any(marker in error_text for marker in retryable_failure_markers)
+            log_event(
+                "problem",
+                {
+                    "stage": "draft",
+                    "chapter_no": chapter_no,
+                    "job_id": job_id,
+                    "attempt": attempt,
+                    "issue": "chapter_generation_failed",
+                    "retryable": retryable,
+                    "error": job.get("error"),
+                },
+            )
+            if not retryable or attempt == 3:
+                raise RuntimeError(f"第{chapter_no}章生成失败：{job}")
+        chapter = client.request("GET", f"/projects/{project_id}/chapters/{chapter_id}", timeout=120)["chapter"]
+        text = chapter.get("final_text") or chapter.get("draft_text") or ""
+        word_count = int(chapter.get("word_count") or text_length(text))
+        completed.add(chapter_no)
+        context[completed_key] = sorted(completed)
         save_context(context)
-    job = poll_job(client, context["batch_job_id"], timeout_seconds=43200, interval=20)
-    if job.get("status") != "succeeded":
-        progress = job.get("progress") if isinstance(job.get("progress"), dict) else {}
-        result = job.get("result") if isinstance(job.get("result"), dict) else {}
-        summary = {
-            "id": job.get("id"),
-            "status": job.get("status"),
-            "current_step": progress.get("current_step"),
-            "completed_chapters": progress.get("completed_chapters"),
-            "total_chapters": progress.get("total_chapters"),
-            "failed_chapters": result.get("failed_chapters") or [],
-            "last_completed_chapter_no": result.get("last_completed_chapter_no"),
-        }
-        raise RuntimeError(f"批量正文生成失败：{summary}")
-    context["draft_committed"] = True
-    context["batch_job"] = job
+        log_event(
+            "chapter",
+            {
+                "chapter_no": chapter_no,
+                "status": "completed",
+                "job_id": job_id,
+                "title": chapter.get("title"),
+                "word_count": word_count,
+                "text_length": text_length(text),
+            },
+        )
+        if text_length(text) < 4000:
+            log_event("problem", {"stage": "draft", "chapter_no": chapter_no, "issue": "chapter_below_4000_chars", "text_length": text_length(text)})
+        settings_audit(client, context, project_id, chapter_no)
+    if all(chapter_no in completed for chapter_no in range(chapter_start, chapter_end + 1)):
+        context[draft_key] = True
     save_context(context)
-    log_event("stage", {"stage": "draft", "status": "completed", "job_id": context["batch_job_id"]})
+    log_event("stage", {"stage": "draft", "status": "completed", "completed_chapters": sorted(completed)})
 
 
 def export_novel(client: FlowClient, context: dict[str, Any], project_id: str) -> None:
@@ -563,23 +719,48 @@ def export_novel(client: FlowClient, context: dict[str, Any], project_id: str) -
     log_event("artifact", {"type": "novel", "path": str(NOVEL_PATH), "summary": context["export_summary"]})
 
 
+def run_smoke(client: FlowClient, context: dict[str, Any], project_id: str, smoke_chapter_count: int = 3) -> None:
+    smoke_chapter_count = max(1, int(smoke_chapter_count))
+    log_event("stage", {"stage": "smoke", "status": "started", "chapter_count": min(50, smoke_chapter_count)})
+    run_creation(client, context, project_id)
+    run_outline(client, context, project_id, chapter_end=min(50, smoke_chapter_count), smoke=True)
+    run_draft(client, context, project_id, 1, chapter_end=min(50, smoke_chapter_count), smoke=True)
+    for chapter_no in range(1, min(50, smoke_chapter_count) + 1):
+        settings_audit(client, context, project_id, chapter_no)
+    context["smoke_committed"] = True
+    save_context(context)
+    log_event("stage", {"stage": "smoke", "status": "completed", "chapter_count": min(50, smoke_chapter_count)})
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--api-base", default="http://127.0.0.1:8015/api")
     parser.add_argument("--project-id", default="")
-    parser.add_argument("--stage", choices=["all", "creation", "outline", "draft", "export"], default="all")
+    parser.add_argument("--stage", choices=["all", "creation", "outline", "draft", "export", "smoke"], default="all")
+    parser.add_argument("--fresh", action="store_true", help="ignore and archive existing run context before starting")
+    parser.add_argument("--chapter-start", type=int, default=1)
+    parser.add_argument("--chapter-end", type=int, default=50)
+    parser.add_argument("--smoke-chapter-count", type=int, default=3)
     args = parser.parse_args()
     ensure_logs()
+    if args.fresh and CONTEXT_PATH.exists():
+        archive_path = CONTEXT_PATH.with_suffix(f".{int(time.time())}.json")
+        CONTEXT_PATH.rename(archive_path)
+        log_event("stage", {"stage": "fresh_context", "archived_context": str(archive_path)})
     client = FlowClient(args.api_base)
     context = load_context()
     project_id = require_project_id(client, context, args.project_id or None)
     log_event("stage", {"stage": "start", "target": "20万字 / 50章 / 每章4000字", "project_id": project_id})
+    if args.stage == "smoke":
+        run_smoke(client, context, project_id, args.smoke_chapter_count)
+        log_event("stage", {"stage": "done", "context": context})
+        return
     if args.stage in {"all", "creation"}:
         run_creation(client, context, project_id)
     if args.stage in {"all", "outline"}:
         run_outline(client, context, project_id)
     if args.stage in {"all", "draft"}:
-        run_draft(client, context, project_id)
+        run_draft(client, context, project_id, args.chapter_start, args.chapter_end)
     if args.stage in {"all", "export"}:
         export_novel(client, context, project_id)
     log_event("stage", {"stage": "done", "context": context})

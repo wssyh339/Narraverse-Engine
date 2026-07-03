@@ -46,8 +46,18 @@ function toChartData(workflow: WorkflowDefinition) {
   }));
 }
 
-function agentForNode(node: WorkflowNode | null, agents: AgentConfig[]) {
-  return node?.agent_name ? agents.find((agent) => agent.name === node.agent_name) ?? null : null;
+function configurableAgentForNode(node: WorkflowNode | null, agents: AgentConfig[]) {
+  if (!node?.agent_name || node.configurable === false) {
+    return null;
+  }
+  return agents.find((agent) => agent.name === node.agent_name) ?? null;
+}
+
+function modelConfigAgentNameForNode(node: WorkflowNode | null) {
+  if (!node?.agent_name || node.configurable === false) {
+    return null;
+  }
+  return node.agent_name;
 }
 
 function modelLabel(model: LLMModelOption) {
@@ -87,16 +97,20 @@ function workflowRuntimeLabel(status?: WorkflowDefinition["runtime_status"]) {
   return status === "active_runtime" ? "已接入实际执行" : "已通过提示词绑定应用";
 }
 
+function onlyRealRuntimeNodes(workflow: WorkflowDefinition) {
+  return workflow.runtime_status === "active_runtime";
+}
+
 function workflowKindRank(workflow: WorkflowDefinition) {
-  if (workflow.workflow_kind === "prompt_lifecycle") return 0;
-  if (workflow.runtime_status === "active_runtime") return 1;
+  if (workflow.runtime_status === "active_runtime") return 0;
+  if (workflow.workflow_kind === "prompt_lifecycle") return 1;
   if (workflow.workflow_kind === "prompt_library") return 2;
   return 3;
 }
 
 function workflowKindLabel(workflow: WorkflowDefinition) {
-  if (workflow.workflow_kind === "prompt_lifecycle") return "工作流视图";
-  if (workflow.workflow_kind === "prompt_library") return "提示词库视图";
+  if (workflow.workflow_kind === "prompt_lifecycle") return "提示词参考";
+  if (workflow.workflow_kind === "prompt_library") return "提示词库参考";
   return workflow.runtime_status === "active_runtime" ? "运行工作流" : "工作流";
 }
 
@@ -120,9 +134,28 @@ function nodeTypeLabel(type: WorkflowNode["type"]) {
 
 function nodeSubtypeLabel(node: WorkflowNode) {
   if (node.node_subtype === "prompt_agent") {
-    return "prompt_agent";
+    return "Prompt 任务";
+  }
+  if (node.node_subtype === "runtime_agent") {
+    return "内部运行 Agent";
+  }
+  if (node.node_subtype === "formal_agent") {
+    return "正式 Agent";
   }
   return node.node_subtype ?? node.type;
+}
+
+function nodeOperationalLabel(node: WorkflowNode) {
+  if (node.configurable !== false && node.agent_name && node.type !== "control") {
+    return "可配置";
+  }
+  if (node.node_subtype === "runtime_agent") {
+    return "只读运行节点";
+  }
+  if (node.type === "prompt") {
+    return "Prompt 任务";
+  }
+  return "控制节点";
 }
 
 function schemaSummary(schema: WorkflowNode["input_schema"]) {
@@ -160,7 +193,7 @@ export function AgentsPage() {
     queryFn: () => studioApi.listDeepAgentSessions(projectId),
     enabled: Boolean(projectId),
   });
-  const [workflowId, setWorkflowId] = useState("chapter_closed_loop_lifecycle");
+  const [workflowId, setWorkflowId] = useState("outline_debate_engine");
   const [selectedNode, setSelectedNode] = useState<WorkflowNode | null>(null);
   const [prompt, setPrompt] = useState("");
   const [deepAgentObjective, setDeepAgentObjective] = useState("检查当前项目的大纲、正典和下一步写作风险。");
@@ -168,20 +201,31 @@ export function AgentsPage() {
   const [selectedModel, setSelectedModel] = useState<string | undefined>();
   const [controlDescription, setControlDescription] = useState("");
   const [controlConfigs, setControlConfigs] = useState<Record<string, string>>(() => loadControlConfigs());
+  const [showReferenceWorkflows, setShowReferenceWorkflows] = useState(false);
 
-  const workflows = useMemo(() => {
+  const sortedWorkflows = useMemo(() => {
     return [...(workflowsQuery.data?.workflows ?? [])].sort((left, right) => {
       const rankDelta = workflowKindRank(left) - workflowKindRank(right);
       if (rankDelta !== 0) return rankDelta;
       return left.label.localeCompare(right.label, "zh-CN");
     });
   }, [workflowsQuery.data?.workflows]);
+  const executableWorkflows = useMemo(() => sortedWorkflows.filter(onlyRealRuntimeNodes), [sortedWorkflows]);
+  const referenceWorkflows = useMemo(() => sortedWorkflows.filter((workflow) => !onlyRealRuntimeNodes(workflow)), [sortedWorkflows]);
+  const workflows = useMemo(
+    () => (showReferenceWorkflows ? [...executableWorkflows, ...referenceWorkflows] : executableWorkflows),
+    [executableWorkflows, referenceWorkflows, showReferenceWorkflows],
+  );
   const activeWorkflow = useMemo(
     () => workflows.find((workflow) => workflow.id === workflowId) ?? workflows[0],
     [workflowId, workflows],
   );
-  const selectedAgent = agentForNode(selectedNode, agentsQuery.data?.agents ?? []);
-  const canEditPrompt = Boolean(selectedAgent);
+  const runtimeNodeList = activeWorkflow?.nodes ?? [];
+  const selectedAgent = configurableAgentForNode(selectedNode, agentsQuery.data?.agents ?? []);
+  const selectedModelConfigAgentName = modelConfigAgentNameForNode(selectedNode);
+  const canConfigureSelectedAgent = Boolean(selectedAgent);
+  const canConfigureSelectedModel = Boolean(selectedModelConfigAgentName);
+  const canEditControlDescription = selectedNode?.type === "control";
   const allModels = useMemo(() => llmModelsQuery.data?.models ?? [], [llmModelsQuery.data?.models]);
   const providerOptions = useMemo(() => {
     const providerLabels = new Map((llmModelsQuery.data?.providers ?? []).map((provider) => [provider.id, provider.label]));
@@ -202,6 +246,12 @@ export function AgentsPage() {
   );
 
   useEffect(() => {
+    if (workflows.length && !workflows.some((workflow) => workflow.id === workflowId)) {
+      setWorkflowId(workflows[0].id);
+    }
+  }, [workflowId, workflows]);
+
+  useEffect(() => {
     if (selectedModel && !selectedProvider) {
       setSelectedProvider(providerForModel(selectedModel, allModels));
     }
@@ -216,7 +266,7 @@ export function AgentsPage() {
     setSelectedNode(node);
     const configKey = `${activeWorkflow?.id ?? "workflow"}:${node.id}`;
     setControlDescription(controlConfigs[configKey] ?? node.description);
-    const agent = agentForNode(node, agentsQuery.data?.agents ?? []);
+    const agent = configurableAgentForNode(node, agentsQuery.data?.agents ?? []);
     setPrompt(agent?.prompt ?? "");
     const workflowModel = activeWorkflow?.id && agent?.model_configs ? agent.model_configs[activeWorkflow.id]?.model : undefined;
     const model = node.model ?? workflowModel ?? undefined;
@@ -256,7 +306,7 @@ export function AgentsPage() {
 
   const saveModelConfig = useMutation({
     mutationFn: () => {
-      if (!selectedAgent || !activeWorkflow) {
+      if (!selectedModelConfigAgentName || !activeWorkflow) {
         throw new Error("请选择工作流中的 Agent 节点");
       }
       if (!selectedModel) {
@@ -264,7 +314,7 @@ export function AgentsPage() {
       }
       return studioApi.updateAgentModelConfig({
         workflow_id: activeWorkflow.id,
-        agent_name: selectedAgent.name,
+        agent_name: selectedModelConfigAgentName,
         model: selectedModel,
       });
     },
@@ -280,10 +330,10 @@ export function AgentsPage() {
 
   const restoreModelConfig = useMutation({
     mutationFn: () => {
-      if (!selectedAgent || !activeWorkflow) {
+      if (!selectedModelConfigAgentName || !activeWorkflow) {
         throw new Error("请选择工作流中的 Agent 节点");
       }
-      return studioApi.deleteAgentModelConfig(activeWorkflow.id, selectedAgent.name);
+      return studioApi.deleteAgentModelConfig(activeWorkflow.id, selectedModelConfigAgentName);
     },
     onSuccess: () => {
       message.success("已恢复为环境默认模型");
@@ -408,17 +458,22 @@ export function AgentsPage() {
       <div className="page-heading">
         <div>
           <Typography.Title level={2}>Agent 配置中心</Typography.Title>
-          <Typography.Text type="secondary">点击工作流节点查看输入输出；Agent 节点可直接编辑系统提示词。</Typography.Text>
+          <Typography.Text type="secondary">点击工作流节点查看输入输出；仅可配置节点支持模型和提示词编辑。</Typography.Text>
         </div>
-        <Select
-          value={activeWorkflow?.id}
-          style={{ width: 220 }}
-          onChange={setWorkflowId}
-          options={workflows.map((workflow) => ({
-            value: workflow.id,
-            label: `${workflowKindLabel(workflow)} · ${workflow.label}`,
-          }))}
-        />
+        <Space wrap>
+          <Button onClick={() => setShowReferenceWorkflows((visible) => !visible)}>
+            {showReferenceWorkflows ? "隐藏提示词参考" : "显示提示词参考"}
+          </Button>
+          <Select
+            value={activeWorkflow?.id}
+            style={{ width: 280 }}
+            onChange={setWorkflowId}
+            options={workflows.map((workflow) => ({
+              value: workflow.id,
+              label: `${workflowKindLabel(workflow)} · ${workflow.label}`,
+            }))}
+          />
+        </Space>
       </div>
 
       {agentsQuery.error || workflowsQuery.error || llmModelsQuery.error ? <Alert type="error" showIcon message="无法读取 Agent、模型或工作流配置" /> : null}
@@ -445,15 +500,16 @@ export function AgentsPage() {
 
       {activeWorkflow ? (
         <div className="workflow-node-list" aria-label="工作流节点列表">
-          {activeWorkflow.nodes.map((node) => (
+          {runtimeNodeList.map((node) => (
             <Button
               key={node.id}
               style={{ borderColor: nodeColor(node) }}
               onClick={() => openNode(node)}
               aria-label={`打开节点配置：${node.label}`}
             >
-              <Tag color={nodeTypeColor(node.type)}>{node.type}</Tag>
+              <Tag color={nodeTypeColor(node.type)}>{nodeTypeLabel(node.type)}</Tag>
               {node.node_subtype ? <Tag color="purple">{nodeSubtypeLabel(node)}</Tag> : null}
+              <Tag color={node.configurable === false ? "default" : "green"}>{nodeOperationalLabel(node)}</Tag>
               {node.tags?.includes("shortcut") ? <Tag color="gold">shortcut</Tag> : null}
               {node.label}
             </Button>
@@ -558,7 +614,7 @@ export function AgentsPage() {
         width={640}
         onCancel={() => setSelectedNode(null)}
         footer={
-          canEditPrompt ? (
+          canConfigureSelectedModel ? (
             <Space>
               <Button loading={restoreModelConfig.isPending} onClick={() => restoreModelConfig.mutate()}>
                 模型恢复默认
@@ -566,14 +622,18 @@ export function AgentsPage() {
               <Button loading={saveModelConfig.isPending} onClick={() => saveModelConfig.mutate()}>
                 保存模型
               </Button>
-              <Button icon={<RotateCcw size={15} />} loading={restorePrompt.isPending} onClick={() => restorePrompt.mutate()}>
-                恢复默认
-              </Button>
-              <Button type="primary" icon={<Save size={15} />} loading={savePrompt.isPending} onClick={() => savePrompt.mutate()}>
-                保存提示词
-              </Button>
+              {canConfigureSelectedAgent ? (
+                <>
+                  <Button icon={<RotateCcw size={15} />} loading={restorePrompt.isPending} onClick={() => restorePrompt.mutate()}>
+                    恢复默认
+                  </Button>
+                  <Button type="primary" icon={<Save size={15} />} loading={savePrompt.isPending} onClick={() => savePrompt.mutate()}>
+                    保存提示词
+                  </Button>
+                </>
+              ) : null}
             </Space>
-          ) : selectedNode ? (
+          ) : canEditControlDescription ? (
             <Button type="primary" icon={<Save size={15} />} onClick={saveControlDescription}>
               保存说明
             </Button>
@@ -584,13 +644,16 @@ export function AgentsPage() {
           <Space direction="vertical" size={16} className="full-width">
             <Descriptions bordered size="small" column={1}>
               <Descriptions.Item label="节点类型">
-                <Tag color={nodeTypeColor(selectedNode.type)}>{selectedNode.type}</Tag>
+                <Tag color={nodeTypeColor(selectedNode.type)}>{nodeTypeLabel(selectedNode.type)}</Tag>
                 {selectedNode.node_subtype ? <Tag color="purple">{nodeSubtypeLabel(selectedNode)}</Tag> : null}
+                <Tag color={selectedNode.configurable === false ? "default" : "green"}>{nodeOperationalLabel(selectedNode)}</Tag>
               </Descriptions.Item>
-              <Descriptions.Item label="Agent 名称">{selectedNode.agent_name || "控制节点"}</Descriptions.Item>
+              <Descriptions.Item label="运行名">{selectedNode.agent_name || "控制节点"}</Descriptions.Item>
+              {selectedNode.default_agent_name ? <Descriptions.Item label="正式 Agent">{selectedNode.default_agent_name}</Descriptions.Item> : null}
               {selectedNode.prompt_id ? <Descriptions.Item label="Prompt ID">{selectedNode.prompt_id}</Descriptions.Item> : null}
               {selectedNode.prompt_filename ? <Descriptions.Item label="Prompt 文件">{selectedNode.prompt_filename}</Descriptions.Item> : null}
-              {selectedAgent ? (
+              {selectedNode.runtime_note ? <Descriptions.Item label="运行说明">{selectedNode.runtime_note}</Descriptions.Item> : null}
+              {canConfigureSelectedModel ? (
                 <Descriptions.Item label="模型">
                   {selectedModel ? <Tag color="geekblue">{selectedModel}</Tag> : <Tag>使用环境默认模型</Tag>}
                 </Descriptions.Item>
@@ -601,58 +664,75 @@ export function AgentsPage() {
               {selectedNode.output_schema ? <Descriptions.Item label="输出 Schema">{schemaSummary(selectedNode.output_schema)}</Descriptions.Item> : null}
             </Descriptions>
 
+            {canConfigureSelectedModel ? (
+              <Space direction="vertical" size={8} className="full-width">
+                <Typography.Text strong>模型选择</Typography.Text>
+                <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 12 }}>
+                  <Space direction="vertical" size={4} className="full-width" style={{ minWidth: 0 }}>
+                    <Typography.Text type="secondary">模型厂商</Typography.Text>
+                    <Select
+                      allowClear
+                      showSearch
+                      value={selectedProvider}
+                      placeholder="选择厂商"
+                      options={providerOptions}
+                      optionFilterProp="title"
+                      optionLabelProp="title"
+                      popupMatchSelectWidth={false}
+                      dropdownStyle={{ maxWidth: 520, minWidth: 320 }}
+                      onChange={changeProvider}
+                    />
+                  </Space>
+                  <Space direction="vertical" size={4} className="full-width" style={{ minWidth: 0 }}>
+                    <Typography.Text type="secondary">模型版本</Typography.Text>
+                    <Select
+                      allowClear
+                      showSearch
+                      disabled={!selectedProvider}
+                      value={selectedModel}
+                      placeholder={selectedProvider ? `使用环境默认模型：${llmModelsQuery.data?.default_model ?? "未配置"}` : "请先选择模型厂商"}
+                      options={filteredModelOptions}
+                      optionFilterProp="title"
+                      optionLabelProp="title"
+                      popupMatchSelectWidth={false}
+                      dropdownStyle={{ maxWidth: 560, minWidth: 360 }}
+                      onChange={setSelectedModel}
+                    />
+                  </Space>
+                </div>
+                <Typography.Text type="secondary">
+                  仅影响当前工作流的 {selectedModelConfigAgentName}。未选择时使用后端环境变量中的默认模型。
+                </Typography.Text>
+              </Space>
+            ) : null}
+
             {selectedAgent ? (
               <>
                 <Space wrap>
                   <Typography.Text type="secondary">{selectedAgent.role ?? selectedNode.description}</Typography.Text>
                   <Tag color={selectedAgent.is_custom ? "cyan" : "default"}>{selectedAgent.is_custom ? "自定义提示词" : "默认提示词"}</Tag>
                 </Space>
-                <Space direction="vertical" size={8} className="full-width">
-                  <Typography.Text strong>模型选择</Typography.Text>
-                  <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 12 }}>
-                    <Space direction="vertical" size={4} className="full-width" style={{ minWidth: 0 }}>
-                      <Typography.Text type="secondary">模型厂商</Typography.Text>
-                      <Select
-                        allowClear
-                        showSearch
-                        value={selectedProvider}
-                        placeholder="选择厂商"
-                        options={providerOptions}
-                        optionFilterProp="title"
-                        optionLabelProp="title"
-                        popupMatchSelectWidth={false}
-                        dropdownStyle={{ maxWidth: 520, minWidth: 320 }}
-                        onChange={changeProvider}
-                      />
-                    </Space>
-                    <Space direction="vertical" size={4} className="full-width" style={{ minWidth: 0 }}>
-                      <Typography.Text type="secondary">模型版本</Typography.Text>
-                      <Select
-                        allowClear
-                        showSearch
-                        disabled={!selectedProvider}
-                        value={selectedModel}
-                        placeholder={selectedProvider ? `使用环境默认模型：${llmModelsQuery.data?.default_model ?? "未配置"}` : "请先选择模型厂商"}
-                        options={filteredModelOptions}
-                        optionFilterProp="title"
-                        optionLabelProp="title"
-                        popupMatchSelectWidth={false}
-                        dropdownStyle={{ maxWidth: 560, minWidth: 360 }}
-                        onChange={setSelectedModel}
-                      />
-                    </Space>
-                  </div>
-                  <Typography.Text type="secondary">
-                    仅影响当前工作流的 {selectedAgent.role}。未选择时使用后端环境变量中的默认模型。
-                  </Typography.Text>
-                </Space>
                 <Input.TextArea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={16} />
               </>
-            ) : (
+            ) : canEditControlDescription ? (
               <>
                 <Typography.Text type="secondary">控制节点说明只保存到当前浏览器本地，不影响后端工作流执行逻辑。</Typography.Text>
                 <Input.TextArea value={controlDescription} onChange={(event) => setControlDescription(event.target.value)} rows={10} />
               </>
+            ) : canConfigureSelectedModel ? (
+              <Alert
+                type="info"
+                showIcon
+                message="Prompt 运行节点"
+                description="该节点使用独立运行名保存模型覆盖；提示词正文仍来自后端 Prompt Catalog。"
+              />
+            ) : (
+              <Alert
+                type="info"
+                showIcon
+                message="只读运行节点"
+                description="该节点会在后端真实工作流中执行，但不属于 /api/agents 暴露的正式可编辑 Agent。请在对应工作流页面调整输入和确认流程。"
+              />
             )}
           </Space>
         ) : null}

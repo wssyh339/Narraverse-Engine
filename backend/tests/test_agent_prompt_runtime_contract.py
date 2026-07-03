@@ -101,16 +101,27 @@ def test_llm_model_catalog_and_workflow_agent_model_config_are_exposed(monkeypat
 def test_agent_model_config_supplies_runtime_default_when_request_has_no_model() -> None:
     reset_database()
     client = TestClient(app)
-    assert_success(
+    saved = assert_success(
         client.put(
             "/api/agent-model-configs",
             json={
                 "workflow_id": "creation_star_session",
-                "agent_name": "creation_star",
+                "agent_name": "creation_worldview_draw",
                 "model": "qwen-max",
             },
         )
+    )["config"]
+    assert saved["agent_name"] == "creation_worldview_draw"
+
+    workflow = next(
+        workflow
+        for workflow in assert_success(client.get("/api/workflows"))["workflows"]
+        if workflow["id"] == "creation_star_session"
     )
+    worldview_node = next(node for node in workflow["nodes"] if node["id"] == "worldview_cards")
+    assert worldview_node["agent_name"] == "creation_worldview_draw"
+    assert worldview_node["model"] == "qwen-max"
+    assert worldview_node["provider"] == "qwen"
 
     captured = {}
 
@@ -451,9 +462,17 @@ def test_creation_star_session_workflow_is_registered_for_visualization() -> Non
     ]
 
     agent_by_node = {node["id"]: node["agent_name"] for node in workflow["nodes"]}
+    prompt_by_node = {node["id"]: node.get("prompt_id") for node in workflow["nodes"]}
+    type_by_node = {node["id"]: node["type"] for node in workflow["nodes"]}
     assert agent_by_node["worldview_cards"] == "creation_worldview_draw"
     assert agent_by_node["protagonist_cards"] == "creation_protagonist_draw"
     assert agent_by_node["market_position"] == "creation_title_packaging"
+    assert prompt_by_node["worldview_cards"] == "creation_worldview_draw"
+    assert prompt_by_node["protagonist_cards"] == "creation_protagonist_draw"
+    assert prompt_by_node["market_position"] == "creation_title_packaging"
+    assert type_by_node["worldview_cards"] == "prompt"
+    assert type_by_node["protagonist_cards"] == "prompt"
+    assert type_by_node["market_position"] == "prompt"
     assert agent_by_node["core_constitution"] == "chief_architect"
     assert agent_by_node["constitution_review"] == "reviewer"
     assert agent_by_node["canon_preview"] == "canon_curator"

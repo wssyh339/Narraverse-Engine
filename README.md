@@ -59,7 +59,7 @@ PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 cp .env.example .env
 ```
 
-后端：
+安装依赖：
 
 ```bash
 python -m venv .venv
@@ -67,18 +67,23 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r backend/requirements.txt
 
-./scripts/dev-backend.sh
-```
-
-前端：
-
-```bash
 cd frontend
 corepack enable
 corepack prepare pnpm@11.5.1 --activate
 pnpm install
 cd ..
+```
 
+一键启动前后端：
+
+```bash
+./scripts/dev.sh
+```
+
+也可以分别启动：
+
+```bash
+./scripts/dev-backend.sh
 ./scripts/dev-frontend.sh
 ```
 
@@ -340,6 +345,7 @@ curl -s -X POST "http://127.0.0.1:8000/api/projects/${PROJECT_ID}/outline/debate
 ```bash
 source .venv/bin/activate
 python -m pytest backend/tests -q
+python -m pytest backend/tests/test_core_apis.py backend/tests/test_agent_prompt_runtime_contract.py -q
 ```
 
 前端：
@@ -347,7 +353,16 @@ python -m pytest backend/tests -q
 ```bash
 cd frontend
 pnpm test
+node --test tests/agents-page-contract.test.mjs tests/frontend-contract.test.mjs
 pnpm build
+```
+
+最小 CI 位于 `.github/workflows/ci.yml`，默认运行上面的后端/前端合同测试。
+
+真实 20 万字流程脚本也提供轻量 smoke：
+
+```bash
+python scripts/run_real_20w_4000_flow.py --stage smoke --smoke-chapter-count 3
 ```
 
 验证报告：

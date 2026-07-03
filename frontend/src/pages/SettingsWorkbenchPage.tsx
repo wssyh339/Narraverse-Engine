@@ -229,13 +229,14 @@ function foreshadowingParent(node: CanonNode): string {
   return "folder:foreshadowing:candidate";
 }
 
-function parentForCanonNode(node: CanonNode): string {
+function parentForCanonNode(node: CanonNode, availableFolderIds: Set<string>): string {
   const customParent = node.metadata?.custom_folder_id ?? node.metadata?.display_parent_id;
-  if (typeof customParent === "string" && customParent) return customParent;
+  if (typeof customParent === "string" && availableFolderIds.has(customParent)) return customParent;
   if (node.ref_type === "character") return characterParent(node);
   if (node.ref_type === "world_fact") return worldParent(node);
   if (node.ref_type === "entity") return entityParent(node);
   if (node.ref_type === "foreshadowing") return foreshadowingParent(node);
+  if (node.ref_type === "graph_edge") return "folder:graph:conflicts";
   return "folder:root";
 }
 
@@ -244,9 +245,10 @@ function buildDisplayNodes(nodes: CanonNode[], proposals: CanonChangeProposal[])
   const customFolders = nodes
     .filter((node) => node.node_type === "folder" && node.metadata?.custom_folder)
     .map((node) => ({ ...node, parent_id: typeof node.metadata?.display_parent_id === "string" ? node.metadata.display_parent_id : node.parent_id ?? "folder:root" }));
+  const availableFolderIds = new Set([...folders, ...customFolders].map((node) => node.id));
   const items = nodes
     .filter((node) => node.node_type === "item" && node.ref_type !== "folder")
-    .map((node, index) => ({ ...node, parent_id: parentForCanonNode(node), sort_order: 100 + index }));
+    .map((node, index) => ({ ...node, parent_id: parentForCanonNode(node, availableFolderIds), sort_order: 100 + index }));
   const proposalItems = proposals.map((proposal, index) => ({
     id: `proposal:${proposal.id}`,
     project_id: proposal.project_id,

@@ -1916,9 +1916,41 @@ def test_workflows_project_delete_and_foreshadowing_lifecycle() -> None:
     assert_success_envelope(workflows_payload)
     workflow_keys = {workflow["id"] for workflow in workflows_payload["data"]["workflows"]}
     assert {"initialization", "chapter_draft", "batch_generation", "outline_debate_engine"}.issubset(workflow_keys)
+    agents_payload = client.get("/api/agents").json()
+    assert_success_envelope(agents_payload)
+    formal_agent_names = {agent["name"] for agent in agents_payload["data"]["agents"]}
+    creation_workflow = next(workflow for workflow in workflows_payload["data"]["workflows"] if workflow["id"] == "creation_star_session")
+    creation_nodes = {node["id"]: node for node in creation_workflow["nodes"]}
+    for node_id, prompt_id in {
+        "worldview_cards": "creation_worldview_draw",
+        "protagonist_cards": "creation_protagonist_draw",
+        "market_position": "creation_title_packaging",
+    }.items():
+        node = creation_nodes[node_id]
+        assert node["type"] == "prompt"
+        assert node["node_subtype"] == "prompt_agent"
+        assert node["prompt_id"] == prompt_id
+        assert node["agent_name"] == prompt_id
+        assert node["configurable"] is True
+    for workflow in workflows_payload["data"]["workflows"]:
+        for node in workflow["nodes"]:
+            agent_name = node.get("agent_name")
+            if node["type"] == "agent":
+                assert agent_name in formal_agent_names or node.get("node_subtype") == "runtime_agent"
+                if agent_name not in formal_agent_names:
+                    assert node["configurable"] is False
+                    assert node["editable"] is False
+            if agent_name in {"creation_worldview_draw", "creation_protagonist_draw", "creation_title_packaging"}:
+                assert node["type"] == "prompt"
+                assert node["configurable"] is True
     debate_workflow = next(workflow for workflow in workflows_payload["data"]["workflows"] if workflow["id"] == "outline_debate_engine")
     debate_node_ids = {node["id"] for node in debate_workflow["nodes"]}
     assert {"debate_book", "debate_volumes", "debate_chapters", "debate_character_generator", "debate_setting_generator"}.issubset(debate_node_ids)
+    assert all(
+        node.get("node_subtype") == "runtime_agent" and node["configurable"] is False
+        for node in debate_workflow["nodes"]
+        if str(node.get("agent_name") or "").startswith("outline_debate/")
+    )
     assert any(edge["source"] == "debate_book" and edge["target"] == "debate_volumes" for edge in debate_workflow["edges"])
     draft_workflow = next(workflow for workflow in workflows_payload["data"]["workflows"] if workflow["id"] == "chapter_draft")
     draft_node_ids = {node["id"] for node in draft_workflow["nodes"]}

@@ -4,6 +4,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR/frontend"
 
+# Preserve CLI-env overrides before loading .env so caller can temporarily override
+# values such as FRONTEND_PORT/FRONTEND_HOST without editing the file.
+OVERRIDE_FRONTEND_HOST="${FRONTEND_HOST:-}"
+OVERRIDE_FRONTEND_PORT="${FRONTEND_PORT:-}"
+OVERRIDE_VITE_API_BASE_URL="${VITE_API_BASE_URL:-}"
+OVERRIDE_PNPM_BIN="${PNPM_BIN:-}"
+
 if [ -f "$ROOT_DIR/.env" ]; then
   set -a
   # shellcheck disable=SC1091
@@ -11,7 +18,10 @@ if [ -f "$ROOT_DIR/.env" ]; then
   set +a
 fi
 
-export VITE_API_BASE_URL="${VITE_API_BASE_URL:-http://localhost:8000/api}"
+export FRONTEND_HOST="${OVERRIDE_FRONTEND_HOST:-${FRONTEND_HOST:-0.0.0.0}}"
+export FRONTEND_PORT="${OVERRIDE_FRONTEND_PORT:-${FRONTEND_PORT:-5173}}"
+export VITE_API_BASE_URL="${OVERRIDE_VITE_API_BASE_URL:-${VITE_API_BASE_URL:-http://localhost:8000/api}}"
+PNPM_BIN="${OVERRIDE_PNPM_BIN:-${PNPM_BIN:-}}"
 
 if [ -n "${PNPM_BIN:-}" ]; then
   exec "$PNPM_BIN" dev

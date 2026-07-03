@@ -399,9 +399,14 @@ def test_outline_debate_agents_call_llm_and_preserve_remote_metadata(monkeypatch
     character_candidate = next(artifact for artifact in book_run["artifacts"] if artifact["type"] == "character_candidate")["payload"]
     setting_candidate = next(artifact for artifact in book_run["artifacts"] if artifact["type"] == "setting_candidate")["payload"]
     assert character_candidate["name"] == "远程候选角色"
-    assert character_candidate["canon_write_suggestion"]["requires_user_approval"] is True
+    assert character_candidate["canon_write_suggestion"]["requires_user_approval"] is False
+    assert character_candidate["goals"]
+    assert character_candidate["ability_cost"]
+    assert character_candidate["status"] == "candidate"
     assert setting_candidate["title"] == "远程候选设定"
-    assert setting_candidate["canon_write_suggestion"]["requires_user_approval"] is True
+    assert setting_candidate["canon_write_suggestion"]["requires_user_approval"] is False
+    assert setting_candidate["importance_score"] > 0
+    assert setting_candidate["status"] == "candidate"
 
     agent_nodes = [node for node in book_run["outline_topology"]["nodes"] if node["type"] == "agent"]
     assert all(node["payload"]["llm"]["used_remote_model"] is True for node in agent_nodes)
@@ -961,10 +966,27 @@ def test_outline_debate_confirms_volume_and_chapter_items_with_incremental_canon
     setting_candidate = next(artifact for artifact in book_run["artifacts"] if artifact["type"] == "setting_candidate")["payload"]
     assert character_candidate["source"] == "outline_debate"
     assert character_candidate["status"] == "candidate"
-    assert character_candidate["canon_write_suggestion"]["requires_user_approval"] is True
+    assert character_candidate["canon_write_suggestion"]["requires_user_approval"] is False
+    assert character_candidate["canon_write_suggestion"]["write_policy"] == "direct_on_outline_confirmation"
+    assert character_candidate["importance_score"] > 0
+    assert character_candidate["goals"]
+    assert character_candidate["motivations"]
+    assert character_candidate["abilities"]
+    assert character_candidate["weaknesses"]
+    assert character_candidate["relationship_hooks"]
+    assert character_candidate["conflict_seed"]
     assert setting_candidate["source"] == "outline_debate"
     assert setting_candidate["status"] == "candidate"
-    assert setting_candidate["canon_write_suggestion"]["requires_user_approval"] is True
+    assert setting_candidate["canon_write_suggestion"]["requires_user_approval"] is False
+    assert setting_candidate["canon_write_suggestion"]["write_policy"] == "direct_on_outline_confirmation"
+    assert setting_candidate["importance_score"] > 0
+    assert setting_candidate["description"]
+    assert setting_candidate["conflict_utility"]
+    assert book_run["candidate_policy"]["character_gap"]["character_count_plan"]["planned_total_characters"] > 0
+    assert book_run["candidate_policy"]["character_gap"]["character_count_plan"]["importance_distribution"]["major"] > 0
+    assert book_run["candidate_policy"]["setting_gap"]["setting_count_plan"]["direct_update_policy"] == "direct_on_outline_confirmation"
+    assert next(artifact for artifact in book_run["artifacts"] if artifact["type"] == "character_candidate")["requires_user_confirmation"] is False
+    assert next(artifact for artifact in book_run["artifacts"] if artifact["type"] == "setting_candidate")["requires_user_confirmation"] is False
     assert book_run["outline_topology"]["mode"] == "topology"
     assert book_run["result"]["generation_kind"] == "outline_debate_book"
 
@@ -1011,7 +1033,15 @@ def test_outline_debate_confirms_volume_and_chapter_items_with_incremental_canon
         assert db.query(models.Character).filter(models.Character.project_id == project_id).count() == initial_counts["characters"] + 1
         assert db.query(models.WorldFact).filter(models.WorldFact.project_id == project_id).count() == initial_counts["world_facts"] + 1
         assert created_character.source == "outline_debate"
+        assert json.loads(created_character.goals_json)
+        assert json.loads(created_character.motivations_json)
+        assert json.loads(created_character.abilities_json)
+        assert json.loads(created_character.weaknesses_json)
+        assert created_character.profile
+        assert created_character.motivation
+        assert created_character.character_arc
         assert created_fact.title == setting_candidate["title"]
+        assert created_fact.importance_score == setting_candidate["importance_score"]
         assert db.query(models.StoryEntity).filter(models.StoryEntity.project_id == project_id).count() == initial_counts["entities"]
         assert db.query(models.CanonVersion).filter(models.CanonVersion.project_id == project_id, models.CanonVersion.ref_type == "character").count() == 1
         assert db.query(models.CanonVersion).filter(models.CanonVersion.project_id == project_id, models.CanonVersion.ref_type == "world_fact").count() == 1
@@ -1208,6 +1238,63 @@ def test_outline_debate_materializes_character_candidate_reuses_parenthetical_na
             .count()
         )
         assert sujianqiu_count == 1
+    finally:
+        db.close()
+
+
+def test_outline_debate_candidate_policy_sorts_complete_plural_candidates() -> None:
+    reset_database()
+    client = TestClient(app)
+    project_id = create_project(client)
+    db = SessionLocal()
+    try:
+        project = db.query(models.Project).filter(models.Project.id == project_id).one()
+        request = OutlineDebateRunRequest(requirement="补齐角色和设定候选，并按重要性排序。")
+        turns = [
+            {
+                "agent_name": "outline_debate/CharacterGeneratorAgent",
+                "message": "输出复数角色候选。",
+                "character_candidates": [
+                    {"name": "低优先级线人", "role_type": "minor", "importance_score": 25, "summary": "只在支线中提供线索。"},
+                    {
+                        "name": "高优先级对手",
+                        "role_type": "antagonist",
+                        "importance_score": 92,
+                        "identity": "核心制度的可见执行者",
+                        "long_term_goal": "压制主角改写规则",
+                        "ability_cost": "每次出手都会暴露制度裂缝。",
+                    },
+                ],
+            },
+            {
+                "agent_name": "outline_debate/SettingGeneratorAgent",
+                "message": "输出复数设定候选。",
+                "setting_candidates": [
+                    {"title": "支线暗号", "ref_type": "world_fact", "importance_score": 20, "content": "用于一次误导。"},
+                    {
+                        "title": "审判议会",
+                        "name": "审判议会",
+                        "ref_type": "entity",
+                        "entity_type": "organization",
+                        "importance_score": 88,
+                        "description": "决定主角资格的核心组织。",
+                    },
+                ],
+            },
+        ]
+
+        policy = outline_debate_service_module.outline_debate_service._candidate_policy(project, "book", request, turns, {"characters": [], "entities": [], "world_facts": []})
+
+        characters = policy["character_gap"]["candidates"]
+        settings = policy["setting_gap"]["candidates"]
+        assert [candidate["name"] for candidate in characters] == ["高优先级对手", "低优先级线人"]
+        assert characters[0]["goals"]
+        assert characters[0]["ability_cost"] == "每次出手都会暴露制度裂缝。"
+        assert policy["character_gap"]["character_count_plan"]["new_characters_this_phase"] == 2
+        assert [candidate["title"] for candidate in settings] == ["审判议会", "支线暗号"]
+        assert settings[0]["ref_type"] == "entity"
+        assert settings[0]["description"] == "决定主角资格的核心组织。"
+        assert policy["setting_gap"]["setting_count_plan"]["new_settings_this_phase"] == 2
     finally:
         db.close()
 

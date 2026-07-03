@@ -52,6 +52,8 @@ test("agents page lets each workflow agent select an LLM model", () => {
   assert.match(page, /模型版本/);
   assert.match(page, /selectedProvider/);
   assert.match(page, /selectedModel/);
+  assert.match(page, /selectedModelConfigAgentName/);
+  assert.match(page, /canConfigureSelectedModel/);
   assert.match(page, /providerOptions/);
   assert.match(page, /filteredModelOptions/);
   assert.match(page, /gridTemplateColumns: "minmax\(0, 1fr\) minmax\(0, 1fr\)"/);
@@ -62,6 +64,7 @@ test("agents page lets each workflow agent select an LLM model", () => {
   assert.match(page, /saveModelConfig/);
   assert.match(page, /restoreModelConfig/);
   assert.match(page, /listLlmModels/);
+  assert.match(page, /agent_name: selectedModelConfigAgentName/);
 });
 
 test("agents page defaults to lifecycle workflows and keeps prompt library visible", () => {
@@ -71,12 +74,33 @@ test("agents page defaults to lifecycle workflows and keeps prompt library visib
   assert.match(types, /workflow_kind\?: "runtime" \| "prompt_lifecycle" \| "prompt_library" \| string/);
   assert.match(types, /trigger_policy\?: string/);
   assert.match(types, /tags\?: string\[\]/);
-  assert.match(page, /chapter_closed_loop_lifecycle/);
+  assert.match(types, /configurable\?: boolean/);
+  assert.match(types, /node_runtime_status\?:/);
+  assert.match(page, /executableWorkflows/);
+  assert.match(page, /referenceWorkflows/);
+  assert.match(page, /showReferenceWorkflows/);
+  assert.match(page, /onlyRealRuntimeNodes/);
+  assert.match(page, /outline_debate_engine/);
+  assert.doesNotMatch(page, /useState\("chapter_closed_loop_lifecycle"\)/);
   assert.match(page, /workflowKindLabel/);
   assert.match(page, /prompt_lifecycle/);
   assert.match(page, /prompt_library/);
-  assert.match(page, /工作流视图/);
-  assert.match(page, /提示词库视图/);
+  assert.match(page, /运行工作流/);
+  assert.match(page, /提示词参考/);
+});
+
+test("agents page separates configurable agents from readonly runtime nodes", () => {
+  const page = read("src/pages/AgentsPage.tsx");
+
+  assert.match(page, /configurableAgentForNode/);
+  assert.match(page, /canConfigureSelectedAgent/);
+  assert.match(page, /canEditControlDescription/);
+  assert.match(page, /nodeOperationalLabel/);
+  assert.match(page, /内部运行 Agent/);
+  assert.match(page, /Prompt 任务/);
+  assert.match(page, /运行名/);
+  assert.match(page, /只读运行节点/);
+  assert.doesNotMatch(page, /activeWorkflow\.nodes\.map/);
 });
 
 test("agents page exposes Deep Agent and LangSmith management controls", () => {
