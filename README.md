@@ -9,8 +9,9 @@
 ![SQLite](https://img.shields.io/badge/database-SQLite-lightgrey)
 ![Local First](https://img.shields.io/badge/local--first-yes-brightgreen)
 
-当前版本：`0.2.0`  
-当前阶段：`Alpha / 本地优先开发版`
+当前实现版本：`0.2.0 Alpha`
+目标能力集：`Studio 1.0`
+API 合约阶段：`1.0 Draft`
 
 > 叙界 = 叙事 + 世界。Narraverse Engine 的目标不是“帮你续写几段文字”，而是帮助作者把长篇小说当成一个可持续维护的叙事工程。
 
@@ -20,20 +21,33 @@
 - [核心功能](#核心功能)
 - [核心工作流](#核心工作流)
 - [项目状态](#项目状态)
-- [界面预览](#界面预览)
 - [架构概览](#架构概览)
 - [LLM 配置](#llm-配置)
 - [CLI 与 API](#cli-与-api)
 - [测试与验证](#测试与验证)
+- [故障排查](#故障排查)
 - [隐私与安全](#隐私与安全)
 - [贡献](#贡献)
 
 ## 快速开始
 
-### 方式 A：Docker Compose
+### 最快启动
+
+macOS / Linux / Git Bash / WSL：
 
 ```bash
+git clone https://github.com/wssyh339/Narraverse-Engine.git
+cd Narraverse-Engine
 cp .env.example .env
+docker compose up --build
+```
+
+Windows PowerShell：
+
+```powershell
+git clone https://github.com/wssyh339/Narraverse-Engine.git
+cd Narraverse-Engine
+Copy-Item .env.example .env
 docker compose up --build
 ```
 
@@ -41,6 +55,58 @@ docker compose up --build
 
 - Web 应用：<http://localhost:5173>
 - API 文档：<http://localhost:8000/docs>
+- API 快速检查：<http://localhost:8000/api/projects>
+
+### 支持矩阵
+
+| 使用者 | 推荐方式 | 支持系统 | 需要预装 |
+|---|---|---|---|
+| 普通用户、本地体验、GitHub 下载后快速启动 | Docker Compose | Windows 10/11、macOS、Linux | Git、Docker Desktop 或 Docker Engine、Docker Compose v2 |
+| 开发者、需要调试后端或前端 | 本地源码启动 | Windows 10/11、macOS、Linux | Git、Python 3.10+、Node.js 24.14.0、pnpm 11.5.1 |
+| 无 Docker 的服务器或虚拟机 | 本地源码启动 | Linux、macOS、Windows Server | Python、Node.js、可写本地磁盘 |
+
+默认数据写入本机 SQLite 和本地 artifacts。不要把 `.env`、`data/`、`backend/data/`、`backend/artifacts/`、`output/`、`outputs/`、`logs/`、`test-artifacts/` 上传到 GitHub。
+
+### 从 GitHub 获取代码
+
+```bash
+git clone https://github.com/wssyh339/Narraverse-Engine.git
+cd Narraverse-Engine
+```
+
+如果是下载 GitHub ZIP，解压后进入项目根目录即可。
+
+### 方式 A：Docker Compose（推荐）
+
+macOS / Linux / Windows PowerShell 都可以使用：
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+Windows PowerShell 如果没有 `cp` 命令，使用：
+
+```powershell
+Copy-Item .env.example .env
+docker compose up --build
+```
+
+启动后访问：
+
+- Web 应用：<http://localhost:5173>
+- API 文档：<http://localhost:8000/docs>
+- API 快速检查：<http://localhost:8000/api/projects>
+
+常用 Docker 命令：
+
+```bash
+docker compose logs -f
+docker compose down
+docker compose down -v
+```
+
+`docker compose down -v` 会删除 Docker volume 中的本地数据库和 artifacts，只在确认要清空本地数据时使用。
 
 如果 Docker Hub 拉取基础镜像超时，可以在 `.env` 中切换镜像源和包源：
 
@@ -51,53 +117,125 @@ NPM_REGISTRY=https://registry.npmmirror.com
 PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
+当前 `docker-compose.yml` 只启动后端和前端，不需要单独启动 Qdrant、Redis、Postgres 或其他外部服务。`.env.example` 中的 Qdrant 变量只作为可选记忆增强预留。
+
+如果部署在远程服务器，并且浏览器不是运行在服务器本机，请把 `.env` 中的 `VITE_API_BASE_URL` 改为服务器可访问地址，例如：
+
+```env
+VITE_API_BASE_URL=http://<server-ip-or-domain>:8000/api
+```
+
+修改 `VITE_*` 变量后需要重新构建前端镜像：
+
+```bash
+docker compose up --build
+```
+
 ### 方式 B：本地开发
 
-本地开发默认读取项目根目录 `.env`。先复制配置模板：
+准备环境变量：
 
 ```bash
 cp .env.example .env
 ```
 
-安装依赖：
+Windows PowerShell：
+
+```powershell
+Copy-Item .env.example .env
+```
+
+本地开发默认读取项目根目录 `.env`。端口、API 地址、数据库路径和任务产物目录都集中在 `.env` 中维护：
+
+```env
+BACKEND_HOST=0.0.0.0
+BACKEND_PORT=8000
+FRONTEND_HOST=0.0.0.0
+FRONTEND_PORT=5173
+FRONTEND_ORIGIN=http://localhost:5173
+VITE_API_BASE_URL=http://localhost:8000/api
+DATABASE_URL=sqlite:///./data/novel_agent.db
+JOB_ARTIFACT_DIR=artifacts/runs
+```
+
+后端（macOS / Linux / Git Bash / WSL）：
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r backend/requirements.txt
+./scripts/dev-backend.sh
+```
 
+后端（Windows PowerShell）：
+
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r backend/requirements.txt
+$env:BACKEND_HOST = "0.0.0.0"
+$env:BACKEND_PORT = "8000"
+$env:DATABASE_URL = "sqlite:///./data/novel_agent.db"
+$env:JOB_ARTIFACT_DIR = "artifacts/runs"
+python -m uvicorn --app-dir backend app.main:app --reload --host $env:BACKEND_HOST --port $env:BACKEND_PORT
+```
+
+如果 PowerShell 阻止激活虚拟环境，可在当前终端临时执行：
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+```
+
+前端（新开一个终端，macOS / Linux / Git Bash / WSL）：
+
+```bash
 cd frontend
 corepack enable
 corepack prepare pnpm@11.5.1 --activate
 pnpm install
 cd ..
+./scripts/dev-frontend.sh
 ```
 
-一键启动前后端：
+前端（Windows PowerShell）：
+
+```powershell
+cd frontend
+corepack enable
+corepack prepare pnpm@11.5.1 --activate
+pnpm install
+$env:VITE_API_BASE_URL = "http://localhost:8000/api"
+pnpm dev
+```
+
+一键启动前后端只面向 Bash 环境：
 
 ```bash
 ./scripts/dev.sh
 ```
 
-也可以分别启动：
+如果端口被占用，只需要调整 `.env` 中的 `BACKEND_PORT`、`FRONTEND_PORT`、`FRONTEND_ORIGIN` 和 `VITE_API_BASE_URL`。
+
+### 部署前检查
+
+准备上传到 GitHub 或打 tag 前，建议运行：
 
 ```bash
-./scripts/dev-backend.sh
-./scripts/dev-frontend.sh
+docker compose config --quiet
+python -m pytest backend/tests -q
+cd frontend
+pnpm test
+pnpm build
 ```
 
-默认端口和 API 地址在 `.env` 中维护：
+发布检查清单：
 
-```env
-BACKEND_PORT=8000
-FRONTEND_PORT=5173
-FRONTEND_ORIGIN=http://localhost:5173
-VITE_API_BASE_URL=http://localhost:8000/api
-DATABASE_URL=sqlite:///./data/novel_agent.db
-```
-
-如果端口被占用，修改 `.env` 中的 `BACKEND_PORT`、`FRONTEND_PORT`、`FRONTEND_ORIGIN` 和 `VITE_API_BASE_URL`。前端 `VITE_*` 变量属于构建期配置；Docker 模式下修改后需要重新构建。
+- `.env` 不提交，只提交 `.env.example`。
+- 不提交 `data/`、`backend/data/`、`backend/artifacts/`、`output/`、`outputs/`、`logs/`、`test-artifacts/`。
+- README 中的端口、Node/Python 版本、Docker 命令必须与 `docker-compose.yml`、`frontend/package.json`、`backend/requirements.txt` 一致。
+- 若新增部署方式，必须同步更新 `AGENTS.md`、README 和验证命令。
 
 ## 核心功能
 
@@ -110,7 +248,7 @@ DATABASE_URL=sqlite:///./data/novel_agent.db
 | 批量生成 | 后台逐章生成正文，任务可恢复、可暂停、可重试，并显示长任务进度。 |
 | Agent 配置 | 查看可视化工作流，编辑 Agent 提示词，并按 Agent 配置模型。 |
 | 版本系统 | 保存 Agent 快照、diff 对比、回滚和分支式探索。 |
-| 导出 | 支持 Markdown、TXT、HTML、PDF、EPUB、Word 等本地导出路径。 |
+| 导出 | 支持 Markdown、TXT、HTML、PDF、EPUB、Word 等本地导出路径；当前 PDF/EPUB/Word 属于本地最小可读实现，不等同完整排版引擎。 |
 | CLI | 支持脚本化创建、恢复、章节生成、查询、版本和导出。 |
 
 ## 核心工作流
@@ -150,14 +288,14 @@ DATABASE_URL=sqlite:///./data/novel_agent.db
 
 当前已验证：
 
-- Docker Compose 本地启动。
-- React + FastAPI 本地开发启动。
-- 创作 Star 分步立项。
-- 大纲议事流式讨论与用户插入意见。
-- 批量正文后台任务、进度恢复和失败重试入口。
-- Markdown 导出。
-- 真实 LLM 的大纲议事端到端测试。
-- 真实 LLM 的 `50` 章 / `20` 万字级批量正文生成压力测试。
+| 场景 | 最近证据 |
+|---|---|
+| Docker Compose 配置 | 2026-07-04 本地执行 `docker compose config --quiet` 通过；当前机器 Docker daemon 未运行，未做镜像实际构建。 |
+| 后端合同测试 | 2026-07-04 本地执行 `python -m pytest backend/tests/test_core_apis.py backend/tests/test_agent_prompt_runtime_contract.py -q`，48 passed。 |
+| 前端合同测试 | 2026-07-04 本地执行 `pnpm test`，39 passed。 |
+| 前端生产构建 | 2026-07-04 本地执行 `pnpm build` 通过，有 Vite chunk size 警告。 |
+| 真实 LLM 大纲议事 | 见 [DeepSeek 大纲议事端到端测试](docs/test-reports/2026-06-17-deepseek-outline-debate-e2e.md) 与 [动态 Agent 大纲议事真实 LLM 测试](docs/test-reports/2026-06-21-outline-debate-dynamic-agents-real-llm.md)。 |
+| 长篇压力流程 | 见 [大纲议事质量升级实现记录](docs/outline_debate_quality_upgrade_implementation.md) 和 `scripts/run_real_20w_4000_flow.py`。 |
 
 仍在完善：
 
@@ -174,22 +312,6 @@ DATABASE_URL=sqlite:///./data/novel_agent.db
 - 不做自动投稿或平台账号托管。
 - 不默认引入 Neo4j 或复杂向量数据库。
 - 不替代作者判断。AI 生成内容在确认前都只是提案或候选。
-
-## 界面预览
-
-产品的核心不是单点生成，而是从立项、议事、正文生产到长任务监控的完整创作工作室。
-
-### 创作 Star 首屏
-
-频道、类型、标签、读者体验、规模参数和初始想法会先被收束成创作种子，再进入世界观、主角、书名包装、核心矛盾和小说宪法流程。
-
-### 大纲议事流式讨论
-
-大纲不走旧式一次性生成，而是由 Agent 回合制发言。作者可以加入讨论、@指定角色、打断和确认，候选结论在确认后才写入正式大纲与正典。
-
-### 批量生成与长任务监控
-
-批量正文生成按章节保存进度，支持任务恢复、暂停、取消、重试，并展示当前 Agent 阶段、预计剩余时间和逐章结果。
 
 ## 架构概览
 
@@ -300,10 +422,23 @@ OPENAI_MODEL=gpt-4.1-mini
 
 ## CLI 与 API
 
-常用 CLI：
+常用 CLI（macOS / Linux / Git Bash / WSL）：
 
 ```bash
 source .venv/bin/activate
+python main.py new
+python main.py resume
+python main.py generate-chapter --chapter-no 1
+python main.py versions
+python main.py character_map
+python main.py query "谁是主角？"
+python main.py export --format markdown
+```
+
+Windows PowerShell：
+
+```powershell
+.\.venv\Scripts\Activate.ps1
 python main.py new
 python main.py resume
 python main.py generate-chapter --chapter-no 1
@@ -374,6 +509,79 @@ python scripts/run_real_20w_4000_flow.py --stage smoke --smoke-chapter-count 3
 | 动态 Agent 大纲议事真实 LLM 测试 | [2026-06-21-outline-debate-dynamic-agents-real-llm](docs/test-reports/2026-06-21-outline-debate-dynamic-agents-real-llm.md) |
 
 前端构建可能提示部分 chunk 较大，这是因为项目包含 ECharts、Markdown 工具链和 Ant Design。更多说明见 [前端构建体积分析](docs/前端构建体积分析.md)。
+
+## 故障排查
+
+### Docker daemon 没启动
+
+如果看到类似 `failed to connect to the docker API`，先启动 Docker Desktop 或 Docker Engine，再重新运行：
+
+```bash
+docker compose up --build
+```
+
+### Docker Hub 拉取超时
+
+在 `.env` 中切换镜像源和包源：
+
+```env
+DOCKER_NODE_IMAGE=docker.1ms.run/library/node:24-alpine
+DOCKER_PYTHON_IMAGE=docker.1ms.run/library/python:3.13-slim
+NPM_REGISTRY=https://registry.npmmirror.com
+PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+### 端口被占用
+
+修改 `.env`：
+
+```env
+BACKEND_PORT=8001
+FRONTEND_PORT=5174
+FRONTEND_ORIGIN=http://localhost:5174
+VITE_API_BASE_URL=http://localhost:8001/api
+```
+
+Docker 模式下修改 `VITE_*` 后需要重新构建：
+
+```bash
+docker compose up --build
+```
+
+### Windows PowerShell 不能激活虚拟环境
+
+当前终端临时放开脚本执行：
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+```
+
+### Node 版本警告
+
+项目锁定 `Node.js 24.14.0` 和 `pnpm 11.5.1`。如果只是运行测试时看到 engine warning，但命令通过，可以继续开发；发布前建议切到锁定版本。
+
+### 远程服务器前端能打开但 API 连不上
+
+把 `.env` 中的 `VITE_API_BASE_URL` 改为浏览器能访问的后端地址：
+
+```env
+VITE_API_BASE_URL=http://<server-ip-or-domain>:8000/api
+```
+
+然后重新构建前端：
+
+```bash
+docker compose up --build
+```
+
+### 没有 API Key 是否能启动
+
+可以启动。默认 `LLM_REQUIRE_REMOTE=false`，系统允许本地结构化 fallback 跑通主要流程。真实模型验收时设置：
+
+```env
+LLM_REQUIRE_REMOTE=true
+```
 
 ## 隐私与安全
 

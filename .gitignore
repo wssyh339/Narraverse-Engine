@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 .DS_Store
 .codex/
+$CODEX_HOME/
+.playwright-cli/
 
 .venv/
 venv/
@@ -16,6 +18,7 @@ outputs/
 output/
 logs/
 .logs/
+test-artifacts/
 
 .env
 
