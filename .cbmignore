@@ -1,0 +1,66 @@
+# Narraverse code graph input only. Keep this aligned with .repomixignore.
+.git/
+.codebase-memory/
+.ai-context/
+.codex-tools/
+.pnpm-store/
+.playwright-cli/
+
+# Credentials and local configuration.
+.env
+.env.*
+**/.env
+**/.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+**/credentials*.json
+**/secrets.*
+
+# Local databases, user manuscripts, backups, exports, and logs.
+data/
+backend/data/
+backend/artifacts/
+backend/backend/
+backups/
+exports/
+output/
+outputs/
+logs/
+.logs/
+test-artifacts/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+*.backup
+*.bak
+*.epub
+*.docx
+*.pdf
+*.zip
+*.tar
+*.tgz
+*.tar.gz
+*.7z
+
+# Rebuildable dependencies and caches.
+frontend/node_modules/
+frontend/dist/
+**/__pycache__/
+**/.pytest_cache/
+*.pyc
+*.pyo
+*.coverage
+coverage/
+htmlcov/
+
+# Historical specifications and generated/real-LLM reports are not current code facts.
+docs/archive/
+docs/superpowers/
+docs/test-reports/
+docs/**/*report*.md
+docs/**/*报告*.md

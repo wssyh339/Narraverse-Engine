@@ -168,7 +168,7 @@ export interface Note {
   id: string;
   project_id: string;
   parent_id: string | null;
-  note_type: "note" | "folder" | "inspiration";
+  note_type: "note" | "folder" | "inspiration" | "import_report" | "method_pack" | "reference_asset" | "review_report";
   title: string;
   content: string;
   sort_order: number;
@@ -617,6 +617,11 @@ export interface WorkflowNode {
   configurable?: boolean;
   node_runtime_status?: "configurable_agent" | "prompt_task" | "active_runtime" | "control" | string;
   runtime_note?: string;
+  allowed_read_tools?: string[];
+  allowed_candidate_tools?: string[];
+  validators?: string[];
+  forbidden_tools?: string[];
+  candidate_policy?: string;
   tags?: string[];
 }
 

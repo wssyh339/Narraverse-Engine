@@ -1,0 +1,13 @@
+{
+  "name": "@narraverse/repomix-runtime",
+  "version": "0.0.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=24.14.0 <27"
+  },
+  "packageManager": "npm@11.12.1",
+  "dependencies": {
+    "repomix": "1.17.0"
+  }
+}

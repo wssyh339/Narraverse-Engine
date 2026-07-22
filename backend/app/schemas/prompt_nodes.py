@@ -483,6 +483,28 @@ class NextChapterStateChangeOutput(APIModel):
     avoid_static_repetition: list[str] = Field(default_factory=list, description="避免原地踏步的提醒。")
 
 
+class ChapterPrepInput(APIModel):
+    current_chapter_outline: dict[str, Any] = Field(description="已确认章纲中的当前章节安排。")
+    canon_context: dict[str, Any] = Field(default_factory=dict, description="项目、故事圣经、角色、实体、世界事实、图谱和前文摘要。")
+    narrative_ledger: dict[str, Any] = Field(default_factory=dict, description="当前叙事账本和上一章状态变化。")
+    reference_assets: dict[str, Any] = Field(default_factory=dict, description="可选参考资产，如对标章节、Method Pack 或风格样本。")
+    user_instruction: str = Field(default="", description="用户对本章写作的额外要求。")
+
+
+class ChapterPrepOutput(APIModel):
+    chapter_no: int = Field(ge=1, description="章节编号。")
+    chapter_title: str = Field(description="章节标题。")
+    chapter_position: str = Field(description="本章在长篇结构中的位置，如开局、推进、反转、承压、收束。")
+    target_emotion: str = Field(description="本章希望读者经历的主要情绪变化。")
+    pressure_level: int = Field(ge=1, le=10, description="本章压力等级，1 为低压铺垫，10 为高压危机。")
+    reader_pull_reason: str = Field(description="读者读完本章后继续下一章的理由。")
+    required_canon: list[str] = Field(default_factory=list, description="本章必须读取或兑现的正典点。")
+    open_foreshadowing: list[str] = Field(default_factory=list, description="本章需要推进、强化或避免误伤的伏笔。")
+    previous_summary: str = Field(default="", description="上一章或前文必要摘要。")
+    word_budget: dict[str, int] = Field(default_factory=dict, description="字数预算，至少包含 target/min/max。")
+    must_avoid: list[str] = Field(default_factory=list, description="本章必须避免的结构、设定或文风问题。")
+
+
 class RecommendedWorkflowOrderInput(APIModel):
     project_stage: str = Field(description="当前项目阶段。")
     available_artifacts: dict[str, Any] = Field(default_factory=dict, description="当前已有产物。")

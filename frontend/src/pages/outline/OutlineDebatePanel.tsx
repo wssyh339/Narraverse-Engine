@@ -7,7 +7,10 @@ import type { ScalePlan } from "../../types/api";
 import type {
   OutlineDebatePhase,
   OutlineDebatePhaseRun,
+  OutlineDebateQualityMetrics,
+  OutlineDebateRepairPolicy,
   OutlineDebateSession,
+  OutlineDebateSynthesisProvenance,
   OutlineDebateStreamEvent,
   OutlineDebateUserMessage,
 } from "../../api/studio";
@@ -108,6 +111,51 @@ function detectTargetAgent(value: string) {
 function compactNumber(value?: number) {
   const numeric = Number(value || 0);
   return numeric > 0 ? numeric.toLocaleString("zh-CN") : "未设定";
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function textValue(value: unknown) {
+  return typeof value === "string" ? value : value === undefined || value === null ? "" : String(value);
+}
+
+function qualityStatusColor(status: string) {
+  if (status === "failed") return "red";
+  if (status === "warning") return "gold";
+  if (status === "passed") return "green";
+  return "default";
+}
+
+function qualityEvidenceSummary(run?: OutlineDebatePhaseRun | null) {
+  const result = run?.result ?? {};
+  const validationReport = run?.validation_report;
+  const qualityMetrics = record(result["quality_metrics"]) as OutlineDebateQualityMetrics;
+  const repairPolicy = record(result["repair_policy"]) as OutlineDebateRepairPolicy;
+  const synthesisProvenance = record(result["synthesis_provenance"]) as OutlineDebateSynthesisProvenance;
+  const blockingItems = Array.isArray(qualityMetrics.blocking_items) ? qualityMetrics.blocking_items : [];
+  const failedChecks = (validationReport?.checks ?? []).filter((check) => check.status === "failed");
+  const firstBlocking = record(blockingItems[0]);
+  const blockingReason =
+    textValue(firstBlocking.evidence) ||
+    textValue(firstBlocking.type) ||
+    textValue(failedChecks[0]?.message) ||
+    textValue(failedChecks[0]?.validator);
+  const validationStatus = textValue(validationReport?.status || "");
+  const qualityStatus = textValue(qualityMetrics.status || synthesisProvenance.quality_status || "");
+  const blocked = validationStatus === "failed" || qualityStatus === "failed" || blockingItems.length > 0;
+  return {
+    blocked,
+    blockReason: blockingReason,
+    validationStatus,
+    qualityStatus,
+    blockingItemCount: blockingItems.length,
+    repairApplied: Boolean(repairPolicy.applied || synthesisProvenance.service_repair_applied),
+    repairReason: textValue(repairPolicy.reason || synthesisProvenance.repair_reason || "not_required"),
+    sourceTurnCount: Number(synthesisProvenance.source_turn_count || 0),
+    artifactPatchCount: Number(synthesisProvenance.artifact_patch_count || 0),
+  };
 }
 
 function stageConclusionFromRun(run?: OutlineDebatePhaseRun | null) {
@@ -262,6 +310,8 @@ export function OutlineDebatePanel({
   const activeItemAlreadyConfirmed = Boolean(activeItemKey && activeConfirmationItem?.candidate_status === "confirmed");
   const confirmedRefreshBlocked = Boolean(activePhase === "book" ? activeRun?.candidate_status === "confirmed" : activeItemAlreadyConfirmed);
   const activeStageConclusion = stageConclusionFromRun(activeRun);
+  const activeQualityEvidence = useMemo(() => qualityEvidenceSummary(activeRun), [activeRun]);
+  const qualityGateBlocked = activeQualityEvidence.blocked;
   const activeConfirmationItems = activeRun?.confirmation_items ?? [];
   const pendingItemCount = activeConfirmationItems.filter((item) => item.candidate_status === "pending_confirmation").length;
   const summaryTargetWords = Number(scalePlan?.target_words || targetWords || 0);
@@ -505,6 +555,10 @@ export function OutlineDebatePanel({
       message.warning("请先形成阶段结论，再确认条目");
       return;
     }
+    if (qualityGateBlocked) {
+      message.error(activeQualityEvidence.blockReason ? `质量门未通过：${activeQualityEvidence.blockReason}` : "质量门未通过，请重新生成或修订后再确认");
+      return;
+    }
     try {
       const itemLabel = activePhase === "volumes" ? `第${selectedVolumeNo}卷` : activePhase === "chapters" ? `第${selectedChapterNo}章` : "";
       const result = await studioApi.confirmOutlineDebatePhase(projectId, session.id, activePhase, {
@@ -527,6 +581,10 @@ export function OutlineDebatePanel({
   const confirmAllActivePhase = async () => {
     if (!session || !activeRun || activePhase === "book") {
       message.warning("请先形成卷纲或章纲阶段结论");
+      return;
+    }
+    if (qualityGateBlocked) {
+      message.error(activeQualityEvidence.blockReason ? `质量门未通过：${activeQualityEvidence.blockReason}` : "质量门未通过，请重新生成或修订后再确认");
       return;
     }
     try {
@@ -609,11 +667,11 @@ export function OutlineDebatePanel({
           <Button icon={<RefreshCw size={15} />} disabled={running || confirmedRefreshBlocked} onClick={() => runActivePhase({ refreshPhase: true })}>
             刷新本阶段
           </Button>
-          <Button icon={<CheckCircle2 size={15} />} disabled={!canConfirmActivePhase} onClick={confirmActivePhase}>
+          <Button icon={<CheckCircle2 size={15} />} disabled={!canConfirmActivePhase || qualityGateBlocked} onClick={confirmActivePhase}>
             {activePhase === "volumes" ? `确认本卷 ${selectedVolumeNo}` : activePhase === "chapters" ? `确认本章 ${selectedChapterNo}` : confirmActionLabels[activePhase]}
           </Button>
           {activePhase !== "book" ? (
-            <Button icon={<CheckCircle2 size={15} />} disabled={!canConfirmAllActivePhase} onClick={confirmAllActivePhase}>
+            <Button icon={<CheckCircle2 size={15} />} disabled={!canConfirmAllActivePhase || qualityGateBlocked} onClick={confirmAllActivePhase}>
               {confirmAllActionLabels[activePhase]}
             </Button>
           ) : null}
@@ -636,6 +694,11 @@ export function OutlineDebatePanel({
               {currentSpeakerLabel ? <Tag color="processing">当前发言：{currentSpeakerLabel}</Tag> : null}
               <Tag color={activeCandidateStatus.color}>{activeCandidateStatus.text}</Tag>
               {activePhase !== "book" ? <Tag>{activeConfirmedCount}/{activePlannedCount} 已确认</Tag> : null}
+              {activeRun ? (
+                <Tag color={qualityStatusColor(activeQualityEvidence.qualityStatus)}>
+                  质量门：{activeQualityEvidence.qualityStatus || "未知"}
+                </Tag>
+              ) : null}
               {!userPinnedToLatest && events.length ? (
                 <Button className="outline-debate-scroll-back" size="small" icon={<ArrowDown size={13} />} onClick={scrollToLatest}>
                   回到最新发言
@@ -644,6 +707,26 @@ export function OutlineDebatePanel({
               <Tag color={running ? "processing" : activeRun ? "green" : "default"}>{running ? "运行中" : activeRun ? "已保存" : "等待开始"}</Tag>
             </Space>
           </div>
+          {activeRun ? (
+            <div className="outline-debate-quality-evidence">
+              <Space size={6} wrap>
+                <Tag color={qualityStatusColor(activeQualityEvidence.validationStatus)}>
+                  validation_report：{activeQualityEvidence.validationStatus || "未返回"}
+                </Tag>
+                <Tag color={activeQualityEvidence.repairApplied ? "orange" : "default"}>
+                  修复策略：{activeQualityEvidence.repairApplied ? activeQualityEvidence.repairReason : "未触发"}
+                </Tag>
+                <Tag>
+                  合成来源：{activeQualityEvidence.sourceTurnCount} turns / {activeQualityEvidence.artifactPatchCount} patches
+                </Tag>
+              </Space>
+              {qualityGateBlocked ? (
+                <Typography.Text type="danger">
+                  质量门未通过{activeQualityEvidence.blockReason ? `：${activeQualityEvidence.blockReason}` : ""}
+                </Typography.Text>
+              ) : null}
+            </div>
+          ) : null}
           <div className="outline-debate-stream-body" ref={streamViewportRef} onScroll={handleStreamScroll}>
             {events.length ? (
               <Timeline
@@ -662,6 +745,7 @@ export function OutlineDebatePanel({
 	                            <Tag>{agentDisplayName(event.turn.agent_name)}</Tag>
 	                            <Typography.Text type="secondary">第 {event.turn.round_no} 轮发言</Typography.Text>
 	                            {event.turn.handoff?.display ? <Tag color="blue">交接：{event.turn.handoff.display}</Tag> : null}
+                            {event.turn.handoff?.reason ? <Typography.Text type="secondary">原因：{event.turn.handoff.reason}</Typography.Text> : null}
 	                          </div>
 	                        ) : null}
                         <Typography.Paragraph className="outline-debate-event-text" type="secondary">{eventDescription(event)}</Typography.Paragraph>

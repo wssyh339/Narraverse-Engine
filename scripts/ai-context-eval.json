@@ -1,0 +1,204 @@
+{
+  "$schema": "narraverse.ai-context-eval.v1",
+  "forbidden_paths": [
+    ".env",
+    "data/narraverse.db",
+    "docs/archive/legacy-agents-before-2026-07-04-cleanup.md"
+  ],
+  "scenarios": [
+    {
+      "id": "dual_api_prefix",
+      "profile": "backend",
+      "required_paths": [
+        "backend/app/main.py",
+        "backend/app/api/v1/router.py"
+      ],
+      "anchors": [
+        {
+          "path": "backend/app/main.py",
+          "contains": [
+            "prefix=\"/api/v1\"",
+            "prefix=\"/api\""
+          ]
+        }
+      ],
+      "retrieval_queries": [
+        {
+          "pattern": "prefix=\"/api/v1\"",
+          "expected_path": "backend/app/main.py"
+        }
+      ]
+    },
+    {
+      "id": "creation_star_lane",
+      "profile": "backend",
+      "required_paths": [
+        "backend/app/agents/creation_star/service.py",
+        "backend/app/services/studio_service.py"
+      ],
+      "anchors": [
+        {
+          "path": "backend/app/api/v1/router.py",
+          "contains": [
+            "/projects/{project_id}/creation/sessions",
+            "canon-preview"
+          ]
+        }
+      ],
+      "retrieval_queries": [
+        {
+          "pattern": "canon-preview",
+          "expected_path": "backend/app/api/v1/router.py"
+        }
+      ]
+    },
+    {
+      "id": "outline_debate_lane",
+      "profile": "backend",
+      "required_paths": [
+        "backend/app/api/v1/endpoints/outline_debate.py",
+        "backend/app/services/outline_debate_service.py"
+      ],
+      "anchors": [
+        {
+          "path": "backend/app/api/v1/router.py",
+          "contains": [
+            "/outline/debate/sessions",
+            "/chapters/confirm"
+          ]
+        }
+      ],
+      "retrieval_queries": [
+        {
+          "pattern": "/chapters/confirm",
+          "expected_path": "backend/app/api/v1/router.py"
+        }
+      ]
+    },
+    {
+      "id": "chapter_writing_lane",
+      "profile": "backend",
+      "required_paths": [
+        "backend/app/agents/chapter_writing/workflow.py",
+        "backend/app/runtime/quality_gate.py"
+      ],
+      "anchors": [],
+      "retrieval_queries": [
+        {
+          "pattern": "quality_gate_node",
+          "expected_path": "backend/app/agents/chapter_writing/workflow.py"
+        }
+      ]
+    },
+    {
+      "id": "batch_generation",
+      "profile": "backend",
+      "required_paths": [
+        "backend/app/api/v1/endpoints/writing.py",
+        "backend/app/services/studio_service.py"
+      ],
+      "anchors": [
+        {
+          "path": "backend/app/api/v1/router.py",
+          "contains": [
+            "/write/batch-generate"
+          ]
+        }
+      ],
+      "retrieval_queries": [
+        {
+          "pattern": "/write/batch-generate",
+          "expected_path": "backend/app/api/v1/router.py"
+        }
+      ]
+    },
+    {
+      "id": "canon_approval_boundary",
+      "profile": "backend",
+      "required_paths": [
+        "backend/app/api/v1/router.py",
+        "backend/app/services/studio_service.py"
+      ],
+      "anchors": [
+        {
+          "path": "backend/app/services/studio_service.py",
+          "contains": [
+            "def approve_canon_proposal"
+          ]
+        },
+        {
+          "path": "backend/app/api/v1/router.py",
+          "contains": [
+            "/settings/proposals/{proposal_id}/approve"
+          ]
+        }
+      ],
+      "retrieval_queries": [
+        {
+          "pattern": "approve_canon_proposal",
+          "expected_path": "backend/app/services/studio_service.py"
+        }
+      ]
+    },
+    {
+      "id": "frontend_outline_workbench",
+      "profile": "frontend",
+      "required_paths": [
+        "frontend/src/pages/OutlineStudioPage.tsx",
+        "frontend/src/pages/outline/OutlineDebatePanel.tsx"
+      ],
+      "anchors": [
+        {
+          "path": "frontend/src/pages/OutlineStudioPage.tsx",
+          "contains": [
+            "OutlineDebatePanel"
+          ]
+        }
+      ],
+      "retrieval_queries": [
+        {
+          "pattern": "OutlineDebatePanel",
+          "expected_path": "frontend/src/pages/OutlineStudioPage.tsx"
+        }
+      ]
+    },
+    {
+      "id": "frontend_proposal_apply",
+      "profile": "frontend",
+      "required_paths": [
+        "frontend/src/pages/WorkspacePage.tsx",
+        "frontend/src/api/studio.ts"
+      ],
+      "anchors": [
+        {
+          "path": "frontend/src/pages/WorkspacePage.tsx",
+          "contains": [
+            "applyProposal"
+          ]
+        }
+      ],
+      "retrieval_queries": [
+        {
+          "pattern": "applyProposal",
+          "expected_path": "frontend/src/pages/WorkspacePage.tsx"
+        }
+      ]
+    },
+    {
+      "id": "tooling_and_ci_context",
+      "profile": "tooling",
+      "required_paths": [
+        ".github/workflows/ci.yml",
+        "AGENTS.md",
+        "scripts/dev.sh"
+      ],
+      "anchors": [],
+      "retrieval_queries": [
+        {
+          "pattern": "verify-ai-context.sh --static",
+          "expected_path": ".github/workflows/ci.yml"
+        }
+      ]
+    }
+  ]
+}

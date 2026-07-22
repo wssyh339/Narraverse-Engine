@@ -165,7 +165,9 @@ test("real flow exposes a lightweight smoke stage with settings audit", () => {
   assert.match(flow, /run_smoke/);
   assert.match(flow, /smoke_chapter_count/);
   assert.match(flow, /settings_audit/);
-  assert.match(flow, /chapter_end=min\(50, smoke_chapter_count\)/);
+  assert.match(flow, /chapter_count = int\(DEFAULT_BASIC_INFO\["chapter_count"\]\)/);
+  assert.match(flow, /chapter_end=min\(chapter_count, smoke_chapter_count\)/);
+  assert.match(flow, /--target-words/);
 });
 
 test("local startup is driven by the root env file", () => {
@@ -363,6 +365,28 @@ test("outline debate header exposes compact scale planner summary", () => {
   assert.match(panel, /卷章/);
   assert.match(panel, /单章/);
   assert.doesNotMatch(panel, /Scale Planner：/);
+});
+
+test("outline debate confirmation is gated by visible quality evidence", () => {
+  const panel = read("src/pages/outline/OutlineDebatePanel.tsx");
+  const studio = read("src/api/studio.ts");
+
+  for (const marker of [
+    "qualityEvidenceSummary",
+    "qualityGateBlocked",
+    "activeQualityEvidence",
+    "validation_report",
+    "quality_metrics",
+    "synthesis_provenance",
+    "repair_policy",
+    "质量门未通过",
+    "修复策略",
+    "合成来源",
+  ]) {
+    assert.ok(panel.includes(marker) || studio.includes(marker), `missing marker: ${marker}`);
+  }
+  assert.match(panel, /disabled=\{!canConfirmActivePhase \|\| qualityGateBlocked\}/);
+  assert.match(panel, /disabled=\{!canConfirmAllActivePhase \|\| qualityGateBlocked\}/);
 });
 
 test("batch monitor exposes long-running progress and retry context", () => {
@@ -1050,14 +1074,27 @@ test("outline studio hides inline canon completion panel content", () => {
 
 test("docs describe the split API and outline frontend structure", () => {
   const readme = readRoot("README.md");
-  const agents = readRoot("AGENTS.md");
+  const rootAgents = readRoot("AGENTS.md");
+  const backendAgents = readRoot("backend/AGENTS.md");
+  const frontendAgents = readRoot("frontend/AGENTS.md");
 
-  for (const doc of [readme, agents]) {
-    assert.match(doc, /backend\/app\/api\/v1\/endpoints\/project_studio\.py/);
-    assert.match(doc, /backend\/app\/api\/v1\/endpoints\/knowledge\.py/);
-    assert.match(doc, /backend\/app\/api\/v1\/endpoints\/writing\.py/);
-    assert.match(doc, /frontend\/src\/pages\/outline\//);
-    assert.match(doc, /OutlineStudioPage/);
+  assert.match(rootAgents, /backend\/AGENTS\.md/);
+  assert.match(rootAgents, /frontend\/AGENTS\.md/);
+  assert.match(rootAgents, /GLOBAL-DISCOVERY-001/);
+
+  for (const path of [
+    "project_studio.py",
+    "knowledge.py",
+    "writing.py",
+  ]) {
+    assert.ok(backendAgents.includes(path), `backend rules missing ${path}`);
+    assert.ok(readme.includes(path), `README missing ${path}`);
+  }
+  for (const marker of ["frontend/src/pages/outline/", "OutlineStudioPage"]) {
+    assert.ok(frontendAgents.includes(marker), `frontend rules missing ${marker}`);
+    assert.ok(readme.includes(marker), `README missing ${marker}`);
+  }
+  for (const doc of [readme, rootAgents, backendAgents, frontendAgents]) {
     assert.doesNotMatch(doc, /canon-studio|final_outline|canon_store|正典补全/);
   }
 });

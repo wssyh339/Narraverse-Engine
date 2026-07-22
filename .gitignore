@@ -2,7 +2,8 @@ __pycache__/
 .pytest_cache/
 *.pyc
 .DS_Store
-.codex/
+.codex/*
+!.codex/config.toml
 $CODEX_HOME/
 .playwright-cli/
 
@@ -14,14 +15,28 @@ backend/data/
 backend/artifacts/
 backend/backend/
 backend/.pytest_cache/
+backups/
+exports/
 outputs/
 output/
 logs/
 .logs/
 test-artifacts/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
 
 .env
+.env.*
+!.env.example
 
 .codex-tools/
 frontend/node_modules/
 frontend/dist/
+.pnpm-store/
+
+# Optional local AI development tooling (rebuildable, never committed)
+.codebase-memory/
+.ai-context/
+.deepwiki/

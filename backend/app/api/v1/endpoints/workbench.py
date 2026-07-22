@@ -6,10 +6,14 @@ from app.db.session import get_db
 from app.schemas.workbench import (
     CreateEditorProposalRequest,
     CreateManualChapterRequest,
+    CreateMethodPackRequest,
     CreateNoteRequest,
+    CreateReferenceAssetRequest,
     CreateSnapshotRequest,
     CreateVolumeRequest,
+    ImportNovelRequest,
     ReorderChaptersRequest,
+    ReviewPlanRequest,
     TrashChaptersRequest,
     UpdateNoteRequest,
     UpdateVolumeRequest,
@@ -35,6 +39,30 @@ def delete_volume(project_id: str, volume_id: str, db: Session = Depends(get_db)
 
 def create_chapter(project_id: str, request: CreateManualChapterRequest, db: Session = Depends(get_db)):
     return success_response(workbench_service.create_chapter(db, project_id, request))
+
+
+def import_novel(project_id: str, request: ImportNovelRequest, db: Session = Depends(get_db)):
+    return success_response(workbench_service.import_novel(db, project_id, request))
+
+
+def create_method_pack(project_id: str, request: CreateMethodPackRequest, db: Session = Depends(get_db)):
+    return success_response(workbench_service.create_method_pack(db, project_id, request))
+
+
+def list_method_packs(project_id: str, db: Session = Depends(get_db)):
+    return success_response(workbench_service.list_method_packs(db, project_id))
+
+
+def create_reference_asset(project_id: str, request: CreateReferenceAssetRequest, db: Session = Depends(get_db)):
+    return success_response(workbench_service.create_reference_asset(db, project_id, request))
+
+
+def list_reference_assets(project_id: str, db: Session = Depends(get_db)):
+    return success_response(workbench_service.list_reference_assets(db, project_id))
+
+
+def review_plan(project_id: str, request: ReviewPlanRequest, db: Session = Depends(get_db)):
+    return success_response(workbench_service.build_review_plan(db, project_id, request))
 
 
 def reorder_chapters(project_id: str, request: ReorderChaptersRequest, db: Session = Depends(get_db)):

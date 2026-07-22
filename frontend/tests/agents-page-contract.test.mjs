@@ -96,11 +96,26 @@ test("agents page separates configurable agents from readonly runtime nodes", ()
   assert.match(page, /canConfigureSelectedAgent/);
   assert.match(page, /canEditControlDescription/);
   assert.match(page, /nodeOperationalLabel/);
-  assert.match(page, /内部运行 Agent/);
+  assert.match(page, /内部运行席位/);
   assert.match(page, /Prompt 任务/);
   assert.match(page, /运行名/);
   assert.match(page, /只读运行节点/);
   assert.doesNotMatch(page, /activeWorkflow\.nodes\.map/);
+});
+
+test("agents page localizes contract fields, tools, and validators for display", () => {
+  const page = read("src/pages/AgentsPage.tsx");
+
+  assert.match(page, /toolLabelMap/);
+  assert.match(page, /validatorLabelMap/);
+  assert.match(page, /jsonFieldLabelMap/);
+  assert.match(page, /displayContractLabel/);
+  assert.match(page, /displayJsonFieldLabel/);
+  assert.match(page, /读取工具/);
+  assert.match(page, /校验器/);
+  assert.match(page, /JSON 字段/);
+  assert.match(page, /allowed_read_tools/);
+  assert.match(page, /validators/);
 });
 
 test("agents page exposes Deep Agent and LangSmith management controls", () => {

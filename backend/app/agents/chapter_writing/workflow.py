@@ -8,6 +8,7 @@ from langgraph.graph import END, START, StateGraph
 from app.agents.contracts import NovelStudioState
 from app.agents.llm_io import call_agent_json
 from app.agents.prompts import AGENT_SPECS_BY_NAME
+from app.runtime.quality_gate import QualityGate
 from app.services.llm_client import llm_client
 
 
@@ -83,6 +84,29 @@ def _text_length(value: str) -> int:
     return len(re.sub(r"\s+", "", value or ""))
 
 
+def _trim_to_maximum_words(text: str, maximum: int, minimum: int = 0) -> str:
+    if maximum <= 0 or _text_length(text) <= maximum:
+        return text
+    visible_count = 0
+    hard_cut_index = 0
+    preferred_cut_index = 0
+    sentence_breaks = "。！？!?；;\n"
+    for index, char in enumerate(text):
+        if not char.isspace():
+            visible_count += 1
+        if visible_count <= maximum:
+            hard_cut_index = index + 1
+        if visible_count >= max(1, minimum) and visible_count <= maximum and char in sentence_breaks:
+            preferred_cut_index = index + 1
+        if visible_count > maximum:
+            break
+    cut_index = preferred_cut_index or hard_cut_index
+    trimmed = text[:cut_index].rstrip()
+    if trimmed and trimmed[-1] not in "。！？!?」”』":
+        trimmed = f"{trimmed}。"
+    return trimmed or text[:hard_cut_index].rstrip()
+
+
 def _length_requirements(state: NovelStudioState) -> dict[str, Any]:
     target = _chapter_word_target(state)
     minimum = _chapter_word_min(state, target)
@@ -110,7 +134,7 @@ def _length_instruction(state: NovelStudioState) -> str:
     if not target:
         return f"当前只能生成第{chapter_no}章《{chapter_title}》完整正文，不得续写下一章，不得只输出摘要。"
     maximum = requirements["maximum_words"]
-    max_clause = f"，建议不超过 {maximum} 字" if maximum else ""
+    max_clause = f"，不得超过 {maximum} 字" if maximum else ""
     return f"当前只能生成第{chapter_no}章《{chapter_title}》正文，不得续写下一章；本章目标约 {target} 字，最低可接受 {minimum} 字{max_clause}；必须写成完整正文，不得压缩成概要或片段。"
 
 
@@ -202,11 +226,13 @@ def _agent_context(state: NovelStudioState, extra: dict[str, Any] | None = None)
         "volume_outline": state.volume_outline,
         "rolling_chapter_outline": state.rolling_chapter_outline,
         "current_chapter_outline": state.current_chapter_outline,
+        "chapter_prep": state.chapter_prep,
         "chapter_card": state.chapter_card,
         "scene_outline": state.scene_outline,
         "completed_chapters": state.completed_chapters[-5:],
         "previous_agent_outputs": {
             "chapter_card": state.chapter_card,
+            "chapter_prep": state.chapter_prep,
             "scene_outline": state.scene_outline,
             "plot_draft": state.plot_draft,
             "dialogue_draft": state.dialogue_draft,
@@ -267,15 +293,87 @@ def _chapter_title(state: NovelStudioState) -> str:
     return str(state.current_chapter_outline.get("title") or f"第{_chapter_no(state)}章")
 
 
+def _context_reference_names(state: NovelStudioState) -> list[str]:
+    names: list[str] = []
+    if not isinstance(state.canon_context, dict):
+        return names
+    for key, primary in (("characters", "name"), ("world_facts", "title"), ("story_entities", "name")):
+        items = state.canon_context.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            value = str(item.get(primary) or item.get("name") or item.get("title") or "").strip()
+            if value:
+                names.append(value)
+    return list(dict.fromkeys(names))
+
+
+def _chapter_prep_from_state(state: NovelStudioState) -> dict[str, Any]:
+    chapter = state.current_chapter_outline if isinstance(state.current_chapter_outline, dict) else {}
+    requirements = _length_requirements(state)
+    previous_summaries = state.canon_context.get("previous_summaries") if isinstance(state.canon_context, dict) else []
+    previous_summary = ""
+    if isinstance(previous_summaries, list) and previous_summaries and isinstance(previous_summaries[-1], dict):
+        previous_summary = str(previous_summaries[-1].get("summary") or "")
+    raw_foreshadowing = state.canon_context.get("foreshadowing") if isinstance(state.canon_context, dict) else []
+    open_foreshadowing: list[str] = []
+    if isinstance(raw_foreshadowing, list):
+        for item in raw_foreshadowing[:8]:
+            if isinstance(item, dict):
+                content = str(item.get("content") or item.get("title") or "").strip()
+                if content:
+                    open_foreshadowing.append(content)
+    return {
+        "chapter_no": _chapter_no(state),
+        "chapter_title": _chapter_title(state),
+        "chapter_position": str(chapter.get("chapter_position") or chapter.get("position") or "推进"),
+        "target_emotion": str(chapter.get("target_emotion") or chapter.get("emotion") or "压力升高后落在状态变化上"),
+        "pressure_level": _positive_int(chapter.get("pressure_level"), 5),
+        "reader_pull_reason": str(
+            chapter.get("reader_pull_reason")
+            or chapter.get("chapter_hook")
+            or chapter.get("cliffhanger")
+            or "结尾留下必须回应的新问题。"
+        ),
+        "required_canon": _context_reference_names(state),
+        "open_foreshadowing": open_foreshadowing,
+        "previous_summary": previous_summary,
+        "word_budget": {
+            "target": requirements["chapter_word_target"],
+            "minimum": requirements["minimum_acceptable_words"],
+            "maximum": requirements["maximum_words"],
+        },
+        "must_avoid": [
+            "不得改写已确认章纲的核心事件。",
+            "不得把写作工程词、细纲说明或读者视角元信息写入正文。",
+            "低压、关系或信息整理章可以弱钩子，但仍必须保留往下看的理由。",
+        ],
+    }
+
+
 def _card_from_outline(state: NovelStudioState, outline: dict[str, Any] | None = None) -> dict[str, Any]:
     chapter = outline or state.current_chapter_outline
+    prep = state.chapter_prep or _chapter_prep_from_state(state)
+    prep_word_budget = prep.get("word_budget") if isinstance(prep.get("word_budget"), dict) else {}
     title = str(chapter.get("title") or _chapter_title(state))
     conflict = str(chapter.get("conflict") or "主角当前欲望与外部阻力发生正面碰撞。")
     core_event = str(chapter.get("core_event") or chapter.get("outline") or "推进当前章节核心事件。")
+    target = _positive_int(prep_word_budget.get("target"), _chapter_word_target(state))
     return {
         "chapter_no": int(chapter.get("chapter_no") or _chapter_no(state)),
         "chapter_title": title,
-        "word_target": _chapter_word_target(state),
+        "word_target": target,
+        "word_budget": {
+            "target": target,
+            "minimum": _positive_int(prep_word_budget.get("minimum"), _chapter_word_min(state, target)),
+            "maximum": _positive_int(prep_word_budget.get("maximum"), _chapter_word_max(state)),
+        },
+        "chapter_position": str(chapter.get("chapter_position") or prep.get("chapter_position") or "推进"),
+        "target_emotion": str(chapter.get("target_emotion") or prep.get("target_emotion") or "压力升高后落在状态变化上"),
+        "pressure_level": _positive_int(chapter.get("pressure_level") or prep.get("pressure_level"), 5),
+        "reader_pull_reason": str(chapter.get("reader_pull_reason") or prep.get("reader_pull_reason") or "新的问题逼迫主角继续行动。"),
         "chapter_function": str(chapter.get("plot_purpose") or "推进核心矛盾，并制造至少一种状态变化。"),
         "one_sentence": core_event,
         "opening_state": "主角带着上一章遗留压力进入新局面。",
@@ -296,11 +394,21 @@ def _scene_outline_from_card(card: dict[str, Any]) -> dict[str, Any]:
     escalation = card.get("conflict_escalation")
     if not isinstance(escalation, list) or not escalation:
         escalation = ["目标出现", "阻力升级", "选择落地"]
+    word_budget = card.get("word_budget") if isinstance(card.get("word_budget"), dict) else {}
+    target = _positive_int(word_budget.get("target"), _positive_int(card.get("word_target"), 3000))
+    minimum = _positive_int(word_budget.get("minimum"), int(target * 0.85) if target else 0)
+    scene_min = max(1, minimum // 3) if minimum else 0
+    dense_scene = max(scene_min, target - scene_min * 2) if target else scene_min
     return {
         "chapter_title": title,
         "scenes": [
             {
                 "scene_no": 1,
+                "beat_type": "setup",
+                "density": "medium",
+                "function_label": "建立目标和压力",
+                "word_budget_min": scene_min,
+                "word_budget_max": scene_min + 250 if scene_min else 0,
                 "goal": str(card.get("protagonist_goal") or "建立本章目标"),
                 "conflict": str(escalation[0]),
                 "information_change": "读者理解本章核心压力。",
@@ -309,6 +417,11 @@ def _scene_outline_from_card(card: dict[str, Any]) -> dict[str, Any]:
             },
             {
                 "scene_no": 2,
+                "beat_type": "pressure",
+                "density": "dense",
+                "function_label": "升级阻力和信息差",
+                "word_budget_min": dense_scene,
+                "word_budget_max": dense_scene + 400 if dense_scene else 0,
                 "goal": "逼近关键选择",
                 "conflict": str(escalation[min(1, len(escalation) - 1)]),
                 "information_change": "关键事实或误解浮出水面。",
@@ -317,6 +430,11 @@ def _scene_outline_from_card(card: dict[str, Any]) -> dict[str, Any]:
             },
             {
                 "scene_no": 3,
+                "beat_type": "payoff",
+                "density": "medium",
+                "function_label": "兑现选择和后果",
+                "word_budget_min": scene_min,
+                "word_budget_max": scene_min + 250 if scene_min else 0,
                 "goal": "完成选择并落下后果",
                 "conflict": str(escalation[-1]),
                 "information_change": str(card.get("irreversible_consequence") or "局势被改写。"),
@@ -327,6 +445,31 @@ def _scene_outline_from_card(card: dict[str, Any]) -> dict[str, Any]:
         "emotion_curve": ["压迫", "升级", "余震"],
         "information_release_order": ["目标", "阻力", "代价"],
     }
+
+
+def _normalize_scene_outline(fallback: dict[str, Any], value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return fallback
+    normalized = {**fallback, **value}
+    fallback_scenes = fallback.get("scenes") if isinstance(fallback.get("scenes"), list) else []
+    scenes = value.get("scenes") if isinstance(value.get("scenes"), list) else []
+    if not scenes:
+        normalized["scenes"] = fallback_scenes
+        return normalized
+    normalized_scenes: list[dict[str, Any]] = []
+    for index, scene in enumerate(scenes):
+        fallback_scene = fallback_scenes[index] if index < len(fallback_scenes) and isinstance(fallback_scenes[index], dict) else {}
+        if not isinstance(scene, dict):
+            normalized_scenes.append(dict(fallback_scene))
+            continue
+        merged_scene = {**fallback_scene, **scene}
+        if merged_scene.get("word_budget_min") in (None, "", 0) and fallback_scene.get("word_budget_min"):
+            merged_scene["word_budget_min"] = fallback_scene["word_budget_min"]
+        if merged_scene.get("word_budget_max") in (None, "", 0) and fallback_scene.get("word_budget_max"):
+            merged_scene["word_budget_max"] = fallback_scene["word_budget_max"]
+        normalized_scenes.append(merged_scene)
+    normalized["scenes"] = normalized_scenes
+    return normalized
 
 
 def build_context_node(data: dict[str, Any]) -> dict[str, Any]:
@@ -342,6 +485,11 @@ def build_context_node(data: dict[str, Any]) -> dict[str, Any]:
     context.setdefault("previous_summaries", state.completed_chapters[-5:])
     context.setdefault("unresolved_continuity_issues", state.continuity_issues)
     return _update(data, current_agent="canon_context", progress=0.38, canon_context=context)
+
+
+def chapter_prep_node(data: dict[str, Any]) -> dict[str, Any]:
+    state = _state(data)
+    return _update(data, current_agent="chapter_prep", progress=0.4, chapter_prep=_chapter_prep_from_state(state))
 
 
 def chief_architect_node(data: dict[str, Any]) -> dict[str, Any]:
@@ -459,7 +607,7 @@ def chapter_card_node(data: dict[str, Any]) -> dict[str, Any]:
     payload, meta = _agent_payload(
         state,
         "chapter_planner",
-        "根据小说宪法、当前卷大纲、滚动章节大纲、叙事账本和当前章纲生成单章章节卡。必须输出 chapter_card。",
+        "根据小说宪法、已确认卷纲、已确认章节窗口或上游章纲、叙事账本、写前准备和当前章纲生成单章章节卡。必须输出 chapter_card，并保留 chapter_position、target_emotion、reader_pull_reason 和 word_budget。",
         {"chapter_card": fallback_card},
         {"prompt_id": "chapter_card"},
     )
@@ -470,6 +618,10 @@ def chapter_card_node(data: dict[str, Any]) -> dict[str, Any]:
             card = _card_from_outline(state, chapters[0])
         else:
             card = fallback_card
+    card = {**fallback_card, **card}
+    for key in ("chapter_position", "target_emotion", "pressure_level", "reader_pull_reason", "word_budget"):
+        if not card.get(key):
+            card[key] = fallback_card.get(key)
     return _update(
         data,
         current_agent="chapter_card",
@@ -490,8 +642,7 @@ def scene_outline_node(data: dict[str, Any]) -> dict[str, Any]:
         {"prompt_id": "scene_outline"},
     )
     scene_outline = payload.get("scene_outline")
-    if not isinstance(scene_outline, dict):
-        scene_outline = fallback_outline
+    scene_outline = _normalize_scene_outline(fallback_outline, scene_outline)
     return _update(
         data,
         current_agent="scene_outline",
@@ -692,11 +843,22 @@ def quality_gate_node(data: dict[str, Any]) -> dict[str, Any]:
     state = _state(data)
     review_blockers = [item for item in state.review_notes if item.get("severity") in {"blocking", "error"}]
     fact_blockers = [item for item in state.fact_check_report.get("issues", []) if item.get("severity") in {"blocking", "error"}]
-    status = "needs_revision" if review_blockers or fact_blockers else "passed"
+    requirements = _length_requirements(state)
+    deterministic = QualityGate().evaluate_text(
+        state.integrated_draft,
+        chapter_title=_chapter_title(state),
+        minimum_words=requirements["minimum_acceptable_words"],
+        target_words=requirements["chapter_word_target"],
+        maximum_words=requirements["maximum_words"],
+    )
+    deterministic_blockers = [item for item in deterministic.get("issues", []) if item.get("severity") == "blocking"]
+    status = "needs_revision" if review_blockers or fact_blockers or deterministic_blockers else "passed"
     gate = {
         "status": status,
         "revision_count": state.revision_count,
-        "blocking_issue_count": len(review_blockers) + len(fact_blockers),
+        "blocking_issue_count": len(review_blockers) + len(fact_blockers) + len(deterministic_blockers),
+        "warning_issue_count": deterministic.get("warning_issue_count", 0),
+        "deterministic_report": deterministic,
         "message": "需要修订后再定稿。" if status == "needs_revision" else "通过质量门，可以进入风格统一与设定整理。",
     }
     return _update(data, current_agent="quality_gate", progress=0.82, quality_gate=gate)
@@ -735,13 +897,14 @@ def style_unifier_node(data: dict[str, Any]) -> dict[str, Any]:
     payload, meta = _agent_payload(
         state,
         "style_unifier",
-        f"按照 style_guide 统一章节风格。必须输出 style_polished_text 和 final_chapter_text。{length_instruction} 不得删减关键情节或压缩正文。",
+        f"按照 style_guide 统一章节风格。必须输出 style_polished_text 和 final_chapter_text。{length_instruction} 不得删减关键情节；若超过上限，只能压缩冗余过场、重复心理和解释性设定说明。",
         {"style_polished_text": text, "final_chapter_text": text},
     )
     final_text = str(payload.get("final_chapter_text") or payload.get("style_polished_text") or text)
     style_polished_text = str(payload.get("style_polished_text", final_text))
     target = _chapter_word_target(state)
     minimum = _chapter_word_min(state, target)
+    maximum = _chapter_word_max(state)
     current_length = _text_length(final_text)
     length_attempts: list[dict[str, Any]] = []
     length_meta: dict[str, Any] | None = None
@@ -791,11 +954,82 @@ def style_unifier_node(data: dict[str, Any]) -> dict[str, Any]:
             final_text = expanded_text
             style_polished_text = str(expansion_payload.get("style_polished_text") or expanded_text)
             current_length = expanded_length
+    max_length_attempts: list[dict[str, Any]] = []
+    max_length_meta: dict[str, Any] | None = None
+    max_length_guard_attempts = 2
+    for attempt_no in range(1, max_length_guard_attempts + 1):
+        if maximum <= 0 or current_length <= maximum:
+            break
+        compression_payload, compression_meta = _agent_payload(
+            state,
+            "style_unifier",
+            (
+                f"当前 final_chapter_text 有 {current_length} 字，超过本章上限 {maximum} 字。"
+                f"请压缩到 {minimum}-{maximum} 字之间，保留本章危机、高潮、结果、结尾钩子和必要伏笔。"
+                "只删除重复心理、解释性设定说明、冗余过场和重复动作；不得改写为概要，不得续写下一章。"
+                "必须输出 style_polished_text 和 final_chapter_text。"
+            ),
+            {"style_polished_text": final_text, "final_chapter_text": final_text},
+            {
+                "prompt_id": "max_length_guard",
+                "source_text": final_text,
+                "length_guard": {
+                    "attempt": attempt_no,
+                    "target": target,
+                    "minimum": minimum,
+                    "maximum": maximum,
+                    "current": current_length,
+                    "excess": current_length - maximum,
+                },
+            },
+        )
+        compressed_text = str(compression_payload.get("final_chapter_text") or compression_payload.get("style_polished_text") or "")
+        compressed_length = _text_length(compressed_text)
+        attempt_meta = {
+            **compression_meta,
+            "attempt": attempt_no,
+            "target_words": target,
+            "minimum_acceptable_words": minimum,
+            "maximum_words": maximum,
+            "before_words": current_length,
+            "after_words": compressed_length,
+            "compressed": minimum <= compressed_length < current_length,
+        }
+        max_length_attempts.append(attempt_meta)
+        if minimum <= compressed_length < current_length:
+            final_text = compressed_text
+            style_polished_text = str(compression_payload.get("style_polished_text") or compressed_text)
+            current_length = compressed_length
+    if maximum > 0 and current_length > maximum:
+        trimmed_text = _trim_to_maximum_words(final_text, maximum, minimum)
+        trimmed_length = _text_length(trimmed_text)
+        if trimmed_length < current_length:
+            max_length_attempts.append(
+                {
+                    "attempt": len(max_length_attempts) + 1,
+                    "source": "deterministic_trim",
+                    "target_words": target,
+                    "minimum_acceptable_words": minimum,
+                    "maximum_words": maximum,
+                    "before_words": current_length,
+                    "after_words": trimmed_length,
+                    "compressed": True,
+                }
+            )
+            final_text = trimmed_text
+            style_polished_text = trimmed_text
+            current_length = trimmed_length
     if length_attempts:
         length_meta = {
             **length_attempts[-1],
             "attempts": length_attempts,
             "reached_minimum": current_length >= minimum,
+        }
+    if max_length_attempts:
+        max_length_meta = {
+            **max_length_attempts[-1],
+            "attempts": max_length_attempts,
+            "within_maximum": maximum <= 0 or current_length <= maximum,
         }
     final_text = _normalize_chapter_heading(state, final_text)
     style_polished_text = _normalize_chapter_heading(state, style_polished_text)
@@ -810,6 +1044,8 @@ def style_unifier_node(data: dict[str, Any]) -> dict[str, Any]:
     llm_results = _llm_results(state, "style_unifier", meta)
     if length_meta is not None:
         llm_results["style_unifier_length_guard"] = length_meta
+    if max_length_meta is not None:
+        llm_results["style_unifier_max_length_guard"] = max_length_meta
     return _update(
         data,
         current_agent="style_unifier",
@@ -825,12 +1061,15 @@ def post_length_review_node(data: dict[str, Any]) -> dict[str, Any]:
     state = _state(data)
     target = _chapter_word_target(state)
     minimum = _chapter_word_min(state, target)
+    maximum = _chapter_word_max(state)
     final_text = state.final_chapter_text or state.style_polished_text
     final_length = _text_length(final_text)
     expected_title = _chapter_title(state).strip()
     first_line = next((line.strip().lstrip("#").strip() for line in final_text.splitlines() if line.strip()), "")
     heading_ok = not expected_title or first_line == expected_title
-    length_ok = minimum <= 0 or final_length >= minimum
+    minimum_ok = minimum <= 0 or final_length >= minimum
+    maximum_ok = maximum <= 0 or final_length <= maximum
+    length_ok = minimum_ok and maximum_ok
     status = "passed" if length_ok and heading_ok else "passed_with_notes" if length_ok else "needs_revision"
     checks = {
         "status": status,
@@ -839,16 +1078,20 @@ def post_length_review_node(data: dict[str, Any]) -> dict[str, Any]:
         "final_words": final_length,
         "target_words": target,
         "minimum_acceptable_words": minimum,
+        "maximum_words": maximum,
         "length_ok": length_ok,
+        "minimum_ok": minimum_ok,
+        "maximum_ok": maximum_ok,
         "heading_ok": heading_ok,
         "length_guard_applied": "style_unifier_length_guard" in state.agent_llm_results,
+        "max_length_guard_applied": "style_unifier_max_length_guard" in state.agent_llm_results,
     }
     review_notes = list(state.review_notes)
     severity = "info" if status == "passed" else "warning"
     message = (
         f"扩写后复审通过：最终正文 {final_length} 字，目标 {target or '未设置'} 字。"
         if status == "passed"
-        else f"扩写后复审发现仍需关注：最终正文 {final_length} 字，最低要求 {minimum or '未设置'} 字，标题匹配={heading_ok}。"
+        else f"扩写后复审发现仍需关注：最终正文 {final_length} 字，最低要求 {minimum or '未设置'} 字，最高要求 {maximum or '未设置'} 字，标题匹配={heading_ok}。"
     )
     review_notes.append(
         {
@@ -958,6 +1201,8 @@ class AgentWorkflow:
     def _draft_progress_agent(node_name: str) -> str:
         if node_name == "build_context":
             return "canon_context"
+        if node_name == "chapter_prep":
+            return "chapter_prep"
         if node_name == "revise_draft":
             return "reviewer"
         return node_name
@@ -983,6 +1228,7 @@ class AgentWorkflow:
         graph = StateGraph(dict)
         nodes: list[tuple[str, Callable[[dict[str, Any]], dict[str, Any]]]] = [
             ("build_context", build_context_node),
+            ("chapter_prep", chapter_prep_node),
             ("chapter_card", chapter_card_node),
             ("scene_outline", scene_outline_node),
             ("plot_narrator", plot_narrator_node),
@@ -1002,7 +1248,8 @@ class AgentWorkflow:
         for name, node in nodes:
             graph.add_node(name, node)
         graph.add_edge(START, "build_context")
-        graph.add_edge("build_context", "chapter_card")
+        graph.add_edge("build_context", "chapter_prep")
+        graph.add_edge("chapter_prep", "chapter_card")
         graph.add_edge("chapter_card", "scene_outline")
         graph.add_edge("scene_outline", "plot_narrator")
         graph.add_edge("plot_narrator", "dialogue_writer")
@@ -1040,6 +1287,7 @@ class AgentWorkflow:
     def stream_chapter_draft(self, state: NovelStudioState):
         nodes: list[tuple[str, Callable[[dict[str, Any]], dict[str, Any]]]] = [
             ("build_context", build_context_node),
+            ("chapter_prep", chapter_prep_node),
             ("chapter_card", chapter_card_node),
             ("scene_outline", scene_outline_node),
             ("plot_narrator", plot_narrator_node),

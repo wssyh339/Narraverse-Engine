@@ -54,6 +54,10 @@ def test_chapter_length_requirements_cap_project_minimum_at_explicit_chapter_tar
     assert requirements["minimum_acceptable_words"] == 400
 
 
+def test_fast_draft_text_length_ignores_all_whitespace() -> None:
+    assert studio_service._fast_draft_text_length("一 二\n三\t四\r五") == 5
+
+
 def test_create_project_returns_project_and_story_bible() -> None:
     reset_database()
     client = TestClient(app)
@@ -894,7 +898,7 @@ def test_batch_parent_progress_includes_child_fraction_eta_and_retry_metadata() 
         assert progress["completed_steps"] == 1
         assert progress["child_current_step"] == "style_unifier"
         assert progress["child_step_label"] == "风格统一"
-        assert progress["child_completed_steps"] == 12
+        assert progress["child_completed_steps"] == 13
         assert progress["overall_percent"] > 5
         assert progress["completed_chapters"] == 1
         assert progress["total_chapters"] == 20
@@ -1945,16 +1949,24 @@ def test_workflows_project_delete_and_foreshadowing_lifecycle() -> None:
                 assert node["configurable"] is True
     debate_workflow = next(workflow for workflow in workflows_payload["data"]["workflows"] if workflow["id"] == "outline_debate_engine")
     debate_node_ids = {node["id"] for node in debate_workflow["nodes"]}
-    assert {"debate_book", "debate_volumes", "debate_chapters", "debate_character_generator", "debate_setting_generator"}.issubset(debate_node_ids)
+    assert {
+        "debate_book",
+        "debate_market_position",
+        "debate_volumes",
+        "debate_chapters",
+        "debate_character_generator",
+        "debate_setting_generator",
+    }.issubset(debate_node_ids)
     assert all(
         node.get("node_subtype") == "runtime_agent" and node["configurable"] is False
         for node in debate_workflow["nodes"]
         if str(node.get("agent_name") or "").startswith("outline_debate/")
     )
-    assert any(edge["source"] == "debate_book" and edge["target"] == "debate_volumes" for edge in debate_workflow["edges"])
+    assert any(edge["source"] == "debate_book" and edge["target"] == "debate_market_position" for edge in debate_workflow["edges"])
+    assert any(edge["source"] == "debate_market_position" and edge["target"] == "debate_volumes" for edge in debate_workflow["edges"])
     draft_workflow = next(workflow for workflow in workflows_payload["data"]["workflows"] if workflow["id"] == "chapter_draft")
     draft_node_ids = {node["id"] for node in draft_workflow["nodes"]}
-    assert {"canon_context", "quality_gate", "revise_draft", "canon_curator"}.issubset(draft_node_ids)
+    assert {"canon_context", "chapter_prep", "quality_gate", "revise_draft", "canon_curator"}.issubset(draft_node_ids)
 
     character = client.post(
         f"/api/projects/{project_id}/characters",

@@ -1630,6 +1630,24 @@ textarea.ant-input::placeholder {
   padding: 20px;
 }
 
+.review-plan-preview {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--studio-border);
+  border-radius: var(--studio-radius);
+  background: var(--studio-surface-soft);
+}
+
+.review-plan-preview pre {
+  max-height: 260px;
+  margin: 8px 0 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .outline-studio-grid .outline-editor-panel,
 .outline-studio-grid > .outline-debate-panel {
   max-height: calc(100vh - 138px);
@@ -2127,6 +2145,13 @@ textarea.ant-input::placeholder {
 
 .outline-debate-scroll-back {
   color: var(--studio-accent-strong);
+}
+
+.outline-debate-quality-evidence {
+  display: grid;
+  gap: 6px;
+  padding: 0 12px 10px;
+  border-bottom: 1px solid var(--studio-border-subtle);
 }
 
 .outline-debate-round-separator {

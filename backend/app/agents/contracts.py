@@ -31,6 +31,7 @@ class NovelStudioState(BaseModel):
     characters: list[dict[str, Any]] = Field(default_factory=list)
     outline: list[dict[str, Any]] = Field(default_factory=list)
     current_chapter_outline: dict[str, Any] = Field(default_factory=dict)
+    chapter_prep: dict[str, Any] = Field(default_factory=dict)
     chapter_card: dict[str, Any] = Field(default_factory=dict)
     scene_outline: dict[str, Any] = Field(default_factory=dict)
     plot_draft: str = ""

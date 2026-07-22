@@ -49,14 +49,20 @@ def test_langgraph_swarm_dependency_is_declared() -> None:
 
 def test_docs_describe_active_agent_lanes() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
-    for doc in [readme, agents]:
+    root_agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    backend_agents = (ROOT / "backend/AGENTS.md").read_text(encoding="utf-8")
+    assert "backend/AGENTS.md" in root_agents
+    assert "GLOBAL-DISCOVERY-001" in root_agents
+    assert "BACKEND-AGENT-LANES-001" in backend_agents
+    for doc in [readme, backend_agents]:
         assert "creation_star" in doc
         assert "outline_debate" in doc
         assert "chapter_writing" in doc
-        assert "outline_swarm" in doc and "已删除" in doc
-    assert "返回初始化、章节规划" not in agents
-    assert "结构化故事状态、章节规划" not in agents
+        assert "outline_swarm" not in doc
+    assert "返回初始化、章节规划" not in backend_agents
+    assert "结构化故事状态、章节规划" not in backend_agents
+    assert "历史源码" in backend_agents
+    assert "对外稳定的正式 Agent 角色为 11 个" not in backend_agents
 
 
 def test_active_readme_uses_outline_debate_not_legacy_swarm_labels() -> None:
