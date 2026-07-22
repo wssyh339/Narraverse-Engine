@@ -18,7 +18,7 @@ README 的前几屏应该回答：
 
 推荐定位：
 
-> 本地优先的 LangGraph 多 Agent 长篇小说创作工作室，包含正典图谱、大纲 Swarm、人工审查和可导出写作流程。
+> 本地优先的 LangGraph 多 Agent 长篇小说创作工作室，包含正典图谱、大纲议事、人工审查和可导出写作流程。
 
 竞争点不是“AI 能写 prose”，而是：
 
@@ -36,6 +36,7 @@ README 的前几屏应该回答：
 - [x] `CODE_OF_CONDUCT.md`
 - [x] `SECURITY.md`
 - [x] `CHANGELOG.md`
+- [x] 根 `AGENTS.md` 与 `backend/`、`frontend/`、`scripts/`、`docs/` 作用域规则
 - [x] `docs/architecture.md`
 - [x] `docs/prompt-catalog.md`
 - [x] `docs/roadmap.md`
@@ -58,7 +59,7 @@ README 用来承载：
 - 测试命令；
 - 贡献入口。
 
-内部信息放到 docs：
+详细说明放到 docs；强制项目约束从根 `AGENTS.md` 路由到各作用域规则：
 
 - 详细项目约束；
 - 旧验收报告；
@@ -70,7 +71,7 @@ README 用来承载：
 
 1. 三条独立 Agent 线。
 2. 正典优先工作流。
-3. LangGraph 和 langgraph-swarm 编排。
+3. LangGraph 章节编排和 `outline_debate` 服务层议事。
 4. 预览-确认-提交的安全模型。
 5. OpenAI 兼容的供应商无关 LLM Client。
 6. 用本地 SQLite 模拟图结构，避免重型外部图数据库依赖。
@@ -81,7 +82,7 @@ README 用来承载：
 
 1. 增加真实截图：
    - 创作 Star 世界观抽卡；
-   - 大纲 Swarm active-agent 图；
+   - 大纲议事流与拓扑证据视图；
    - 正文工作台和设定侧栏。
 2. 增加更完整的示例项目输出。
 3. 增加一个小型 no-key demo 脚本。

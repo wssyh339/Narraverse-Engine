@@ -22,6 +22,7 @@ API 合约阶段：`1.0 Draft`
 - [核心工作流](#核心工作流)
 - [项目状态](#项目状态)
 - [架构概览](#架构概览)
+- [AI 辅助开发（可选）](#ai-辅助开发可选)
 - [LLM 配置](#llm-配置)
 - [CLI 与 API](#cli-与-api)
 - [测试与验证](#测试与验证)
@@ -218,11 +219,37 @@ pnpm dev
 
 如果端口被占用，只需要调整 `.env` 中的 `BACKEND_PORT`、`FRONTEND_PORT`、`FRONTEND_ORIGIN` 和 `VITE_API_BASE_URL`。
 
+### AI 辅助开发（可选）
+
+仓库提供本地代码图谱、ADR / Mermaid 架构事实和 Repomix 上下文快照。它们不属于产品运行时，不会改变后端、前端、SQLite 或默认 Docker Compose。macOS、Linux 或 WSL 可运行：
+
+```bash
+./scripts/code-intel.sh install
+./scripts/code-intel.sh index
+./scripts/code-intel.sh status
+./scripts/build-ai-context.sh --profile full
+./scripts/verify-ai-context.sh --static
+# 手动或定期执行完整验收
+./scripts/verify-ai-context.sh --full
+```
+
+- `codebase-memory-mcp` 固定为 `0.9.0`。服务端代理只暴露 `search_graph`、`query_graph`、`trace_path`、`get_code_snippet`、`get_graph_schema`、`get_architecture`、`search_code` 和 `index_status` 八个查询工具；客户端 allowlist 只是附加防线，索引、删除和跨仓库能力不会由服务端提供。
+- 图谱默认以 Git index 判断文件成员资格（已提交文件与 staged 新文件），但读取当前工作树内容，因此能反映尚未提交的修改。真正的 untracked 文件应优先用 `git add` 纳入 index；明确的一次性草稿才可通过精确路径 `--allow-untracked PATH` 加入。
+- 图谱构建先生成独立的只读输入副本和 manifest，不通过硬链接把索引器连接到工作树。索引仅位于 `.codebase-memory/`，创建和刷新必须显式执行。
+- Repomix 固定为 `1.17.0`，提供 `full`、`backend`、`frontend`、`tooling` 四个 profile；每次构建都按 manifest 复制不可变的只读输入，再生成 `.ai-context/` 快照。其运行时使用独立的 package/lock，并在隔离目录以 `npm ci --ignore-scripts` 干净安装，不进入产品依赖。
+- `--static` 只检查规则、配置、忽略策略和单元测试，不运行第三方 AI 二进制，适合常规 CI/PR；`--full` 会从新鲜输入重建 Repomix 快照与代码图谱，并检查 MCP 握手、manifest、排除规则和查询准确性，适合工具变更后的手动或定期验收。
+- `.codebase-memory/` 与 `.ai-context/` 都是可重建生成物，已被 Git 忽略，不得提交。
+- 首次安装会从 GitHub 下载固定校验和的代码图谱二进制。以上工具都不应把仓库源码上传到 Wiki 或其他远程服务；DeepWiki Open 继续禁用，不得克隆、安装、运行或生成 Wiki 缓存。
+- Windows 原生 PowerShell 请通过 WSL 使用这些可选脚本。
+
+完整的安装、升级、卸载、隐私和故障处理说明见 [AI 辅助开发指南](docs/ai-assisted-development.md)，架构决策见 [ADR 索引](docs/adr/README.md)。
+
 ### 部署前检查
 
 准备上传到 GitHub 或打 tag 前，建议运行：
 
 ```bash
+python3 scripts/verify-agents-guidance.py
 docker compose config --quiet
 python -m pytest backend/tests -q
 cd frontend
@@ -235,7 +262,7 @@ pnpm build
 - `.env` 不提交，只提交 `.env.example`。
 - 不提交 `data/`、`backend/data/`、`backend/artifacts/`、`output/`、`outputs/`、`logs/`、`test-artifacts/`。
 - README 中的端口、Node/Python 版本、Docker 命令必须与 `docker-compose.yml`、`frontend/package.json`、`backend/requirements.txt` 一致。
-- 若新增部署方式，必须同步更新 `AGENTS.md`、README 和验证命令。
+- 若新增部署方式，必须同步更新根规则路由、`scripts/AGENTS.md`、README 和验证命令。
 
 ## 核心功能
 
@@ -246,6 +273,7 @@ pnpm build
 | 正典库 | 维护角色、剧情实体、世界观事实、图节点、图边、伏笔和连续性问题。 |
 | 正文工作台 | 三栏式写作界面，包含章节目录、Markdown 编辑器、AI 助手、修改提案、版本和字数统计。 |
 | 批量生成 | 后台逐章生成正文，任务可恢复、可暂停、可重试，并显示长任务进度。 |
+| 写作资料 | 笔记页支持导入已有小说、保存 Method Pack、保存对标资产，并生成 solo/lean/full 审稿计划。 |
 | Agent 配置 | 查看可视化工作流，编辑 Agent 提示词，并按 Agent 配置模型。 |
 | 版本系统 | 保存 Agent 快照、diff 对比、回滚和分支式探索。 |
 | 导出 | 支持 Markdown、TXT、HTML、PDF、EPUB、Word 等本地导出路径；当前 PDF/EPUB/Word 属于本地最小可读实现，不等同完整排版引擎。 |
@@ -271,6 +299,8 @@ pnpm build
 
 章节写作
   -> 构建 canon_context
+  -> 章节写前准备
+  -> 章节卡和场景细纲
   -> 生成章节正文
   -> 审校 / 事实核查 / 质量门
   -> 修订或定稿
@@ -323,9 +353,11 @@ flowchart LR
   Services --> Creation["创作 Star"]
   Services --> Debate["大纲议事"]
   Services --> Chapter["章节写作"]
+  Services --> Materials["写作资料"]
   Creation --> Canon["正典库"]
   Debate --> Canon
   Chapter --> Canon
+  Materials --> DB
   Services --> Jobs["后台任务 / Agent 轨迹"]
   Services --> DB["SQLite"]
   Services --> LLM["统一 LLM Client"]
@@ -335,7 +367,9 @@ flowchart LR
 仓库结构：
 
 ```text
+AGENTS.md                 # 全局基线、作用域路由和稳定规则 ID
 backend/
+  AGENTS.md               # 后端、Agent、API、数据和 LLM 细则
   app/
     agents/
       creation_star/      # 抽卡式立项线
@@ -350,6 +384,7 @@ backend/
     services/             # 应用编排和持久化服务
     schemas/              # pydantic v2 请求、响应和状态模型
 frontend/
+  AGENTS.md               # React 工作室、交互审批和前端验证
   src/
     api/                  # axios API 客户端
     components/           # 共享工作室组件
@@ -358,7 +393,11 @@ frontend/
       outline/            # frontend/src/pages/outline/ 大纲目录、编辑器和议事面板
     pages/OutlineStudioPage.tsx
     store/                # Zustand 项目状态
-docs/                     # 架构、路线图、验证报告和开源说明
+scripts/
+  AGENTS.md               # 启动、部署、AI 上下文工具和 CI
+docs/
+  AGENTS.md               # 文档事实层、ADR、Mermaid 和历史资料
+                           # 其余为架构、路线图、验证报告和开源说明
 examples/                 # 可运行的示例输入
 ```
 
@@ -367,11 +406,15 @@ Agent 三线架构：
 - `creation_star`：抽卡式立项候选生成与提交编排。
 - `outline_debate`：大纲议事流，入口为 `backend/app/api/v1/endpoints/outline_debate.py` 与 `backend/app/services/outline_debate_service.py`。
 - `chapter_writing`：章节正文生成、质量门和章后更新闭环。
-- legacy `outline_swarm` 已删除，不再作为大纲生成入口。
+- `workbench`：已有小说导入、Method Pack、对标资产、审稿计划、笔记和编辑提案。
+- 2026-07-04 前的历史大纲实现已归档，不再作为大纲生成入口。
 
 更多文档：
 
+- [分层项目规则入口](AGENTS.md)
 - [架构说明](docs/architecture.md)
+- [AI 辅助开发指南](docs/ai-assisted-development.md)
+- [架构决策记录](docs/adr/README.md)
 - [提示词目录](docs/prompt-catalog.md)
 - [路线图](docs/roadmap.md)
 - [开源清单](docs/open-source-checklist.md)
@@ -435,6 +478,13 @@ python main.py query "谁是主角？"
 python main.py export --format markdown
 ```
 
+常用 API 入口：
+
+- `POST /api/projects/{project_id}/import/novel`：导入已有正文，生成章节草稿和导入报告。
+- `GET/POST /api/projects/{project_id}/method-packs`：管理 Method Pack。
+- `GET/POST /api/projects/{project_id}/reference-assets`：管理对标资产。
+- `POST /api/projects/{project_id}/review/plan`：生成 solo、lean 或 full 审稿计划。
+
 Windows PowerShell：
 
 ```powershell
@@ -466,6 +516,7 @@ curl -s -X POST "http://127.0.0.1:8000/api/projects/${PROJECT_ID}/outline/debate
 - 故事圣经和 canon context：`/api/projects/{id}/story-bible`、`/api/projects/{id}/canon/context`
 - 角色、实体、世界事实、图谱：`/api/projects/{id}/characters`、`/entities`、`/world-facts`、`/graph`
 - 大纲议事：`/api/projects/{id}/outline/debate/sessions`
+- 写作资料：`/api/projects/{id}/import/novel`、`/method-packs`、`/reference-assets`、`/review/plan`
 - Agent 与模型：`/api/agents`、`/api/workflows`、`/api/llm/models`、`/api/agent-model-configs`
 - 写作任务：`/api/write/generate`、`/api/write/batch-generate`
 - 版本：`/api/versions`

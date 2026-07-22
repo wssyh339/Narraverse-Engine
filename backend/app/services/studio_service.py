@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 from pathlib import Path
 import queue
@@ -110,6 +111,7 @@ DEFAULT_CHAPTER_WORD_TARGET = 8000
 CHAPTER_OUTLINE_STATUS_PROTECTED = {"drafted", "completed", "finalized"}
 CHAPTER_DRAFT_PROGRESS_STEPS = (
     "canon_context",
+    "chapter_prep",
     "chapter_card",
     "scene_outline",
     "plot_narrator",
@@ -128,6 +130,7 @@ CHAPTER_DRAFT_PROGRESS_STEPS = (
 CHAPTER_DRAFT_STEP_LABELS = {
     "canon_context": "读取正典",
     "build_context": "读取正典",
+    "chapter_prep": "写前准备",
     "chapter_card": "章节卡",
     "scene_outline": "场景细纲",
     "plot_narrator": "情节叙事",
@@ -1019,7 +1022,7 @@ class StudioService:
                 chapter.emotional_beats_json = dumps(value)
             elif hasattr(chapter, field):
                 setattr(chapter, field, value)
-        chapter.word_count = len((chapter.final_text or chapter.draft_text).replace("\n", ""))
+        chapter.word_count = self._fast_draft_text_length(chapter.final_text or chapter.draft_text or "")
         db.commit()
         db.refresh(chapter)
         return {"chapter": serialize_chapter(chapter)}
@@ -1184,7 +1187,8 @@ class StudioService:
         chapter.summary = result.chapter_summary
         chapter.revision_notes = dumps(result.review_notes)
         chapter.status = "drafted"
-        chapter.word_count = len(result.final_chapter_text.replace("\n", ""))
+        chapter.word_count = self._fast_draft_text_length(result.final_chapter_text)
+        self._persist_quality_report(db, project_id, chapter_id, job.id, result.quality_gate, result.final_chapter_text)
         canon_proposals = self._create_canon_update_proposals(db, project_id, chapter_id, result.canon_updates, source_job_id=job.id)
         output = models.GenerationOutput(
             id=generate_id("out"),
@@ -1230,6 +1234,66 @@ class StudioService:
         )
         db.commit()
         return {"job": serialize_job(job), "chapter": serialize_chapter(chapter)}
+
+    def _persist_quality_report(
+        self,
+        db: Session,
+        project_id: str,
+        chapter_id: str,
+        job_id: str,
+        quality_gate: dict[str, Any],
+        content: str,
+    ) -> models.QualityReport:
+        gate = quality_gate if isinstance(quality_gate, dict) else {}
+        deterministic = gate.get("deterministic_report") if isinstance(gate.get("deterministic_report"), dict) else gate
+        issues = deterministic.get("issues") if isinstance(deterministic.get("issues"), list) else []
+        content_hash = hashlib.sha256((content or "").encode("utf-8")).hexdigest()
+        blocking_count = int(deterministic.get("blocking_issue_count") or gate.get("blocking_issue_count") or 0)
+        warning_count = int(deterministic.get("warning_issue_count") or gate.get("warning_issue_count") or 0)
+        report = (
+            db.query(models.QualityReport)
+            .filter(models.QualityReport.chapter_id == chapter_id, models.QualityReport.content_hash == content_hash)
+            .first()
+        )
+        if report is None:
+            report = models.QualityReport(
+                id=generate_id("qlt"),
+                project_id=project_id,
+                chapter_id=chapter_id,
+                job_id=job_id,
+                content_hash=content_hash,
+                status=str(deterministic.get("status") or gate.get("status") or "passed"),
+                score=float(deterministic.get("score") or 100),
+                summary=str(deterministic.get("summary") or gate.get("message") or ""),
+                blocking_issue_count=blocking_count,
+                warning_issue_count=warning_count,
+            )
+            db.add(report)
+            db.flush()
+        else:
+            report.job_id = job_id
+            report.status = str(deterministic.get("status") or gate.get("status") or report.status)
+            report.score = float(deterministic.get("score") or report.score)
+            report.summary = str(deterministic.get("summary") or gate.get("message") or report.summary)
+            report.blocking_issue_count = blocking_count
+            report.warning_issue_count = warning_count
+            db.query(models.QualityIssue).filter(models.QualityIssue.report_id == report.id).delete()
+            db.flush()
+        for issue in issues:
+            if not isinstance(issue, dict):
+                continue
+            db.add(
+                models.QualityIssue(
+                    id=generate_id("qli"),
+                    report_id=report.id,
+                    severity=str(issue.get("severity") or "warning"),
+                    category=str(issue.get("category") or "quality"),
+                    message=str(issue.get("message") or issue.get("summary") or ""),
+                    evidence=str(issue.get("evidence") or ""),
+                    suggestion=str(issue.get("suggestion") or ""),
+                )
+            )
+        return report
 
     def rewrite_chapter(self, db: Session, project_id: str, chapter_id: str, request: RewriteChapterRequest) -> dict:
         return self.draft_chapter(db, project_id, chapter_id, DraftChapterRequest(mode="rewrite", user_instruction=request.instruction, model=request.model))
@@ -1607,6 +1671,8 @@ class StudioService:
         return {**workflow, "nodes": nodes}
 
     def list_workflows(self, db: Session | None = None) -> dict:
+        from app.services.outline_debate_service import DEBATE_AGENT_SKILL_SPECS
+
         agent_descriptions = {spec.name: spec.role for spec in DEFAULT_AGENT_SPECS}
         model_configs = self._agent_model_config_map(db) if db is not None else {}
 
@@ -1623,7 +1689,7 @@ class StudioService:
                 "editable": True,
                 "configurable": True,
                 "node_runtime_status": "configurable_agent",
-                "runtime_note": "正式 11-Agent 角色，可编辑提示词并设置模型覆盖。",
+                "runtime_note": "基础 AgentSpec，可编辑提示词并设置模型覆盖；大纲议事使用 outline_debate/* 运行时席位。",
                 "layer": layer,
             }
 
@@ -1648,13 +1714,14 @@ class StudioService:
                 "editable": True,
                 "configurable": True,
                 "node_runtime_status": "prompt_task",
-                "runtime_note": f"运行名 {entry.prompt_id}，通过正式 Agent {agent_descriptions.get(entry.default_agent, entry.default_agent)} 调用提示词 {prompt_id}。",
+                "runtime_note": f"运行名 {entry.prompt_id}，通过默认 AgentSpec 或运行时席位 {agent_descriptions.get(entry.default_agent, entry.default_agent)} 调用提示词 {prompt_id}。",
                 "prompt_id": entry.prompt_id,
                 "prompt_filename": entry.filename,
                 "layer": layer,
             }
 
         def runtime_agent_node(node_id: str, label: str, agent_name: str, description: str, inputs: list[str], outputs: list[str], layer: int) -> dict[str, Any]:
+            skill_spec = DEBATE_AGENT_SKILL_SPECS.get(agent_name, {})
             return {
                 "id": node_id,
                 "label": label,
@@ -1667,7 +1734,12 @@ class StudioService:
                 "editable": False,
                 "configurable": False,
                 "node_runtime_status": "active_runtime",
-                "runtime_note": "后端运行时内部 Agent，真实参与工作流，但不走 /api/agents 的提示词编辑入口。",
+                "runtime_note": "后端运行时内部席位，真实参与工作流，但不走 /api/agents 的提示词编辑入口。",
+                "allowed_read_tools": list(skill_spec.get("allowed_read_tools") or []),
+                "allowed_candidate_tools": list(skill_spec.get("allowed_candidate_tools") or []),
+                "validators": list(skill_spec.get("validators") or []),
+                "forbidden_tools": list(skill_spec.get("forbidden_tools") or []),
+                "candidate_policy": str(skill_spec.get("candidate_policy") or ""),
                 "layer": layer,
             }
 
@@ -1794,16 +1866,18 @@ class StudioService:
                 "label": "大纲议事引擎",
                 "nodes": [
                     control_node("debate_session", "议事会话", "创建三阶段大纲议事会话，保存每个阶段的 turns、decisions、artifacts 和 outline_topology。", ["project_id", "brief"], ["outline_debate_session"], 0),
-                    runtime_agent_node("debate_book", "讨论总纲", "outline_debate/StoryDirectorAgent", "主持总策划 Agent：主持总纲阶段，锁定作品承诺、主线冲突、长线伏笔和终局方向。", ["outline_debate_session", "project", "canon_context"], ["book_outline_candidate", "book_decisions"], 1),
-                    runtime_agent_node("debate_volumes", "逐卷讨论卷纲", "outline_debate/StructureDoctorAgent", "结构医生 Agent：逐卷选择节奏模型，检查阶段目标、因果递进和卷末钩子。", ["book_outline_candidate", "target_volume_no", "rhythm_constraints"], ["volume_outline_candidate", "volume_decisions", "volume_canon_version"], 2),
-                    runtime_agent_node("debate_chapters", "逐章讨论章纲", "outline_debate/ContinuityAuditorAgent", "连续性审计 Agent：逐章检查危机、高潮、结果、伏笔和正典风险。", ["volume_outline_candidate", "target_chapter_no"], ["chapter_outline_candidate", "chapter_decisions", "chapter_canon_version"], 3),
-                    runtime_agent_node("debate_character_generator", "大纲角色生成", "outline_debate/CharacterGeneratorAgent", "角色生成 Agent：只在大纲缺口需要时生成角色，并在确认后物化为正式角色正典。", ["phase_gap", "existing_characters"], ["character_candidate"], 4),
-                    runtime_agent_node("debate_setting_generator", "大纲设定生成", "outline_debate/SettingGeneratorAgent", "设定生成 Agent：只在大纲缺口需要时生成地点、组织、规则或物件，并在确认后物化为正式设定。", ["phase_gap", "existing_settings"], ["setting_candidate"], 4),
+                    runtime_agent_node("debate_book", "讨论总纲", "outline_debate/StoryDirectorAgent", "主持总策划席位：主持总纲阶段，锁定作品承诺、主线冲突、长线伏笔和终局方向。", ["outline_debate_session", "project", "canon_context"], ["book_outline_candidate", "book_decisions"], 1),
+                    runtime_agent_node("debate_market_position", "类型卖点审查", "outline_debate/MarketPositionAgent", "类型卖点席位：检查目标读者、爽点承诺、追读理由、期待兑现和平台可读性。", ["outline_debate_session", "project", "canon_context"], ["market_position_decisions", "selling_point_risks"], 1),
+                    runtime_agent_node("debate_volumes", "逐卷讨论卷纲", "outline_debate/StructureDoctorAgent", "结构医生席位：逐卷选择节奏模型，检查阶段目标、因果递进和卷末钩子。", ["book_outline_candidate", "target_volume_no", "rhythm_constraints"], ["volume_outline_candidate", "volume_decisions", "volume_canon_version"], 2),
+                    runtime_agent_node("debate_chapters", "逐章讨论章纲", "outline_debate/ContinuityAuditorAgent", "连续性审计席位：逐章检查危机、高潮、结果、伏笔和正典风险。", ["volume_outline_candidate", "target_chapter_no"], ["chapter_outline_candidate", "chapter_decisions", "chapter_canon_version"], 3),
+                    runtime_agent_node("debate_character_generator", "大纲角色生成", "outline_debate/CharacterGeneratorAgent", "角色生成席位：只在大纲缺口需要时生成角色，并在确认后物化为正式角色正典。", ["phase_gap", "existing_characters"], ["character_candidate"], 4),
+                    runtime_agent_node("debate_setting_generator", "大纲设定生成", "outline_debate/SettingGeneratorAgent", "设定生成席位：只在大纲缺口需要时生成地点、组织、规则或物件，并在确认后物化为正式设定。", ["phase_gap", "existing_settings"], ["setting_candidate"], 4),
                     control_node("debate_user_confirm", "逐项确认", "总纲按阶段确认；卷纲与章纲按 item_key 确认，确认后写入对应大纲记录，并把角色/设定候选同步物化为正式正典与版本。", ["phase_artifacts", "item_key"], ["approved_outline_candidates", "canon_versions", "canon_materializations"], 5),
                 ],
                 "edges": [
                     {"source": "debate_session", "target": "debate_book", "label": "启动讨论总纲"},
-                    {"source": "debate_book", "target": "debate_volumes", "label": "可读取总纲候选"},
+                    {"source": "debate_book", "target": "debate_market_position", "label": "校验读者承诺"},
+                    {"source": "debate_market_position", "target": "debate_volumes", "label": "可读取总纲候选和卖点风险"},
                     {"source": "debate_volumes", "target": "debate_chapters", "label": "可读取卷纲候选"},
                     {"source": "debate_book", "target": "debate_character_generator", "label": "发现角色缺口"},
                     {"source": "debate_book", "target": "debate_setting_generator", "label": "发现设定缺口"},
@@ -1820,19 +1894,21 @@ class StudioService:
                 "label": "单章正文生成",
                 "nodes": [
                     control_node("canon_context", "canon_context", "聚合项目、故事圣经、角色、实体、图谱和前文摘要。", ["project_id", "chapter_id"], ["canon_context"], 0),
-                    agent_node("plot_narrator", "情节叙事 Agent", "plot_narrator", ["canon_context", "chapter_outline"], ["plot_draft"], 1),
-                    agent_node("dialogue_writer", "人物对话 Agent", "dialogue_writer", ["plot_draft", "characters"], ["dialogue_draft"], 2),
-                    agent_node("environment_writer", "环境描写 Agent", "environment_writer", ["plot_draft", "story_entities"], ["environment_draft"], 2),
-                    agent_node("integrator", "整合输出 Agent", "integrator", ["plot_draft", "dialogue_draft", "environment_draft"], ["integrated_draft", "chapter_summary"], 3),
-                    agent_node("reviewer", "审核修改 Agent", "reviewer", ["integrated_draft"], ["review_notes"], 4),
-                    agent_node("fact_checker", "事实核查 Agent", "fact_checker", ["integrated_draft", "world_facts"], ["fact_check_report"], 4),
-                    control_node("quality_gate", "quality_gate", "检查 blocking/error 问题，决定是否进入修订回路。", ["review_notes", "fact_check_report"], ["quality_gate"], 5),
-                    control_node("revise_draft", "revise_draft", "按质量门意见进行一次受控修订。", ["integrated_draft", "review_notes"], ["integrated_draft"], 6),
-                    agent_node("style_unifier", "风格统一 Agent", "style_unifier", ["integrated_draft", "style_guide"], ["final_chapter_text"], 7),
-                    agent_node("canon_curator", "设定整理 Agent", "canon_curator", ["final_chapter_text", "chapter_summary"], ["canon_updates", "candidate_canon_updates"], 8),
+                    prompt_task_node("chapter_prep", "章节写前准备", "chapter_prep", ["chapter_outline", "canon_context", "narrative_ledger", "reference_assets"], ["chapter_prep"], 1),
+                    agent_node("plot_narrator", "情节叙事 Agent", "plot_narrator", ["canon_context", "chapter_outline", "chapter_prep"], ["plot_draft"], 2),
+                    agent_node("dialogue_writer", "人物对话 Agent", "dialogue_writer", ["plot_draft", "characters"], ["dialogue_draft"], 3),
+                    agent_node("environment_writer", "环境描写 Agent", "environment_writer", ["plot_draft", "story_entities"], ["environment_draft"], 3),
+                    agent_node("integrator", "整合输出 Agent", "integrator", ["plot_draft", "dialogue_draft", "environment_draft"], ["integrated_draft", "chapter_summary"], 4),
+                    agent_node("reviewer", "审核修改 Agent", "reviewer", ["integrated_draft"], ["review_notes"], 5),
+                    agent_node("fact_checker", "事实核查 Agent", "fact_checker", ["integrated_draft", "world_facts"], ["fact_check_report"], 5),
+                    control_node("quality_gate", "quality_gate", "检查 blocking/error 问题，决定是否进入修订回路。", ["review_notes", "fact_check_report"], ["quality_gate"], 6),
+                    control_node("revise_draft", "revise_draft", "按质量门意见进行一次受控修订。", ["integrated_draft", "review_notes"], ["integrated_draft"], 7),
+                    agent_node("style_unifier", "风格统一 Agent", "style_unifier", ["integrated_draft", "style_guide"], ["final_chapter_text"], 8),
+                    agent_node("canon_curator", "设定整理 Agent", "canon_curator", ["final_chapter_text", "chapter_summary"], ["canon_updates", "candidate_canon_updates"], 9),
                 ],
                 "edges": [
-                    {"source": "canon_context", "target": "plot_narrator", "label": "提供设定上下文"},
+                    {"source": "canon_context", "target": "chapter_prep", "label": "固化写前准备"},
+                    {"source": "chapter_prep", "target": "plot_narrator", "label": "提供章节位置和预算"},
                     {"source": "plot_narrator", "target": "dialogue_writer", "label": "补对话"},
                     {"source": "plot_narrator", "target": "environment_writer", "label": "补场景"},
                     {"source": "dialogue_writer", "target": "integrator", "label": "对话层"},
@@ -4102,7 +4178,7 @@ class StudioService:
         return "\n".join(lines).strip()
 
     def _fast_draft_text_length(self, text: str) -> int:
-        return len(str(text or "").replace("\r", "").replace("\n", ""))
+        return len(re.sub(r"\s+", "", str(text or "")))
 
     def _fast_draft_length_band(self, chapter_target: int) -> tuple[int, int]:
         target = int(chapter_target or DEFAULT_CHAPTER_WORD_TARGET)
@@ -7238,7 +7314,8 @@ class StudioService:
         return lines
 
     def _format_volume_outline_text(self, item: dict[str, Any]) -> str:
-        phase_blocks = item.get("50章高密度剧情流水线执行协议", [])
+        legacy_phase_key = "50章" + "高密度剧情流水线执行协议"
+        phase_blocks = item.get("阶段剧情推进协议") or item.get("剧情推进协议") or item.get(legacy_phase_key) or []
         lines = [
             f"{item.get('第X卷', '分卷')}：{item.get('卷名', '未命名卷')}",
             f"章节区间：{item.get('章节区间', '未设置')}",
@@ -7250,7 +7327,7 @@ class StudioService:
             "剧情多轨道架构：",
             *self._format_mapping_lines(item.get("剧情多轨道架构", {}) if isinstance(item.get("剧情多轨道架构"), dict) else {}, "  "),
             "",
-            "50章高密度剧情流水线执行协议：",
+            "阶段剧情推进协议：",
         ]
         for phase in phase_blocks if isinstance(phase_blocks, list) else []:
             if not isinstance(phase, dict):

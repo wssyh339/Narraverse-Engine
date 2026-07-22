@@ -35,7 +35,7 @@ def test_agent_prompt_can_be_customized_and_restored_to_default() -> None:
     assert original["is_custom"] is False
     assert original["prompt"] == original["default_prompt"]
 
-    custom_prompt = "自定义章节规划 Agent：只输出 JSON。"
+    custom_prompt = "自定义章节准备 AgentSpec：只输出 JSON。"
     updated = assert_success(client.put("/api/agents/chapter_planner/prompt", json={"prompt": custom_prompt}))["agent"]
     assert updated["is_custom"] is True
     assert updated["prompt"] == custom_prompt
@@ -226,7 +226,7 @@ def test_workflows_api_exposes_prompt_lifecycle_views_and_active_debate_lane() -
     assert lifecycle["trigger_policy"] == "on_chapter_generation"
 
     node_ids = [node["id"] for node in lifecycle["nodes"]]
-    assert node_ids[:4] == ["next_chapter_state_change", "chapter_card", "scene_outline", "draft_generation"]
+    assert node_ids[:5] == ["next_chapter_state_change", "chapter_prep", "chapter_card", "scene_outline", "draft_generation"]
     assert "minimal_work_template" not in node_ids
     assert all(node["node_subtype"] == "prompt_agent" for node in lifecycle["nodes"] if node["type"] == "prompt")
 
@@ -251,7 +251,7 @@ def test_call_agent_json_replaces_template_input_placeholders_before_llm_call() 
     call_agent_json(
         llm_client=FakeLLM(),
         agent_name="chapter_planner",
-        role="章节规划 Agent",
+        role="章节准备 AgentSpec",
         system_prompt="小说宪法：【粘贴小说宪法】\n当前卷：【填写，例如第一卷：底层觉醒】\n正文长度：【填写字数】",
         task="根据已确认章纲生成章节卡",
         context={

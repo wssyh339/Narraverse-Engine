@@ -23,11 +23,11 @@ from app.services.studio_service import studio_service
 def test_long_novel_catalog_covers_all_prompt_files() -> None:
     entries = list_long_novel_prompt_entries()
 
-    assert len(entries) == 35
+    assert len(entries) == 36
     assert LONG_NOVEL_PROMPT_IDS[0] == "general_control"
-    assert LONG_NOVEL_PROMPT_IDS[-1] == "creation_title_packaging"
+    assert LONG_NOVEL_PROMPT_IDS[-1] == "chapter_prep"
     assert entries[0].filename == "00_general_control_prompt.md"
-    assert entries[-1].filename == "34_creation_title_packaging_prompt.md"
+    assert entries[-1].filename == "35_chapter_prep_prompt.md"
 
 
 def test_catalog_loads_prompt_text_and_metadata() -> None:
@@ -41,14 +41,35 @@ def test_catalog_loads_prompt_text_and_metadata() -> None:
     assert "本章核心功能" in text
 
 
+def test_chapter_prep_prompt_is_cataloged_as_chapter_production_support() -> None:
+    entry = get_prompt_entry("chapter_prep")
+    text = load_catalog_prompt("chapter_prep")
+    contract = get_prompt_node_contract("chapter_prep")
+
+    assert entry.index == 35
+    assert entry.workflow == "chapter_production"
+    assert entry.default_agent == "chapter_planner"
+    assert text.startswith("# 35. 章节写前准备提示词")
+    assert "chapter_position" in contract.output_schema.model_json_schema()["properties"]
+    assert "word_budget" in contract.output_schema.model_json_schema()["properties"]
+
+
 def test_outline_prompt_assets_are_classified_as_debate_support_not_legacy_flow() -> None:
-    for prompt_id in ["macro_outline", "ending_backcast", "volume_outline", "rolling_chapter_outline"]:
+    expected_agents = {
+        "macro_outline": "outline_debate/StoryDirectorAgent",
+        "ending_backcast": "outline_debate/StoryDirectorAgent",
+        "volume_outline": "outline_debate/StructureDoctorAgent",
+        "rolling_chapter_outline": "outline_debate/StructureDoctorAgent",
+    }
+    for prompt_id, agent_name in expected_agents.items():
         entry = get_prompt_entry(prompt_id)
         assert entry.workflow == "outline_debate_support"
+        assert entry.default_agent == agent_name
 
 
 def test_agent_bindings_route_new_prompt_library_to_existing_agents() -> None:
     assert "novel_constitution" in AGENT_PROMPT_BINDINGS["chief_architect"]
+    assert "chapter_prep" in AGENT_PROMPT_BINDINGS["chapter_planner"]
     assert "chapter_card" in AGENT_PROMPT_BINDINGS["chapter_planner"]
     assert "scene_outline" in AGENT_PROMPT_BINDINGS["plot_narrator"]
     assert "draft_self_check" in AGENT_PROMPT_BINDINGS["reviewer"]
@@ -212,7 +233,7 @@ def test_studio_workflows_do_not_expose_legacy_outline_lanes() -> None:
     assert "book_structure_lifecycle" not in keys
     assert "volume_rolling_lifecycle" not in keys
     chapter = next(item for item in workflows if item["key"] == "chapter_production")
-    assert chapter["prompt_ids"][:3] == ["chapter_card", "scene_outline", "draft_generation"]
+    assert chapter["prompt_ids"][:3] == ["chapter_prep", "chapter_card", "scene_outline"]
     assert chapter["agents"][:2] == ["chapter_planner", "plot_narrator"]
 
 
@@ -273,7 +294,9 @@ def test_list_agents_exposes_prompt_binding_metadata() -> None:
     agents = studio_service.list_agents(fake_db)["agents"]
     planner = next(agent for agent in agents if agent["name"] == "chapter_planner")
 
-    assert planner["prompt_ids"][:3] == ["macro_outline", "ending_backcast", "volume_outline"]
+    assert planner["prompt_ids"][:3] == ["next_chapter_state_change", "chapter_prep", "chapter_card"]
+    assert "macro_outline" not in planner["prompt_ids"]
+    assert "volume_outline" not in planner["prompt_ids"]
     assert planner["prompt_titles"]["chapter_card"] == "单章章节卡生成"
 
 
@@ -302,6 +325,7 @@ def test_chapter_closed_loop_keeps_shortcuts_out_of_formal_chain() -> None:
 
     assert node_ids == [
         "next_chapter_state_change",
+        "chapter_prep",
         "chapter_card",
         "scene_outline",
         "draft_generation",

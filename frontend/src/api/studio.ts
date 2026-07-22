@@ -56,6 +56,68 @@ export interface CreateProjectPayload {
   initial_idea?: string;
 }
 
+export interface ImportNovelPayload {
+  source_name: string;
+  text: string;
+  target_platform?: string;
+  create_canon_proposals?: boolean;
+}
+
+export interface ImportNovelReport {
+  source_name: string;
+  target_platform: string;
+  chapter_count: number;
+  word_count: number;
+  chapter_titles: string[];
+  principle: string;
+}
+
+export interface MethodPackPayload {
+  name: string;
+  source?: string;
+  genre?: string;
+  principles?: string[];
+  chapter_recipe?: string[];
+  style_rules?: string[];
+  anti_patterns?: string[];
+  reference_note_ids?: string[];
+  is_pinned?: boolean;
+}
+
+export interface ReferenceAssetPayload {
+  title: string;
+  asset_type?: "novel_excerpt" | "chapter_excerpt" | "outline" | "review" | "style_sample";
+  source_name?: string;
+  text: string;
+  tags?: string[];
+  analysis?: Record<string, unknown>;
+  method_pack_id?: string | null;
+  is_pinned?: boolean;
+}
+
+export interface ReviewPlanPayload {
+  mode: "solo" | "lean" | "full";
+  scope: "chapter" | "outline" | "project";
+  chapter_id?: string | null;
+  method_pack_id?: string | null;
+  instruction?: string;
+}
+
+export interface ReviewPlan {
+  mode: ReviewPlanPayload["mode"];
+  scope: ReviewPlanPayload["scope"];
+  project_id: string;
+  chapter_id: string;
+  chapter_title: string;
+  method_pack_id: string;
+  instruction: string;
+  agents: string[];
+  steps: Array<Record<string, unknown>>;
+  quality_gates: string[];
+  human_approval_required: boolean;
+  write_policy: string;
+}
+
 export type ImportanceLevel = "core" | "major" | "medium" | "minor";
 export type RoleType = "protagonist" | "antagonist" | "supporting" | "minor";
 export type SettingTarget = "characters" | "entities" | "world_facts" | "all";
@@ -287,6 +349,16 @@ export interface OutlineDebateTurn {
     to_label?: string;
     to_mention?: string;
     display?: string;
+    reason?: string;
+    source?: string;
+  };
+  route_decision?: {
+    from_agent_name?: string;
+    selected_agent_name?: string;
+    model_suggested_agent?: string;
+    source?: string;
+    overridden?: boolean;
+    reason?: string;
   };
   claims: string[];
   objections?: string[];
@@ -328,6 +400,32 @@ export interface OutlineDebateValidationReport {
   checks: OutlineDebateValidationCheck[];
 }
 
+export interface OutlineDebateQualityMetrics {
+  phase?: OutlineDebatePhase | string;
+  status?: "passed" | "warning" | "failed" | string;
+  blocking_items?: Array<Record<string, unknown>>;
+  [key: string]: unknown;
+}
+
+export interface OutlineDebateRepairPolicy {
+  applied?: boolean;
+  reason?: string;
+  [key: string]: unknown;
+}
+
+export interface OutlineDebateSynthesisProvenance {
+  source?: string;
+  state_id?: string;
+  source_turn_ids?: string[];
+  source_turn_count?: number;
+  artifact_patch_count?: number;
+  model_patch_used?: boolean;
+  service_repair_applied?: boolean;
+  repair_reason?: string;
+  quality_status?: string;
+  blocking_item_count?: number;
+}
+
 export interface OutlineDebateDecision {
   id: string;
   phase: OutlineDebatePhase;
@@ -343,6 +441,9 @@ export interface OutlineDebateArtifact {
   payload: Record<string, unknown>;
   candidate_status?: "draft" | "pending_confirmation" | "partially_confirmed" | "confirmed" | "stale" | string;
   requires_user_confirmation?: boolean;
+  candidate_source?: string;
+  candidate_source_reason?: string;
+  can_materialize_on_confirm?: boolean;
   materialization?: Record<string, unknown>;
 }
 
@@ -389,7 +490,11 @@ export interface OutlineDebatePhaseRun {
   confirmation_items?: OutlineDebateConfirmationItem[];
   canon_materializations?: Record<string, unknown>[];
   outline_topology: Record<string, unknown>;
-  result: Record<string, unknown>;
+  result: Record<string, unknown> & {
+    quality_metrics?: OutlineDebateQualityMetrics;
+    repair_policy?: OutlineDebateRepairPolicy;
+    synthesis_provenance?: OutlineDebateSynthesisProvenance;
+  };
   last_confirmed_item_key?: string;
   last_canon_update?: Record<string, unknown>;
   last_canon_updates?: Record<string, unknown>[];
@@ -588,6 +693,21 @@ export const studioApi = {
   listNotes: (projectId: string) => unwrap<{ notes: Note[] }>(api.get(`/projects/${projectId}/notes`)),
   createNote: (projectId: string, payload: { title: string; content?: string; note_type?: Note["note_type"]; parent_id?: string | null; is_pinned?: boolean }) =>
     unwrap<{ note: Note }>(api.post(`/projects/${projectId}/notes`, payload)),
+  importNovel: (projectId: string, payload: ImportNovelPayload) =>
+    unwrap<{
+      import_report: ImportNovelReport;
+      chapters: Chapter[];
+      reference_note: Note;
+      canon_proposals: CanonChangeProposal[];
+    }>(api.post(`/projects/${projectId}/import/novel`, payload)),
+  listMethodPacks: (projectId: string) => unwrap<{ method_packs: Note[] }>(api.get(`/projects/${projectId}/method-packs`)),
+  createMethodPack: (projectId: string, payload: MethodPackPayload) =>
+    unwrap<{ method_pack: Note }>(api.post(`/projects/${projectId}/method-packs`, payload)),
+  listReferenceAssets: (projectId: string) => unwrap<{ reference_assets: Note[] }>(api.get(`/projects/${projectId}/reference-assets`)),
+  createReferenceAsset: (projectId: string, payload: ReferenceAssetPayload) =>
+    unwrap<{ reference_asset: Note; analysis: Record<string, unknown> }>(api.post(`/projects/${projectId}/reference-assets`, payload)),
+  buildReviewPlan: (projectId: string, payload: ReviewPlanPayload) =>
+    unwrap<{ review_plan: ReviewPlan }>(api.post(`/projects/${projectId}/review/plan`, payload)),
   updateNote: (projectId: string, noteId: string, payload: Partial<Note>) =>
     unwrap<{ note: Note }>(api.put(`/projects/${projectId}/notes/${noteId}`, payload)),
   deleteNote: (projectId: string, noteId: string) =>

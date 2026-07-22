@@ -1,0 +1,57 @@
+{
+  "$schema": "narraverse.ai-context-profiles.v1",
+  "default": "full",
+  "profiles": {
+    "full": {
+      "description": "All approved tracked inputs for cross-stack work and archival handoff.",
+      "include_paths": [],
+      "include_prefixes": [""]
+    },
+    "backend": {
+      "description": "Backend, contracts, prompts, architecture decisions, and root operating context.",
+      "include_paths": [
+        "AGENTS.md",
+        "CONTRIBUTING.md",
+        "README.md",
+        "docker-compose.yml",
+        "requirements.txt"
+      ],
+      "include_prefixes": [
+        "backend/",
+        "docs/adr/"
+      ]
+    },
+    "frontend": {
+      "description": "Frontend studio, UI contracts, architecture decisions, and root operating context.",
+      "include_paths": [
+        "AGENTS.md",
+        "CONTRIBUTING.md",
+        "README.md",
+        "docker-compose.yml"
+      ],
+      "include_prefixes": [
+        "frontend/",
+        "docs/adr/"
+      ]
+    },
+    "tooling": {
+      "description": "Project guidance, CI, local AI tooling, ADRs, and deployment scripts.",
+      "include_paths": [
+        ".cbmignore",
+        ".gitignore",
+        ".repomixignore",
+        "AGENTS.md",
+        "CONTRIBUTING.md",
+        "README.md",
+        "docker-compose.yml",
+        "repomix.config.json"
+      ],
+      "include_prefixes": [
+        ".codex/",
+        ".github/",
+        "docs/adr/",
+        "scripts/"
+      ]
+    }
+  }
+}

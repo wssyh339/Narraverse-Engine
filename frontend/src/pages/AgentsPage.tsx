@@ -14,6 +14,71 @@ const controlConfigKey = "novel-agent-workflow-control-configs";
 
 use([GraphChart, TooltipComponent, CanvasRenderer]);
 
+const toolLabelMap: Record<string, string> = {
+  get_project_state: "读取项目状态",
+  get_story_bible: "读取故事圣经",
+  get_canon_context: "读取正典上下文",
+  list_volumes: "读取分卷列表",
+  list_chapters: "读取章节列表",
+  list_foreshadowing: "读取伏笔账本",
+  read_project: "读取项目资料",
+  read_story_bible: "读取故事圣经",
+  read_reference_assets: "读取对标资产",
+  read_method_pack: "读取 Method Pack",
+  record_outline_piece: "记录大纲候选片段",
+  record_debate_decision: "记录议事决议",
+  route_to_agent: "路由到下一席位",
+  close_round: "收束本轮讨论",
+  build_outline_topology: "构建议事拓扑",
+  create_uncertainty_ticket: "创建不确定项",
+  create_completion_ticket: "创建补全项",
+  create_character_candidate: "创建角色候选",
+  create_setting_candidate: "创建设定候选",
+  reader_promise_audit: "审计读者承诺",
+  hook_density_plan: "规划钩子密度",
+  selling_point_risk_list: "列出卖点风险",
+};
+
+const validatorLabelMap: Record<string, string> = {
+  schema_validator: "结构合同校验",
+  impact_analyzer: "影响范围分析",
+  market_fit_checker: "类型适配检查",
+  promise_payoff_checker: "承诺兑现检查",
+  structure_checker: "结构完整性检查",
+  continuity_checker: "连续性检查",
+  canon_conflict_checker: "正典冲突检查",
+  duplicate_checker: "重复候选检查",
+};
+
+const jsonFieldLabelMap: Record<string, string> = {
+  project_id: "项目 ID",
+  session_id: "会话 ID",
+  phase: "议事阶段",
+  requirement: "用户要求",
+  local_preview: "本地预览",
+  model: "模型",
+  turns: "发言轮次",
+  decisions: "决议",
+  artifacts: "候选产物",
+  outline_topology: "议事拓扑",
+  result: "阶段结果",
+  message: "发言正文",
+  claims: "关键主张",
+  risks: "风险",
+  uncertainties: "不确定项",
+  blocking_items: "阻塞项",
+  must_fix_before_confirm: "确认前必修项",
+  quality_metrics: "质量指标",
+  synthesis_provenance: "合成来源",
+  repair_policy: "修复策略",
+  character_candidate: "角色候选",
+  character_candidates: "角色候选列表",
+  setting_candidate: "设定候选",
+  setting_candidates: "设定候选列表",
+  candidate_source: "候选来源",
+  can_materialize_on_confirm: "确认后可物化",
+};
+
 function loadControlConfigs(): Record<string, string> {
   try {
     return JSON.parse(window.localStorage.getItem(controlConfigKey) ?? "{}") as Record<string, string>;
@@ -127,7 +192,7 @@ function nodeTypeColor(type: WorkflowNode["type"]) {
 }
 
 function nodeTypeLabel(type: WorkflowNode["type"]) {
-  if (type === "agent") return "Agent 节点";
+  if (type === "agent") return "智能体节点";
   if (type === "prompt") return "提示词节点";
   return "控制节点";
 }
@@ -137,10 +202,10 @@ function nodeSubtypeLabel(node: WorkflowNode) {
     return "Prompt 任务";
   }
   if (node.node_subtype === "runtime_agent") {
-    return "内部运行 Agent";
+    return "内部运行席位";
   }
   if (node.node_subtype === "formal_agent") {
-    return "正式 Agent";
+    return "基础智能体规格";
   }
   return node.node_subtype ?? node.type;
 }
@@ -163,9 +228,29 @@ function schemaSummary(schema: WorkflowNode["input_schema"]) {
     return "未声明";
   }
   const fields = Object.keys(schema.properties ?? {});
-  const preview = fields.slice(0, 6).join("、");
+  const preview = fields.slice(0, 6).map(displayJsonFieldLabel).join("、");
   const suffix = fields.length > 6 ? ` 等 ${fields.length} 个字段` : "";
   return `${schema.title ?? "Schema"}${preview ? `：${preview}${suffix}` : ""}`;
+}
+
+function displayContractLabel(value: string, labels: Record<string, string>) {
+  const label = labels[value];
+  return label ? `${label}（${value}）` : value;
+}
+
+function displayJsonFieldLabel(value: string) {
+  return displayContractLabel(value, jsonFieldLabelMap);
+}
+
+function displayContractList(values: string[] | undefined, labels: Record<string, string>) {
+  if (!values?.length) {
+    return "未声明";
+  }
+  return values.map((value) => displayContractLabel(value, labels)).join("、");
+}
+
+function schemaFieldNames(schema: WorkflowNode["input_schema"] | undefined) {
+  return Object.keys(schema?.properties ?? {});
 }
 
 function pendingToolCallsFromSessions(
@@ -277,7 +362,7 @@ export function AgentsPage() {
   const savePrompt = useMutation({
     mutationFn: () => {
       if (!selectedAgent) {
-        throw new Error("请选择 Agent 节点");
+        throw new Error("请选择智能体节点");
       }
       return studioApi.updateAgentPrompt(selectedAgent.name, prompt);
     },
@@ -292,7 +377,7 @@ export function AgentsPage() {
   const restorePrompt = useMutation({
     mutationFn: () => {
       if (!selectedAgent) {
-        throw new Error("请选择 Agent 节点");
+        throw new Error("请选择智能体节点");
       }
       return studioApi.restoreAgentPrompt(selectedAgent.name);
     },
@@ -307,7 +392,7 @@ export function AgentsPage() {
   const saveModelConfig = useMutation({
     mutationFn: () => {
       if (!selectedModelConfigAgentName || !activeWorkflow) {
-        throw new Error("请选择工作流中的 Agent 节点");
+        throw new Error("请选择工作流中的智能体节点");
       }
       if (!selectedModel) {
         throw new Error("请选择模型版本");
@@ -331,7 +416,7 @@ export function AgentsPage() {
   const restoreModelConfig = useMutation({
     mutationFn: () => {
       if (!selectedModelConfigAgentName || !activeWorkflow) {
-        throw new Error("请选择工作流中的 Agent 节点");
+        throw new Error("请选择工作流中的智能体节点");
       }
       return studioApi.deleteAgentModelConfig(activeWorkflow.id, selectedModelConfigAgentName);
     },
@@ -476,7 +561,7 @@ export function AgentsPage() {
         </Space>
       </div>
 
-      {agentsQuery.error || workflowsQuery.error || llmModelsQuery.error ? <Alert type="error" showIcon message="无法读取 Agent、模型或工作流配置" /> : null}
+      {agentsQuery.error || workflowsQuery.error || llmModelsQuery.error ? <Alert type="error" showIcon message="无法读取智能体、模型或工作流配置" /> : null}
       <Card loading={agentsQuery.isLoading || workflowsQuery.isLoading || llmModelsQuery.isLoading}>
         {activeWorkflow ? <div ref={chartRef} className="graph-canvas" /> : <Empty description="暂无工作流结构" />}
       </Card>
@@ -649,7 +734,7 @@ export function AgentsPage() {
                 <Tag color={selectedNode.configurable === false ? "default" : "green"}>{nodeOperationalLabel(selectedNode)}</Tag>
               </Descriptions.Item>
               <Descriptions.Item label="运行名">{selectedNode.agent_name || "控制节点"}</Descriptions.Item>
-              {selectedNode.default_agent_name ? <Descriptions.Item label="正式 Agent">{selectedNode.default_agent_name}</Descriptions.Item> : null}
+              {selectedNode.default_agent_name ? <Descriptions.Item label="默认智能体规格">{selectedNode.default_agent_name}</Descriptions.Item> : null}
               {selectedNode.prompt_id ? <Descriptions.Item label="Prompt ID">{selectedNode.prompt_id}</Descriptions.Item> : null}
               {selectedNode.prompt_filename ? <Descriptions.Item label="Prompt 文件">{selectedNode.prompt_filename}</Descriptions.Item> : null}
               {selectedNode.runtime_note ? <Descriptions.Item label="运行说明">{selectedNode.runtime_note}</Descriptions.Item> : null}
@@ -662,6 +747,24 @@ export function AgentsPage() {
               <Descriptions.Item label="输出">{selectedNode.outputs.join("、") || "无"}</Descriptions.Item>
               {selectedNode.input_schema ? <Descriptions.Item label="输入 Schema">{schemaSummary(selectedNode.input_schema)}</Descriptions.Item> : null}
               {selectedNode.output_schema ? <Descriptions.Item label="输出 Schema">{schemaSummary(selectedNode.output_schema)}</Descriptions.Item> : null}
+              {selectedNode.allowed_read_tools?.length ? (
+                <Descriptions.Item label="读取工具">{displayContractList(selectedNode.allowed_read_tools, toolLabelMap)}</Descriptions.Item>
+              ) : null}
+              {selectedNode.allowed_candidate_tools?.length ? (
+                <Descriptions.Item label="候选工具">{displayContractList(selectedNode.allowed_candidate_tools, toolLabelMap)}</Descriptions.Item>
+              ) : null}
+              {selectedNode.validators?.length ? (
+                <Descriptions.Item label="校验器">{displayContractList(selectedNode.validators, validatorLabelMap)}</Descriptions.Item>
+              ) : null}
+              {selectedNode.forbidden_tools?.length ? (
+                <Descriptions.Item label="禁用工具">{displayContractList(selectedNode.forbidden_tools, toolLabelMap)}</Descriptions.Item>
+              ) : null}
+              {selectedNode.candidate_policy ? <Descriptions.Item label="候选策略">{selectedNode.candidate_policy}</Descriptions.Item> : null}
+              {selectedNode.input_schema || selectedNode.output_schema ? (
+                <Descriptions.Item label="JSON 字段">
+                  {[...schemaFieldNames(selectedNode.input_schema), ...schemaFieldNames(selectedNode.output_schema)].map(displayJsonFieldLabel).join("、") || "未声明"}
+                </Descriptions.Item>
+              ) : null}
             </Descriptions>
 
             {canConfigureSelectedModel ? (
@@ -731,7 +834,7 @@ export function AgentsPage() {
                 type="info"
                 showIcon
                 message="只读运行节点"
-                description="该节点会在后端真实工作流中执行，但不属于 /api/agents 暴露的正式可编辑 Agent。请在对应工作流页面调整输入和确认流程。"
+                description="该节点会在后端真实工作流中执行，但不属于 /api/agents 暴露的正式可编辑智能体。请在对应工作流页面调整输入和确认流程。"
               />
             )}
           </Space>

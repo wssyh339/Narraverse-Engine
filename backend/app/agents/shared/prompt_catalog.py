@@ -44,10 +44,10 @@ LONG_NOVEL_PROMPT_ENTRIES: tuple[PromptCatalogEntry, ...] = (
     PromptCatalogEntry("core_conflict_system", 1, "生成核心矛盾系统", "01_core_conflict_system_prompt.md", "conception", "chief_architect"),
     PromptCatalogEntry("novel_constitution", 2, "生成小说宪法", "02_novel_constitution_prompt.md", "conception", "chief_architect"),
     PromptCatalogEntry("constitution_stress_test", 3, "小说宪法压力测试", "03_constitution_stress_test_prompt.md", "conception", "reviewer"),
-    PromptCatalogEntry("macro_outline", 4, "生成全书宏观大纲", "04_macro_outline_prompt.md", "outline_debate_support", "chapter_planner"),
-    PromptCatalogEntry("ending_backcast", 5, "从结局反推路径", "05_ending_backcast_prompt.md", "outline_debate_support", "chapter_planner"),
-    PromptCatalogEntry("volume_outline", 6, "生成分卷大纲", "06_volume_outline_prompt.md", "outline_debate_support", "chapter_planner"),
-    PromptCatalogEntry("rolling_chapter_outline", 7, "生成当前卷滚动章节大纲", "07_rolling_chapter_outline_prompt.md", "outline_debate_support", "chapter_planner"),
+    PromptCatalogEntry("macro_outline", 4, "大纲议事参考：宏观阶段", "04_macro_outline_prompt.md", "outline_debate_support", "outline_debate/StoryDirectorAgent"),
+    PromptCatalogEntry("ending_backcast", 5, "大纲议事参考：结局反推", "05_ending_backcast_prompt.md", "outline_debate_support", "outline_debate/StoryDirectorAgent"),
+    PromptCatalogEntry("volume_outline", 6, "大纲议事参考：分卷结构", "06_volume_outline_prompt.md", "outline_debate_support", "outline_debate/StructureDoctorAgent"),
+    PromptCatalogEntry("rolling_chapter_outline", 7, "大纲议事参考：章节窗口", "07_rolling_chapter_outline_prompt.md", "outline_debate_support", "outline_debate/StructureDoctorAgent"),
     PromptCatalogEntry("chapter_card", 8, "单章章节卡生成", "08_chapter_card_prompt.md", "chapter_production", "chapter_planner"),
     PromptCatalogEntry("scene_outline", 9, "场景细纲生成", "09_scene_outline_prompt.md", "chapter_production", "plot_narrator"),
     PromptCatalogEntry("draft_generation", 10, "正文生成", "10_draft_generation_prompt.md", "chapter_production", "integrator"),
@@ -75,6 +75,7 @@ LONG_NOVEL_PROMPT_ENTRIES: tuple[PromptCatalogEntry, ...] = (
     PromptCatalogEntry("creation_worldview_draw", 32, "创作 Star 世界观抽卡", "32_creation_worldview_draw_prompt.md", "creation_star", "creation_star"),
     PromptCatalogEntry("creation_protagonist_draw", 33, "创作 Star 主角人设抽卡", "33_creation_protagonist_draw_prompt.md", "creation_star", "creation_star"),
     PromptCatalogEntry("creation_title_packaging", 34, "创作 Star 书名与包装抽卡", "34_creation_title_packaging_prompt.md", "creation_star", "creation_star"),
+    PromptCatalogEntry("chapter_prep", 35, "章节写前准备", "35_chapter_prep_prompt.md", "chapter_production", "chapter_planner"),
 )
 
 LONG_NOVEL_PROMPT_IDS: tuple[str, ...] = tuple(entry.prompt_id for entry in LONG_NOVEL_PROMPT_ENTRIES)
@@ -99,6 +100,7 @@ PROMPT_WORKFLOWS: tuple[PromptWorkflowDefinition, ...] = (
         label="单章生产闭环",
         description="从章节卡、场景细纲、正文、自检、改写到章后叙事账本更新。",
         prompt_ids=(
+            "chapter_prep",
             "chapter_card",
             "scene_outline",
             "draft_generation",
@@ -156,6 +158,7 @@ PROMPT_LIFECYCLE_WORKFLOWS: tuple[PromptLifecycleWorkflowDefinition, ...] = (
         description="从下一章状态变化到章节卡、场景细纲、正文、自检、改写和叙事账本更新。",
         prompt_ids=(
             "next_chapter_state_change",
+            "chapter_prep",
             "chapter_card",
             "scene_outline",
             "draft_generation",
@@ -164,7 +167,8 @@ PROMPT_LIFECYCLE_WORKFLOWS: tuple[PromptLifecycleWorkflowDefinition, ...] = (
             "narrative_ledger_update",
         ),
         edges=(
-            {"source": "next_chapter_state_change", "target": "chapter_card", "label": "确定本章改变什么"},
+            {"source": "next_chapter_state_change", "target": "chapter_prep", "label": "锁定写前准备"},
+            {"source": "chapter_prep", "target": "chapter_card", "label": "生成章节卡"},
             {"source": "chapter_card", "target": "scene_outline", "label": "拆成场景细纲"},
             {"source": "scene_outline", "target": "draft_generation", "label": "生成正文"},
             {"source": "draft_generation", "target": "draft_self_check", "label": "正文自检"},

@@ -90,12 +90,12 @@ PHASE_ORDER = ("book", "volumes", "chapters")
 PHASE_UPSTREAM_LABELS = {"volumes": ("book", "总纲"), "chapters": ("volumes", "卷纲")}
 
 DEBATE_AGENTS: tuple[tuple[str, str], ...] = (
-    ("outline_debate/StoryDirectorAgent", "主持总策划 Agent"),
-    ("outline_debate/MarketPositionAgent", "类型卖点 Agent"),
-    ("outline_debate/StructureDoctorAgent", "结构医生 Agent"),
-    ("outline_debate/CharacterGeneratorAgent", "角色生成 Agent"),
-    ("outline_debate/SettingGeneratorAgent", "设定生成 Agent"),
-    ("outline_debate/ContinuityAuditorAgent", "连续性审计 Agent"),
+    ("outline_debate/StoryDirectorAgent", "主持总策划席位"),
+    ("outline_debate/MarketPositionAgent", "类型卖点席位"),
+    ("outline_debate/StructureDoctorAgent", "结构医生席位"),
+    ("outline_debate/CharacterGeneratorAgent", "角色生成席位"),
+    ("outline_debate/SettingGeneratorAgent", "设定生成席位"),
+    ("outline_debate/ContinuityAuditorAgent", "连续性审计席位"),
 )
 DEBATE_AGENT_ROLES = dict(DEBATE_AGENTS)
 STORY_DIRECTOR_AGENT = "outline_debate/StoryDirectorAgent"
@@ -108,35 +108,41 @@ GENERATOR_AGENTS = {CHARACTER_GENERATOR_AGENT, SETTING_GENERATOR_AGENT}
 
 DEBATE_AGENT_SYSTEM_PROMPTS: dict[str, str] = {
     "outline_debate/StoryDirectorAgent": (
-        "你是大纲讨论组的主持总策划 Agent。你的能力是收束作品承诺、核心矛盾、阶段边界和候选产物。"
+        "你是大纲讨论组的主持总策划席位。你的能力是收束作品承诺、核心矛盾、阶段边界和候选产物。"
         "你必须读取 context 中的 Star 立项种子、项目资料、已确认正典和上游阶段结果。"
         "你还必须根据专席评分、阻塞项和用户插话决定下一位发言者，并输出 adopted/rejected/pending 的裁决。"
         "本轮发言不直接写库；用户确认本阶段后，服务层会把已确认的大纲、角色和设定条目立即写入正式正典。"
+        "真实模型输出的 message/claims/risks 必须以中文为主，接口字段名可保留英文。"
     ),
     "outline_debate/MarketPositionAgent": (
-        "你是类型卖点 Agent。你的能力是判断频道、类型、爽点、压迫感、情感拉扯、平台期待、追读理由和兑现节奏。"
+        "你是类型卖点席位。你的能力是判断频道、类型、爽点、压迫感、情感拉扯、平台期待、追读理由和兑现节奏。"
         "你必须把读者体验转成可持续冲突、章节钩子、伏笔兑现和风险提示，不得生成空泛营销话术。"
+        "真实模型输出的 message/claims/risks 必须以中文为主，接口字段名可保留英文。"
     ),
     "outline_debate/StructureDoctorAgent": (
-        "你是结构医生 Agent。你的能力是检查长篇因果链、节奏模型、危机/高潮/结果边界、卷章功能和返工点。"
+        "你是结构医生席位。你的能力是检查长篇因果链、节奏模型、危机/高潮/结果边界、卷章功能和返工点。"
         "必须严格区分：危机是不可逆选择，高潮是执行选择，结果是承担后果。"
+        "真实模型输出的 message/claims/risks 必须以中文为主，接口字段名可保留英文。"
     ),
     "outline_debate/CharacterGeneratorAgent": (
-        "你是角色生成 Agent。你的能力是审查人物功能、关系压力、重复风险和首次需要时机。"
+        "你是角色生成席位。你的能力是审查人物功能、关系压力、重复风险和首次需要时机。"
         "不要因轻量提及就生成完整角色卡；只有用户/主持明确要求，或角色达到中等以上重要度、影响主线/伏笔/关系压力/正典连续性时，才生成角色档案卡候选。"
         "角色必须先规划全书预计角色总量、重要性分布和本阶段新增数量；候选列表按 importance_score 递减。"
         "每张角色卡必须覆盖设定页角色字段，并兼容创作 Star 主角模板字段。"
         "讨论发言阶段不调用 characters 写入；用户确认对应阶段或条目后，由服务层立即入库，不再进入二次候选审批。"
+        "真实模型输出的 message/claims/risks 必须以中文为主，接口字段名可保留英文。"
     ),
     "outline_debate/SettingGeneratorAgent": (
-        "你是设定生成 Agent。你的能力是审查规则成本、设定冲突用途、揭示时机、伏笔用途和连续性风险。"
+        "你是设定生成席位。你的能力是审查规则成本、设定冲突用途、揭示时机、伏笔用途和连续性风险。"
         "不要因轻量提及就生成完整设定；只有用户/主持明确要求，或设定达到中等以上重要度、影响选择代价/主线冲突/伏笔/正典连续性时，才生成设定候选。"
         "设定必须覆盖设定页实体或世界观事实展示字段，并说明冲突用途、限制、成本、伏笔用途、连续性风险和确认入库边界。讨论发言阶段不调用 world_facts 或 graph 写入；用户确认对应阶段或条目后，由服务层立即入库，不再进入二次候选审批。"
+        "真实模型输出的 message/claims/risks 必须以中文为主，接口字段名可保留英文。"
     ),
     "outline_debate/ContinuityAuditorAgent": (
-        "你是连续性审计 Agent。你的能力是标记不确定项、冲突风险、缺失来源、阻塞问题和需要用户确认的变更。"
+        "你是连续性审计席位。你的能力是标记不确定项、冲突风险、缺失来源、阻塞问题和需要用户确认的变更。"
         "你必须给出 pass/revise/blocked 裁决；不确定不得硬编；存在 blocking_items 时不得建议直接确认。"
         "只有用户确认阶段或条目后，正式正典变更才会由服务层直接写入。"
+        "真实模型输出的 message/claims/risks 必须以中文为主，接口字段名可保留英文。"
     ),
 }
 
@@ -161,7 +167,7 @@ DEBATE_AGENT_SKILL_SPECS: dict[str, dict[str, Any]] = {
         "allowed_candidate_tools": ["record_outline_piece", "create_completion_ticket"],
         "validators": ["schema_validator", "impact_analyzer"],
         "forbidden_tools": ["direct_formal_outline_write", "createCharacter", "createWorldFact", "createEntity"],
-        "candidate_policy": "只把市场判断转译为冲突、钩子和风险；如需新增设定，交给设定生成 Agent，并在用户确认后直接入库。",
+        "candidate_policy": "只把市场判断转译为冲突、钩子和风险；如需新增设定，交给设定生成席位，并在用户确认后直接入库。",
     },
     "outline_debate/StructureDoctorAgent": {
         "core_capability": "检查长篇结构、卷节奏、章节因果，以及危机/高潮/结果边界。",
@@ -1243,6 +1249,7 @@ class OutlineDebateService:
         result = phase_run.get("result") if isinstance(phase_run.get("result"), dict) else {}
         if not result:
             raise _bad_request(f"{PHASE_CONFIG[phase]['result_title']}缺少可确认结果")
+        self._ensure_phase_quality_confirmable(phase_run, result)
         if self._is_itemized_phase(phase):
             return self._confirm_itemized_phase(db, project_id, job, session, phase, phase_run, result, request)
         self._ensure_upstream_confirmed(session, phase)
@@ -1302,6 +1309,38 @@ class OutlineDebateService:
         if book_commit is not None:
             payload["book_commit"] = book_commit
         return payload
+
+    def _ensure_phase_quality_confirmable(self, phase_run: dict[str, Any], result: dict[str, Any]) -> None:
+        validation_report = phase_run.get("validation_report") if isinstance(phase_run.get("validation_report"), dict) else {}
+        if validation_report.get("status") == "failed":
+            failed_checks = [
+                str(check.get("validator") or check.get("message") or "validation")
+                for check in validation_report.get("checks", [])
+                if isinstance(check, dict) and check.get("status") == "failed"
+            ]
+            detail = "、".join(failed_checks[:3]) or "validation_report"
+            raise _bad_request(f"{PHASE_CONFIG[phase_run['phase']]['result_title']}质量门未通过：{detail}")
+        quality_metrics = result.get("quality_metrics") if isinstance(result.get("quality_metrics"), dict) else {}
+        blocking_items = quality_metrics.get("blocking_items") if isinstance(quality_metrics.get("blocking_items"), list) else []
+        if quality_metrics.get("status") == "failed" or blocking_items:
+            evidence = ""
+            first_block = blocking_items[0] if blocking_items else None
+            if isinstance(first_block, dict):
+                evidence = str(first_block.get("evidence") or first_block.get("type") or "")
+            raise _bad_request(f"{PHASE_CONFIG[phase_run['phase']]['result_title']}质量门未通过：{evidence or 'quality_metrics'}")
+        self._ensure_candidate_artifacts_confirmable(phase_run)
+
+    def _ensure_candidate_artifacts_confirmable(self, phase_run: dict[str, Any]) -> None:
+        for artifact in phase_run.get("artifacts", []):
+            if not isinstance(artifact, dict) or artifact.get("type") not in {"character_candidate", "setting_candidate"}:
+                continue
+            payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+            candidate_source = str(payload.get("candidate_source") or artifact.get("candidate_source") or "")
+            can_materialize = payload.get("can_materialize_on_confirm", artifact.get("can_materialize_on_confirm"))
+            if can_materialize is False or candidate_source in {"service_fallback", "text_extracted_candidate"}:
+                title = str(artifact.get("title") or payload.get("name") or payload.get("title") or artifact.get("type"))
+                reason = str(payload.get("candidate_source_reason") or artifact.get("candidate_source_reason") or candidate_source or "candidate_source")
+                raise _bad_request(f"{PHASE_CONFIG[phase_run['phase']]['result_title']}候选来源不允许直接确认入库：{title}（{reason}）")
 
     def commit_confirmed_candidates(self, db: Session, project_id: str, session_id: str, request: OutlineDebateCommitRequest) -> dict[str, Any]:
         self._project(db, project_id)
@@ -1411,7 +1450,8 @@ class OutlineDebateService:
             turns.append(turn)
             orchestrator.apply_turn_to_state(deliberation_state, turn)
             next_agent_name = self._next_dynamic_agent_name(phase, request, context, turns, phase_run=None)
-            self._attach_turn_display(turn, next_agent_name)
+            route_decision = self._route_decision_for_next_agent(phase, request, context, turns, next_agent_name, phase_run=None)
+            self._attach_turn_display(turn, next_agent_name, route_decision)
             self._persist_streaming_phase_progress(
                 db,
                 job,
@@ -1613,7 +1653,8 @@ class OutlineDebateService:
         self._mark_target_message_handled(phase_run, turn)
         phase_run["status"] = "paused"
         phase_run["next_agent_name"] = self._next_round_agent_name(phase_run, phase, request, context)
-        self._attach_turn_display(turn, phase_run["next_agent_name"])
+        route_decision = self._route_decision_for_next_agent(phase, request, context, phase_run["turns"], phase_run["next_agent_name"], phase_run=phase_run)
+        self._attach_turn_display(turn, phase_run["next_agent_name"], route_decision)
         phase_run["agenda"] = agenda
         phase_run["deliberation_state"] = deliberation_state
         phase_run["outline_topology"] = self._build_topology(phase, request, phase_run["turns"], phase_run.get("decisions", []), phase_run.get("artifacts", []))
@@ -1642,7 +1683,7 @@ class OutlineDebateService:
                 {
                     "type": "pause",
                     "phase": phase,
-                    "message": "当前 Agent 发言完成，等待用户继续或发表意见。",
+                    "message": "当前席位发言完成，等待用户继续或发表意见。",
                     "next_agent_name": phase_run.get("next_agent_name", ""),
                     "phase_run": phase_run,
                     "session": session,
@@ -2365,6 +2406,8 @@ class OutlineDebateService:
     def _setting_candidate_target(self, payload: dict[str, Any]) -> str:
         suggestion = payload.get("canon_write_suggestion") if isinstance(payload.get("canon_write_suggestion"), dict) else {}
         raw = str(payload.get("ref_type") or suggestion.get("target") or "").strip().lower()
+        if raw in {"world_fact", "world_facts", "fact", "facts", "world_rule", "world_rules"}:
+            return "world_fact"
         if raw in {"entity", "entities", "story_entity", "story_entities"} or payload.get("entity_type"):
             return "entity"
         return "world_fact"
@@ -2914,6 +2957,26 @@ class OutlineDebateService:
             "content": content,
         }
 
+    def _is_chinese_first_text(self, value: Any) -> bool:
+        text = self._string_or(value, "").strip()
+        if not text:
+            return True
+        chinese_chars = len(re.findall(r"[\u4e00-\u9fff]", text))
+        latin_words = len(re.findall(r"\b[A-Za-z][A-Za-z0-9_-]*\b", text))
+        return chinese_chars >= max(4, latin_words)
+
+    def _ensure_remote_turn_main_fields_chinese_first(self, agent_name: str, payload: dict[str, Any]) -> None:
+        fields: list[tuple[str, Any]] = [("message", payload.get("message"))]
+        for index, claim in enumerate(payload.get("claims") if isinstance(payload.get("claims"), list) else []):
+            fields.append((f"claims[{index}]", claim))
+        for index, risk in enumerate(payload.get("risks") if isinstance(payload.get("risks"), list) else []):
+            fields.append((f"risks[{index}]", risk))
+
+        for field_name, value in fields:
+            if not self._is_chinese_first_text(value):
+                preview = self._string_or(value, "").strip()[:80]
+                raise RuntimeError(f"{agent_name} 输出字段 {field_name} 必须以中文为主：{preview}")
+
     def _agent_specs(self) -> list[dict[str, Any]]:
         return [self._agent_spec(agent_name) for agent_name, _role in DEBATE_AGENTS]
 
@@ -3376,10 +3439,12 @@ class OutlineDebateService:
         compact = "".join(text.split())
         if kind == "character":
             structured = any(turn.get("character_candidate") or turn.get("character_candidates") for turn in turns)
+            structured = structured or bool(self._candidate_dicts_from_turns(turns, "character"))
             explicit_terms = ("@角色生成", "角色生成", "角色候选", "人物卡", "新增角色", "补角色", "主角", "反派", "盟友", "导师", "对手", "背叛者", "关键人物")
             object_terms = ("角色", "人物", "主角", "反派", "对手", "盟友", "导师", "背叛", "见证者")
         else:
             structured = any(turn.get("setting_candidate") or turn.get("setting_candidates") for turn in turns)
+            structured = structured or bool(self._candidate_dicts_from_turns(turns, "setting"))
             explicit_terms = ("@设定生成", "设定生成", "设定候选", "新增设定", "补设定", "世界规则", "规则成本", "组织", "地点", "物件", "制度")
             object_terms = ("设定", "规则", "组织", "地点", "物件", "资源", "禁忌", "制度", "世界观")
         impact_terms = ("重要", "核心", "主线", "卷纲", "章纲", "伏笔", "正典", "冲突", "危机", "高潮", "代价", "关系", "首次", "first_needed_in", "importance_level", "importance_score")
@@ -3496,7 +3561,8 @@ class OutlineDebateService:
             turns.append(turn)
             orchestrator.apply_turn_to_state(deliberation_state, turn)
             next_agent_name = self._next_dynamic_agent_name(phase, request, context, turns, phase_run=None)
-            self._attach_turn_display(turn, next_agent_name)
+            route_decision = self._route_decision_for_next_agent(phase, request, context, turns, next_agent_name, phase_run=None)
+            self._attach_turn_display(turn, next_agent_name, route_decision)
         return turns
 
     def _build_turn(
@@ -3577,15 +3643,16 @@ class OutlineDebateService:
                 role=role,
                 system_prompt=DEBATE_AGENT_SYSTEM_PROMPTS.get(agent_name, role),
                 task=(
-                    f"执行{phase_label}讨论的第 {round_no} 个 agent turn。"
+                    f"执行{phase_label}讨论的第 {round_no} 个席位回合。"
                     "必须优先遵循 context.agent_skill.content 中的角色技能文件；"
                     "必须逐条遵循 context.focus_constraints.hard_rules；"
                     "请围绕 context.agenda、context.deliberation_state、context.requirement、项目资料、用户插话和上游阶段结果提出结构化意见；"
                     "必须回应前序发言，必要时提出 objections；必须给出 proposed_decisions、uncertainties、confidence。"
+                    "真实模型输出的 message/claims/risks 必须以中文为主，接口 JSON 字段名可以保持英文。"
                     "artifact_patch 用于写入待确认大纲：总纲阶段写 book_outline，卷纲阶段写 volume_outlines，章纲阶段可写 chapter_windows 与 chapter_outlines。"
                     "当章纲阶段 mode=single_chapter 时，chapter_outlines 只能包含 context.focus_constraints.target_chapter_no 对应的单章对象；"
                     "当章纲阶段 mode=chapter_batch 时，必须按 context.focus_constraints.chapter_ranges 与 scale_plan 动态覆盖全部请求章节，不得只输出前三章或单章样例。"
-                    "如你是角色或设定生成 Agent，必须先输出功能审计；只有达到候选触发门槛的新对象才给出待确认档案，用户确认后由服务层直接入库。"
+                    "如你是角色生成或设定生成席位，必须先输出功能审计；只有达到候选触发门槛的新对象才给出待确认档案，用户确认后由服务层直接入库。"
                 ),
                 context=turn_context,
                 fallback=output_contract,
@@ -3593,6 +3660,7 @@ class OutlineDebateService:
                 require_remote=True,
                 allow_fallback=False,
             )
+            self._ensure_remote_turn_main_fields_chinese_first(agent_name, payload)
         raw_decision = payload.get("decision")
         raw_scores = payload.get("scores")
         decision = self._string_or(raw_decision, self._default_agent_decision(agent_name))
@@ -3677,9 +3745,100 @@ class OutlineDebateService:
             },
         )
 
-    def _attach_turn_display(self, turn: dict[str, Any], next_agent_name: str = "") -> None:
+    def _route_decision_for_next_agent(
+        self,
+        phase: str,
+        request: OutlineDebateRunRequest,
+        context: dict[str, Any],
+        turns: list[dict[str, Any]],
+        next_agent_name: str,
+        *,
+        phase_run: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        current_agent = str(turns[-1].get("agent_name") or "") if turns else ""
+        model_suggested_agent = self._valid_agent_name(str(turns[-1].get("next_agent") or "")) if turns else ""
+        if not next_agent_name:
+            return {
+                "from_agent_name": current_agent,
+                "selected_agent_name": "",
+                "model_suggested_agent": model_suggested_agent,
+                "source": "finish",
+                "overridden": bool(model_suggested_agent),
+                "reason": "已达到阶段发言上限或必需审查席位已完成，下一步形成阶段结论。",
+            }
+        for message in reversed((phase_run or {}).get("user_messages", [])):
+            if not isinstance(message, dict) or message.get("handled_by_turn_id"):
+                continue
+            target_agent_name = self._valid_agent_name(message.get("target_agent_name", ""))
+            mentions = message.get("mentions") if isinstance(message.get("mentions"), list) else []
+            mentioned_agents = {self._valid_agent_name(str(item)) for item in mentions}
+            if target_agent_name == next_agent_name or next_agent_name in mentioned_agents:
+                return {
+                    "from_agent_name": current_agent,
+                    "selected_agent_name": next_agent_name,
+                    "model_suggested_agent": model_suggested_agent,
+                    "source": "user_message",
+                    "overridden": bool(model_suggested_agent and model_suggested_agent != next_agent_name),
+                    "reason": "用户未处理的 @ 指定或目标席位优先进入下一轮回应。",
+                }
+        if model_suggested_agent == next_agent_name:
+            return {
+                "from_agent_name": current_agent,
+                "selected_agent_name": next_agent_name,
+                "model_suggested_agent": model_suggested_agent,
+                "source": "model_suggestion",
+                "overridden": False,
+                "reason": "模型建议的下一席通过服务层 allowlist 与阶段约束校验。",
+            }
+        if next_agent_name == CHARACTER_GENERATOR_AGENT:
+            gate = self._candidate_generation_gate("character", phase, request, turns, phase_run)
+            return {
+                "from_agent_name": current_agent,
+                "selected_agent_name": next_agent_name,
+                "model_suggested_agent": model_suggested_agent,
+                "source": "candidate_gate",
+                "overridden": bool(model_suggested_agent and model_suggested_agent != next_agent_name),
+                "reason": f"角色候选门槛触发：{gate['reason']}",
+            }
+        if next_agent_name == SETTING_GENERATOR_AGENT:
+            gate = self._candidate_generation_gate("setting", phase, request, turns, phase_run)
+            return {
+                "from_agent_name": current_agent,
+                "selected_agent_name": next_agent_name,
+                "model_suggested_agent": model_suggested_agent,
+                "source": "candidate_gate",
+                "overridden": bool(model_suggested_agent and model_suggested_agent != next_agent_name),
+                "reason": f"设定候选门槛触发：{gate['reason']}",
+            }
+        policy_reasons = {
+            STORY_DIRECTOR_AGENT: "主持总策划负责开场、收束议程和确认候选边界。",
+            MARKET_POSITION_AGENT: "类型卖点席位检查读者承诺、追读钩子和兑现路径。",
+            STRUCTURE_DOCTOR_AGENT: "结构医生席位检查长篇因果、节奏模型和危机/高潮/结果边界。",
+            CONTINUITY_AUDITOR_AGENT: "连续性审计席位检查正典冲突、伏笔、时间线和确认安全。",
+        }
+        return {
+            "from_agent_name": current_agent,
+            "selected_agent_name": next_agent_name,
+            "model_suggested_agent": model_suggested_agent,
+            "source": "phase_policy",
+            "overridden": bool(model_suggested_agent and model_suggested_agent != next_agent_name),
+            "reason": policy_reasons.get(next_agent_name, "服务层按阶段策略选择下一席。"),
+        }
+
+    def _attach_turn_display(self, turn: dict[str, Any], next_agent_name: str = "", route_decision: dict[str, Any] | None = None) -> None:
         current_label = self._agent_mention_label(str(turn.get("agent_name") or ""))
         next_label = self._agent_mention_label(next_agent_name)
+        if route_decision is None:
+            route_decision = turn.get("route_decision") if isinstance(turn.get("route_decision"), dict) else {}
+        if not route_decision:
+            route_decision = {
+                "from_agent_name": turn.get("agent_name", ""),
+                "selected_agent_name": next_agent_name,
+                "model_suggested_agent": self._valid_agent_name(str(turn.get("next_agent") or "")),
+                "source": "legacy_display_refresh",
+                "overridden": False,
+                "reason": "根据已保存的下一席刷新展示文本。",
+            }
         handoff = {
             "from_agent_name": turn.get("agent_name", ""),
             "from_label": current_label,
@@ -3688,8 +3847,11 @@ class OutlineDebateService:
             "to_label": next_label,
             "to_mention": f"@{next_label}" if next_label else "",
             "display": f"@{current_label} → @{next_label}" if next_label else f"@{current_label} → 阶段结论",
+            "reason": str(route_decision.get("reason") or ""),
+            "source": str(route_decision.get("source") or ""),
         }
         turn["next_agent_name"] = next_agent_name
+        turn["route_decision"] = route_decision
         turn["handoff"] = handoff
         turn["display_text"] = self._turn_display_text(turn, handoff)
 
@@ -3731,6 +3893,8 @@ class OutlineDebateService:
             lines.append(f"置信度：{confidence}")
         lines.append("")
         lines.append(f"交接：{handoff.get('display')}")
+        if handoff.get("reason"):
+            lines.append(f"交接原因：{handoff['reason']}")
         if handoff.get("to_label"):
             lines.append(f"下一位：@{handoff['to_label']}")
         else:
@@ -3899,10 +4063,11 @@ class OutlineDebateService:
         }
         scale_plan = self._scale_plan(project, request)
         if phase == "book":
+            fallback_book_outline = self._book_outline_from_debate(project, turns)
             result = {
                 "generation_kind": generation_kind,
                 "scale_plan": scale_plan,
-                "book_outline": self._book_outline_from_debate(project, turns),
+                "book_outline": fallback_book_outline,
                 "discussion_summary": [turn["message"] for turn in turns[:3]],
                 "requires_user_confirmation": True,
                 "synthesis_source": "debate_state",
@@ -3910,6 +4075,7 @@ class OutlineDebateService:
                 "_provenance": provenance,
             }
             merged = self._merge_result_patches(result, turns, ("book_outline", "discussion_summary"), deliberation_state)
+            merged["book_outline"] = self._normalize_book_outline_candidate(fallback_book_outline, merged.get("book_outline"))
             return self._attach_phase_conclusion(project, phase, request, turns, merged)
         if phase == "volumes":
             volume_numbers = self._volume_numbers_for_request(request)
@@ -3999,6 +4165,19 @@ class OutlineDebateService:
             "ending_direction": self._debate_sentence(turns, ("ContinuityAuditorAgent", "StoryDirectorAgent"), "终局方向待用户确认。"),
             "reader_experience": project.target_reader,
         }
+
+    def _normalize_book_outline_candidate(self, fallback: dict[str, Any], value: Any) -> dict[str, Any]:
+        candidate = value if isinstance(value, dict) else {}
+        normalized = self._deep_merge_dicts(fallback, candidate)
+        main_conflict = self._string_or(
+            normalized.get("main_conflict") or normalized.get("core_conflict") or normalized.get("mainline"),
+            fallback.get("main_conflict") or fallback.get("premise") or fallback.get("title") or "",
+        )
+        normalized["main_conflict"] = main_conflict
+        normalized["core_promise"] = self._string_or(normalized.get("core_promise"), fallback.get("core_promise") or main_conflict)
+        normalized["ending_direction"] = self._string_or(normalized.get("ending_direction"), fallback.get("ending_direction") or "终局方向待用户确认。")
+        normalized["reader_experience"] = self._string_or(normalized.get("reader_experience"), fallback.get("reader_experience") or "")
+        return normalized
 
     def _volume_candidate_from_debate(self, volume_no: int, project: models.Project, request: OutlineDebateRunRequest, turns: list[dict[str, Any]]) -> dict[str, Any]:
         model_name = "多线群像并进" if any(key in project.genre for key in ("权谋", "战争", "群像")) else "动态长篇升级"
@@ -4340,9 +4519,48 @@ class OutlineDebateService:
         result: dict[str, Any],
     ) -> dict[str, Any]:
         enriched = self._ensure_stage_outline_bodies(project, phase, request, turns, dict(result))
+        enriched = self._attach_outline_quality_metrics(phase, request, enriched)
+        enriched = self._ensure_repair_policy(enriched)
+        enriched = self._attach_synthesis_provenance(enriched)
         conclusion = self._phase_conclusion(project, phase, request, turns, enriched)
         enriched["stage_conclusion"] = conclusion
         enriched["stage_conclusion_text"] = conclusion.get("body", "")
+        return enriched
+
+    def _ensure_repair_policy(self, result: dict[str, Any]) -> dict[str, Any]:
+        enriched = dict(result)
+        repair_policy = enriched.get("repair_policy") if isinstance(enriched.get("repair_policy"), dict) else {}
+        if repair_policy:
+            repair_policy.setdefault("applied", False)
+            enriched["repair_policy"] = repair_policy
+            return enriched
+        enriched["repair_policy"] = {
+            "applied": False,
+            "reason": "not_required",
+        }
+        return enriched
+
+    def _attach_synthesis_provenance(self, result: dict[str, Any]) -> dict[str, Any]:
+        enriched = dict(result)
+        provenance = enriched.get("_provenance") if isinstance(enriched.get("_provenance"), dict) else {}
+        quality_metrics = enriched.get("quality_metrics") if isinstance(enriched.get("quality_metrics"), dict) else {}
+        repair_policy = enriched.get("repair_policy") if isinstance(enriched.get("repair_policy"), dict) else {}
+        source_turn_ids = [str(item) for item in enriched.get("source_turn_ids", []) if str(item)]
+        if not source_turn_ids:
+            source_turn_ids = [str(item) for item in provenance.get("source_turn_ids", []) if str(item)]
+        artifact_patch_count = int(provenance.get("artifact_patch_count") or 0)
+        enriched["synthesis_provenance"] = {
+            "source": str(enriched.get("synthesis_source") or provenance.get("source") or "debate_state"),
+            "state_id": str(provenance.get("state_id") or ""),
+            "source_turn_ids": source_turn_ids,
+            "source_turn_count": len(source_turn_ids),
+            "artifact_patch_count": artifact_patch_count,
+            "model_patch_used": artifact_patch_count > 0,
+            "service_repair_applied": bool(repair_policy.get("applied")),
+            "repair_reason": str(repair_policy.get("reason") or ""),
+            "quality_status": str(quality_metrics.get("status") or "unknown"),
+            "blocking_item_count": len(quality_metrics.get("blocking_items", [])) if isinstance(quality_metrics.get("blocking_items"), list) else 0,
+        }
         return enriched
 
     def _ensure_stage_outline_bodies(
@@ -4748,13 +4966,26 @@ class OutlineDebateService:
         return max(1, count)
 
     def _attach_outline_quality_metrics(self, phase: str, request: OutlineDebateRunRequest, result: dict[str, Any]) -> dict[str, Any]:
-        if phase not in {"volumes", "chapters"}:
-            return result
         enriched = dict(result)
-        metrics = self._outline_quality_metrics(phase, request, enriched)
+        metrics = self._book_quality_metrics(enriched) if phase == "book" else self._outline_quality_metrics(phase, request, enriched)
         enriched["quality_metrics"] = metrics
         enriched["blocking_items"] = metrics.get("blocking_items", [])
         return enriched
+
+    def _book_quality_metrics(self, result: dict[str, Any]) -> dict[str, Any]:
+        book_outline = result.get("book_outline") if isinstance(result.get("book_outline"), dict) else {}
+        required_fields = ("core_promise", "main_conflict", "ending_direction", "reader_experience")
+        missing_fields = [field for field in required_fields if book_outline.get(field) in (None, "", [], {})]
+        blocking_items = [
+            self._quality_block("book_required_field_missing", f"总纲关键字段缺失：{', '.join(missing_fields)}")
+        ] if missing_fields else []
+        return {
+            "phase": "book",
+            "status": "failed" if blocking_items else "passed",
+            "required_field_coverage": round((len(required_fields) - len(missing_fields)) / len(required_fields), 4),
+            "missing_fields": missing_fields,
+            "blocking_items": blocking_items,
+        }
 
     def _outline_quality_metrics(self, phase: str, request: OutlineDebateRunRequest, result: dict[str, Any]) -> dict[str, Any]:
         blocking_items: list[dict[str, Any]] = []
@@ -5376,10 +5607,13 @@ class OutlineDebateService:
             "activity_status": "candidate",
             "status": "candidate",
             "source": "outline_debate",
+            "candidate_source": "service_fallback",
+            "candidate_source_reason": "服务层根据讨论缺口生成的占位候选，缺少模型结构化候选证据。",
+            "can_materialize_on_confirm": False,
             "canon_write_suggestion": {
-                "requires_user_approval": False,
+                "requires_user_approval": True,
                 "target": "characters",
-                "write_policy": "direct_on_outline_confirmation",
+                "write_policy": "review_required_before_materialization",
             },
         }
         generated = self._candidate_from_turn(turns, "CharacterGeneratorAgent", "character_candidate")
@@ -5388,8 +5622,18 @@ class OutlineDebateService:
         candidate["activity_status"] = "candidate"
         candidate["status"] = "candidate"
         candidate["source"] = "outline_debate"
+        if generated:
+            self._annotate_candidate_source(candidate, "model_candidate", True, "角色生成席位提供了结构化候选。")
+        else:
+            self._annotate_candidate_source(candidate, "service_fallback", False, "服务层根据讨论缺口生成的占位候选，缺少模型结构化候选证据。")
         suggestion = candidate.get("canon_write_suggestion") if isinstance(candidate.get("canon_write_suggestion"), dict) else {}
-        suggestion.update({"requires_user_approval": False, "target": "characters", "write_policy": "direct_on_outline_confirmation"})
+        suggestion.update(
+            {
+                "requires_user_approval": not bool(candidate.get("can_materialize_on_confirm")),
+                "target": "characters",
+                "write_policy": "direct_on_outline_confirmation" if candidate.get("can_materialize_on_confirm") else "review_required_before_materialization",
+            }
+        )
         candidate["canon_write_suggestion"] = suggestion
         return candidate
 
@@ -5419,10 +5663,13 @@ class OutlineDebateService:
             "activity_status": "candidate",
             "status": "candidate",
             "source": "outline_debate",
+            "candidate_source": "service_fallback",
+            "candidate_source_reason": "服务层根据讨论缺口生成的占位候选，缺少模型结构化候选证据。",
+            "can_materialize_on_confirm": False,
             "canon_write_suggestion": {
-                "requires_user_approval": False,
+                "requires_user_approval": True,
                 "target": "world_facts",
-                "write_policy": "direct_on_outline_confirmation",
+                "write_policy": "review_required_before_materialization",
             },
         }
         generated = self._candidate_from_turn(turns, "SettingGeneratorAgent", "setting_candidate")
@@ -5431,8 +5678,28 @@ class OutlineDebateService:
         candidate["activity_status"] = "candidate"
         candidate["status"] = "candidate"
         candidate["source"] = "outline_debate"
+        if generated:
+            self._annotate_candidate_source(candidate, "model_candidate", True, "设定生成席位提供了结构化候选。")
+        else:
+            self._annotate_candidate_source(candidate, "service_fallback", False, "服务层根据讨论缺口生成的占位候选，缺少模型结构化候选证据。")
         suggestion = candidate.get("canon_write_suggestion") if isinstance(candidate.get("canon_write_suggestion"), dict) else {}
-        suggestion.update({"requires_user_approval": False, "target": suggestion.get("target") or candidate.get("ref_type") or "world_facts", "write_policy": "direct_on_outline_confirmation"})
+        suggestion.update(
+            {
+                "requires_user_approval": not bool(candidate.get("can_materialize_on_confirm")),
+                "target": suggestion.get("target") or candidate.get("ref_type") or "world_facts",
+                "write_policy": "direct_on_outline_confirmation" if candidate.get("can_materialize_on_confirm") else "review_required_before_materialization",
+            }
+        )
+        candidate["canon_write_suggestion"] = suggestion
+        return candidate
+
+    def _annotate_candidate_source(self, candidate: dict[str, Any], candidate_source: str, can_materialize_on_confirm: bool, reason: str) -> dict[str, Any]:
+        candidate["candidate_source"] = candidate_source
+        candidate["can_materialize_on_confirm"] = can_materialize_on_confirm
+        candidate["candidate_source_reason"] = reason
+        suggestion = candidate.get("canon_write_suggestion") if isinstance(candidate.get("canon_write_suggestion"), dict) else {}
+        suggestion["requires_user_approval"] = not can_materialize_on_confirm
+        suggestion["write_policy"] = "direct_on_outline_confirmation" if can_materialize_on_confirm else "review_required_before_materialization"
         candidate["canon_write_suggestion"] = suggestion
         return candidate
 
@@ -5506,24 +5773,32 @@ class OutlineDebateService:
         ]
         if candidate_policy["character_gap"]["required"]:
             for character_candidate in candidate_policy["character_gap"].get("candidates", []):
+                can_materialize = character_candidate.get("can_materialize_on_confirm", True) is not False
                 artifacts.append(
                     {
                         "id": generate_id("art"),
                         "type": "character_candidate",
                         "title": character_candidate["name"],
                         "payload": character_candidate,
-                        "requires_user_confirmation": False,
+                        "requires_user_confirmation": not can_materialize,
+                        "candidate_source": character_candidate.get("candidate_source", "model_candidate"),
+                        "candidate_source_reason": character_candidate.get("candidate_source_reason", ""),
+                        "can_materialize_on_confirm": can_materialize,
                     }
                 )
         if candidate_policy["setting_gap"]["required"]:
             for setting_candidate in candidate_policy["setting_gap"].get("candidates", []):
+                can_materialize = setting_candidate.get("can_materialize_on_confirm", True) is not False
                 artifacts.append(
                     {
                         "id": generate_id("art"),
                         "type": "setting_candidate",
                         "title": setting_candidate["title"],
                         "payload": setting_candidate,
-                        "requires_user_confirmation": False,
+                        "requires_user_confirmation": not can_materialize,
+                        "candidate_source": setting_candidate.get("candidate_source", "model_candidate"),
+                        "candidate_source_reason": setting_candidate.get("candidate_source_reason", ""),
+                        "can_materialize_on_confirm": can_materialize,
                     }
                 )
         return artifacts, candidate_policy
@@ -5557,6 +5832,8 @@ class OutlineDebateService:
             setting_candidates = [self._setting_candidate(project, phase, request, turns)]
         character_count_plan = self._character_count_plan_for_policy(project, phase, request, turns, character_candidates)
         setting_count_plan = self._setting_count_plan_for_policy(project, phase, request, turns, setting_candidates)
+        character_source = self._candidate_policy_source(character_candidates, character_required, character_blocked, character_gate, "character")
+        setting_source = self._candidate_policy_source(setting_candidates, setting_required, setting_blocked, setting_gate, "setting")
         return {
             "phase": phase,
             "character_gap": {
@@ -5570,7 +5847,7 @@ class OutlineDebateService:
                         else ("讨论中出现未入库角色，已生成候选" if character_candidates else ("讨论文本明确要求生成角色" if character_required else "未发现新角色"))
                     )
                 ),
-                "source": "user_blocked" if character_blocked else ("gate_blocked" if not character_gate["enabled"] else ("appeared_object" if character_candidates else ("discussion_signal" if character_required else "not_needed"))),
+                "source": character_source,
                 "trigger_gate": character_gate,
                 "character_count_plan": {} if character_blocked else character_count_plan,
                 "candidates": [] if character_blocked else character_candidates,
@@ -5586,12 +5863,35 @@ class OutlineDebateService:
                         else ("讨论中出现未入库设定，已生成候选" if setting_candidates else ("讨论文本明确要求生成设定" if setting_required else "未发现新设定"))
                     )
                 ),
-                "source": "user_blocked" if setting_blocked else ("gate_blocked" if not setting_gate["enabled"] else ("appeared_object" if setting_candidates else ("discussion_signal" if setting_required else "not_needed"))),
+                "source": setting_source,
                 "trigger_gate": setting_gate,
                 "setting_count_plan": {} if setting_blocked else setting_count_plan,
                 "candidates": [] if setting_blocked else setting_candidates,
             },
         }
+
+    def _candidate_policy_source(
+        self,
+        candidates: list[dict[str, Any]],
+        required: bool,
+        blocked: bool,
+        gate: dict[str, Any],
+        kind: str,
+    ) -> str:
+        if blocked:
+            return "user_blocked"
+        if not gate.get("enabled"):
+            return "gate_blocked"
+        sources = {str(candidate.get("candidate_source") or "") for candidate in candidates if isinstance(candidate, dict)}
+        if "model_candidate" in sources:
+            return "appeared_object"
+        if "text_extracted_candidate" in sources:
+            return "text_extracted_candidate"
+        if "service_fallback" in sources:
+            return "service_fallback"
+        if required:
+            return "discussion_signal"
+        return "not_needed"
 
     def _debate_signal_text(
         self,
@@ -5636,9 +5936,11 @@ class OutlineDebateService:
         for raw in self._candidate_dicts_from_turns(turns, "character"):
             normalized = self._normalize_character_candidate(project, phase, request, raw)
             if normalized:
-                candidates.append(normalized)
+                candidates.append(self._annotate_candidate_source(normalized, "model_candidate", True, "角色生成席位提供了结构化候选。"))
         for name in self._text_object_names(self._debate_signal_text(request, turns), "character"):
-            candidates.append(self._normalize_character_candidate(project, phase, request, {"name": name}))
+            normalized = self._normalize_character_candidate(project, phase, request, {"name": name})
+            if normalized:
+                candidates.append(self._annotate_candidate_source(normalized, "text_extracted_candidate", False, "服务层从讨论文本抽取名称，缺少完整结构化候选。"))
         candidates = self._filter_new_named_candidates(candidates, context, "character")
         if not candidates and include_fallback and self._has_candidate_positive_signal(self._debate_signal_text(request, turns), "character") and project is not None:
             candidates = [self._character_candidate(project, phase, request, turns)]
@@ -5658,9 +5960,11 @@ class OutlineDebateService:
         for raw in self._candidate_dicts_from_turns(turns, "setting"):
             normalized = self._normalize_setting_candidate(project, phase, request, raw)
             if normalized:
-                candidates.append(normalized)
+                candidates.append(self._annotate_candidate_source(normalized, "model_candidate", True, "设定生成席位提供了结构化候选。"))
         for title in self._text_object_names(self._debate_signal_text(request, turns), "setting"):
-            candidates.append(self._normalize_setting_candidate(project, phase, request, {"title": title}))
+            normalized = self._normalize_setting_candidate(project, phase, request, {"title": title})
+            if normalized:
+                candidates.append(self._annotate_candidate_source(normalized, "text_extracted_candidate", False, "服务层从讨论文本抽取名称，缺少完整结构化候选。"))
         candidates = self._filter_new_named_candidates(candidates, context, "setting")
         if not candidates and include_fallback and self._has_candidate_positive_signal(self._debate_signal_text(request, turns), "setting") and project is not None:
             candidates = [self._setting_candidate(project, phase, request, turns)]
@@ -6244,7 +6548,7 @@ class OutlineDebateService:
         character_gap = candidate_policy.get("character_gap") if isinstance(candidate_policy.get("character_gap"), dict) else {}
         setting_gap = candidate_policy.get("setting_gap") if isinstance(candidate_policy.get("setting_gap"), dict) else {}
         gap_decision = "本阶段未发现必须新增角色或设定的明确缺口。"
-        gap_rationale = "角色/设定生成 Agent 只在缺口明确时输出待确认条目；对应大纲条目确认后由服务层直接入库。"
+        gap_rationale = "角色/设定生成席位只在缺口明确时输出待确认条目；对应大纲条目确认后由服务层直接入库。"
         if character_gap.get("required") and setting_gap.get("required"):
             gap_decision = "本阶段发现角色与设定缺口，分别生成待确认条目，并将在确认本阶段时直接入库。"
             gap_rationale = f"{character_gap.get('reason', '')}；{setting_gap.get('reason', '')}"
@@ -6290,6 +6594,7 @@ class OutlineDebateService:
         edges: list[dict[str, Any]] = []
         events: list[dict[str, Any]] = []
         previous_id = ""
+        previous_turn: dict[str, Any] | None = None
         for turn in turns:
             node_id = f"turn:{turn['id']}"
             nodes.append(
@@ -6311,8 +6616,22 @@ class OutlineDebateService:
             )
             events.append({"id": generate_id("evt"), "type": "turn", "agent_name": turn["agent_name"], "node_id": node_id, "payload": turn})
             if previous_id:
-                edges.append({"id": generate_id("edge"), "source": previous_id, "target": node_id, "type": "handoff", "label": "议事交接", "reason": "按讨论顺序推进"})
+                route_decision = previous_turn.get("route_decision") if isinstance(previous_turn, dict) and isinstance(previous_turn.get("route_decision"), dict) else {}
+                edge_reason = str(route_decision.get("reason") or "按讨论顺序推进")
+                edges.append(
+                    {
+                        "id": generate_id("edge"),
+                        "source": previous_id,
+                        "target": node_id,
+                        "type": "handoff",
+                        "label": "议事交接",
+                        "reason": edge_reason,
+                        "route_decision": route_decision,
+                    }
+                )
+                events.append({"id": generate_id("evt"), "type": "route_decision", "node_id": node_id, "payload": route_decision})
             previous_id = node_id
+            previous_turn = turn
         source_id = previous_id
         for decision in decisions:
             node_id = f"decision:{decision['id']}"

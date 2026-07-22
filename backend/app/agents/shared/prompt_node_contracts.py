@@ -114,7 +114,7 @@ PROMPT_NODE_CONTRACTS: dict[str, PromptNodeContract] = {
         ("macro_outline",),
         schemas.MacroOutlineInput,
         schemas.MacroOutlineOutput,
-        "生成全书 5-8 阶段宏观大纲、压力递进曲线和未解决问题。",
+        "为大纲议事总纲阶段准备 5-8 阶段宏观结构、压力递进曲线和未解决问题参考。",
     ),
     "ending_backcast": _contract(
         "ending_backcast",
@@ -130,7 +130,7 @@ PROMPT_NODE_CONTRACTS: dict[str, PromptNodeContract] = {
         ("volume_outline",),
         schemas.VolumeOutlineInput,
         schemas.VolumeOutlineOutput,
-        "生成当前分卷标题、读者承诺、单元结构和出入卷状态。",
+        "为大纲议事卷纲阶段准备当前分卷标题、读者承诺、单元结构和出入卷状态参考。",
     ),
     "rolling_chapter_outline": _contract(
         "rolling_chapter_outline",
@@ -138,7 +138,7 @@ PROMPT_NODE_CONTRACTS: dict[str, PromptNodeContract] = {
         ("rolling_chapter_outline",),
         schemas.RollingChapterOutlineInput,
         schemas.RollingChapterOutlineOutput,
-        "基于当前卷和叙事账本生成未来滚动章纲。",
+        "基于当前卷和叙事账本准备未来章节窗口参考，正式章纲仍由大纲议事确认。",
     ),
     "chapter_card": _contract(
         "chapter_card",
@@ -314,6 +314,15 @@ PROMPT_NODE_CONTRACTS: dict[str, PromptNodeContract] = {
         schemas.NextChapterStateChangeInput,
         schemas.NextChapterStateChangeOutput,
         "先定义下一章必须改变的状态，防止章节原地踏步。",
+    ),
+    "chapter_prep": _contract(
+        "chapter_prep",
+        ("current_chapter_outline", "canon_context", "narrative_ledger"),
+        ("chapter_prep",),
+        schemas.ChapterPrepInput,
+        schemas.ChapterPrepOutput,
+        "在章节卡前固化章节位置、情绪目标、正典依赖、伏笔提醒和字数预算，防止正文生成丢失已确认章纲。",
+        ("reference_assets", "user_instruction"),
     ),
     "recommended_workflow_order": _contract(
         "recommended_workflow_order",

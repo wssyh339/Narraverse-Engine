@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -223,10 +224,10 @@ class FakeDebateLLM:
         self.calls.append({"agent_name": agent_name, "model": model, "system_prompt": system_prompt})
         short_name = agent_name.rsplit("/", 1)[-1]
         response = {
-            "stance": f"remote stance {short_name}",
-            "message": f"remote turn {short_name}",
-            "claims": [f"remote claim {short_name}"],
-            "risks": [f"remote risk {short_name}"],
+            "stance": f"远程立场：{short_name}",
+            "message": f"远程席位 {short_name} 给出具体大纲判断。",
+            "claims": [f"远程主张：{short_name} 已回应本轮议程。"],
+            "risks": [f"远程风险：{short_name} 提醒确认前需检查连续性。"],
             "result_patch": {
                 "book_outline": {
                     "title": "远程总纲标题",
@@ -393,7 +394,7 @@ def test_outline_debate_agents_call_llm_and_preserve_remote_metadata(monkeypatch
     assert all(call["model"] == "deepseek:deepseek-v4-flash" for call in fake_llm.calls)
     assert all(turn["_llm"]["used_remote_model"] is True for turn in book_run["turns"])
     assert all(turn["_llm"]["source"] == "remote_api" for turn in book_run["turns"])
-    assert book_run["turns"][0]["message"] == "remote turn StoryDirectorAgent"
+    assert book_run["turns"][0]["message"] == "远程席位 StoryDirectorAgent 给出具体大纲判断。"
     assert book_run["result"]["book_outline"]["title"] == "远程总纲标题"
 
     character_candidate = next(artifact for artifact in book_run["artifacts"] if artifact["type"] == "character_candidate")["payload"]
@@ -425,8 +426,8 @@ def test_outline_debate_dynamically_inserts_generators_for_new_objects(monkeypat
             self.calls.append(agent_name)
             short_name = agent_name.rsplit("/", 1)[-1]
             response = {
-                "stance": f"dynamic stance {short_name}",
-                "message": f"dynamic turn {short_name}",
+                "stance": f"动态立场：{short_name}",
+                "message": f"动态席位 {short_name} 继续推进候选判断。",
                 "claims": [],
                 "risks": [],
             }
@@ -473,11 +474,14 @@ def test_outline_debate_dynamically_inserts_generators_for_new_objects(monkeypat
         )
     )["phase_run"]
 
-    assert fake_llm.calls[:3] == [
-        "outline_debate/StoryDirectorAgent",
-        "outline_debate/CharacterGeneratorAgent",
-        "outline_debate/SettingGeneratorAgent",
-    ]
+    assert fake_llm.calls[0] == "outline_debate/StoryDirectorAgent"
+    assert any(
+        agent in fake_llm.calls
+        for agent in {
+            "outline_debate/CharacterGeneratorAgent",
+            "outline_debate/SettingGeneratorAgent",
+        }
+    )
     artifact_titles = [artifact["title"] for artifact in book_run["artifacts"]]
     assert "寒鸦司主" in artifact_titles
     assert "寒鸦司审药制度" in artifact_titles
@@ -526,10 +530,10 @@ def test_outline_debate_exposes_agent_skill_specs_and_canon_context(monkeypatch)
             return SimpleNamespace(
                 content=json.dumps(
                     {
-                        "stance": f"inspect {short_name}",
-                        "message": f"inspect turn {short_name}",
-                        "claims": [f"inspect claim {short_name}"],
-                        "risks": [f"inspect risk {short_name}"],
+                        "stance": f"检查立场：{short_name}",
+                        "message": f"检查席位 {short_name} 已读取技能文件和正典上下文。",
+                        "claims": [f"检查主张：{short_name} 的上下文完整。"],
+                        "risks": [f"检查风险：{short_name} 仍需用户确认候选。"],
                     },
                     ensure_ascii=False,
                 ),
@@ -582,7 +586,8 @@ def test_outline_debate_exposes_agent_skill_specs_and_canon_context(monkeypatch)
     story_director = next(spec for spec in specs if spec["name"].endswith("StoryDirectorAgent"))
     character_generator = next(spec for spec in specs if spec["name"].endswith("CharacterGeneratorAgent"))
     continuity_auditor = next(spec for spec in specs if spec["name"].endswith("ContinuityAuditorAgent"))
-    assert "讨论主持 skill" in story_director["skills"]
+    assert "专席路由 skill" in story_director["skills"]
+    assert "采纳否决裁决 skill" in story_director["skills"]
     assert "get_canon_context" in story_director["allowed_read_tools"]
     assert "create_character_candidate" in character_generator["allowed_candidate_tools"]
     assert "createCharacter" in character_generator["forbidden_tools"]
@@ -593,7 +598,7 @@ def test_outline_debate_exposes_agent_skill_specs_and_canon_context(monkeypatch)
     assert all(node["payload"]["agent_spec"]["name"].startswith("outline_debate/") for node in agent_nodes)
 
     first_context = fake_llm.contexts[0]
-    assert first_context["scale_plan"] == {
+    expected_scale_plan = {
         "target_words": 1000000,
         "volume_count": 10,
         "chapter_count": 400,
@@ -602,6 +607,8 @@ def test_outline_debate_exposes_agent_skill_specs_and_canon_context(monkeypatch)
         "chapter_word_min": 2200,
         "chapter_word_max": 2800,
     }
+    for key, value in expected_scale_plan.items():
+        assert first_context["scale_plan"][key] == value
     canon_context = first_context["canon_context"]
     assert any(item["name"] == "既有主角" for item in canon_context["characters"])
     assert any(item["name"] == "失落宗门" for item in canon_context["entities"])
@@ -610,6 +617,107 @@ def test_outline_debate_exposes_agent_skill_specs_and_canon_context(monkeypatch)
     assert any(item["message"] == "血脉禁令起源未确认。" for item in canon_context["unresolved_continuity_issues"])
     assert any(item["content"] == "血脉禁令的例外条款" for item in canon_context["foreshadowing_items"])
     assert first_context["agent_spec"]["name"] == "outline_debate/StoryDirectorAgent"
+
+
+def test_outline_debate_agent_skill_files_are_chinese_first() -> None:
+    service = outline_debate_service_module.outline_debate_service
+    common_headings = ["## 职责定位", "## 必需上下文", "## 本轮职责", "## 技能检查清单", "## 输出合同", "## 边界"]
+    english_headings = [
+        "## Role",
+        "## Required context",
+        "## Turn duties",
+        "## Skill checklist",
+        "## Output contract",
+        "## Boundaries",
+        "## Candidate trigger gate",
+    ]
+
+    for agent_name, spec in outline_debate_service_module.DEBATE_AGENT_SKILL_SPECS.items():
+        skill_file = spec["skill_file"]
+        content = service._skill_file_path(skill_file).read_text(encoding="utf-8")
+        description_line = next(line for line in content.splitlines() if line.startswith("description:"))
+
+        assert re.search(r"[\u4e00-\u9fff]", description_line), f"{agent_name} description should be Chinese"
+        for heading in common_headings:
+            assert heading in content, f"{agent_name} missing Chinese heading {heading}"
+        if agent_name.endswith(("CharacterGeneratorAgent", "SettingGeneratorAgent")):
+            assert "## 候选触发门槛" in content
+        for heading in english_headings:
+            assert heading not in content, f"{agent_name} still uses English heading {heading}"
+
+
+def test_outline_debate_runtime_prompts_and_skill_examples_are_chinese_contracts() -> None:
+    service = outline_debate_service_module.outline_debate_service
+    example_phases: set[str] = set()
+
+    for agent_name, role in outline_debate_service_module.DEBATE_AGENT_ROLES.items():
+        assert " Agent" not in role, f"{agent_name} runtime role should use Chinese 席位/智能体 wording"
+
+    for agent_name, prompt in outline_debate_service_module.DEBATE_AGENT_SYSTEM_PROMPTS.items():
+        assert " Agent" not in prompt, f"{agent_name} system prompt should avoid English Agent label"
+        assert "message/claims/risks" in prompt
+        assert "中文为主" in prompt
+
+    for agent_name, spec in outline_debate_service_module.DEBATE_AGENT_SKILL_SPECS.items():
+        content = service._skill_file_path(spec["skill_file"]).read_text(encoding="utf-8")
+        assert "## 中文 JSON 示例" in content, f"{agent_name} should include a Chinese JSON example"
+        phase_match = re.search(r'"phase": "(book|volumes|chapters)"', content)
+        assert phase_match, f"{agent_name} example should declare book/volumes/chapters phase"
+        example_phases.add(phase_match.group(1))
+        example_section = content.split("## 中文 JSON 示例", 1)[1]
+        assert re.search(r'"message": "[^"]*[\u4e00-\u9fff]', example_section), f"{agent_name} example message should be Chinese"
+        assert re.search(r'"claims": \[[\s\S]*[\u4e00-\u9fff]', example_section), f"{agent_name} example claims should be Chinese"
+        assert re.search(r'"risks": \[[\s\S]*[\u4e00-\u9fff]', example_section), f"{agent_name} example risks should be Chinese"
+
+        if agent_name.endswith(("CharacterGeneratorAgent", "SettingGeneratorAgent")):
+            for marker in ["candidate_source", "can_materialize_on_confirm", "model_candidate", "text_extracted_candidate", "service_fallback"]:
+                assert marker in content, f"{agent_name} should document candidate source contract marker {marker}"
+
+    assert {"book", "volumes", "chapters"}.issubset(example_phases)
+
+
+def test_outline_debate_real_path_rejects_english_main_fields(monkeypatch) -> None:
+    reset_database()
+
+    class EnglishRemoteLLM:
+        def generate(self, *_args, **_kwargs) -> SimpleNamespace:
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "stance": "English only response",
+                        "message": "Remote turn only explains the outline in English.",
+                        "claims": ["Remote claim with no Chinese content."],
+                        "risks": ["Remote risk with no Chinese content."],
+                    },
+                    ensure_ascii=False,
+                ),
+                provider="openai",
+                model="contract-test",
+                used_remote_model=True,
+            )
+
+    monkeypatch.setattr(outline_debate_service_module, "llm_client", EnglishRemoteLLM(), raising=False)
+    client = TestClient(app)
+    project_id = create_project(client)
+    session_id = assert_success(
+        client.post(
+            f"/api/projects/{project_id}/outline/debate/sessions",
+            json={"idempotency_key": f"outline-debate-chinese-main-fields:{project_id}:v1", "brief": "验证中文主字段合同。"},
+        )
+    )["session"]["id"]
+
+    db = SessionLocal()
+    try:
+        with pytest.raises(RuntimeError, match="中文为主"):
+            outline_debate_service_module.outline_debate_service.run_phase(
+                db,
+                project_id,
+                session_id,
+                "book",
+                OutlineDebateRunRequest(requirement="真实模式必须拒绝英文为主的主要发言字段。"),
+            )
+    finally:
+        db.close()
 
 
 def test_outline_debate_chapter_focus_constraints_are_sent_to_llm(monkeypatch) -> None:
@@ -714,7 +822,7 @@ def test_outline_debate_chapter_focus_constraints_are_sent_to_llm(monkeypatch) -
     assert any("只讨论并输出第4章" in rule for rule in focus["hard_rules"])
     assert any("不得把前三章" in rule for rule in focus["hard_rules"])
     assert "context.focus_constraints.hard_rules" in fake_llm.tasks[0]
-    assert "不得输出“前三章”" in fake_llm.tasks[0]
+    assert "不得只输出前三章" in fake_llm.tasks[0]
     agenda_focus = chapters_run["debate_protocol"]["agenda"]["focus_constraints"]
     assert agenda_focus["target_chapter_no"] == 4
     assert [item["chapter_no"] for item in chapters_run["result"]["chapter_outlines"]] == [4]
@@ -835,6 +943,127 @@ def test_outline_debate_records_phase_validation_reports() -> None:
     assert "continuity_checker" in chapter_checks
 
 
+def test_outline_debate_confirm_rejects_failed_validation_report() -> None:
+    reset_database()
+    client = TestClient(app)
+    project_id = create_project(client)
+    session_id = assert_success(
+        client.post(
+            f"/api/projects/{project_id}/outline/debate/sessions",
+            json={"idempotency_key": f"outline-debate-confirm-gate:{project_id}:v1", "brief": "验证确认质量门。"},
+        )
+    )["session"]["id"]
+
+    assert_success(
+        client.post(
+            f"/api/projects/{project_id}/outline/debate/sessions/{session_id}/book/run",
+            json={"requirement": "生成一个随后被质量门拦截的总纲。", "local_preview": True},
+        )
+    )
+
+    with SessionLocal() as db:
+        job = db.get(models.GenerationJob, session_id)
+        payload = json.loads(job.result_json)
+        phase_run = payload["session"]["phase_runs"]["book"]
+        phase_run["validation_report"] = {
+            "status": "failed",
+            "checks": [
+                {
+                    "validator": "schema_validator",
+                    "status": "failed",
+                    "message": "结构字段不完整",
+                    "issues": ["book_outline.main_conflict 为空"],
+                }
+            ],
+        }
+        job.result_json = json.dumps(payload, ensure_ascii=False)
+        db.commit()
+
+    error = assert_validation_error(
+        client.post(
+            f"/api/projects/{project_id}/outline/debate/sessions/{session_id}/book/confirm",
+            json={"notes": "不应允许确认失败质量门。"},
+        )
+    )
+    assert "质量门未通过" in error["message"]
+    loaded = assert_success(client.get(f"/api/projects/{project_id}/outline/debate/sessions/{session_id}"))["session"]
+    assert loaded["phase_runs"]["book"]["candidate_status"] == "pending_confirmation"
+
+
+def test_outline_debate_confirm_rejects_blocking_quality_metrics() -> None:
+    reset_database()
+    client = TestClient(app)
+    project_id = create_project(client)
+    session_id = assert_success(
+        client.post(
+            f"/api/projects/{project_id}/outline/debate/sessions",
+            json={"idempotency_key": f"outline-debate-quality-metrics-gate:{project_id}:v1", "brief": "验证严格质量指标。"},
+        )
+    )["session"]["id"]
+
+    assert_success(
+        client.post(
+            f"/api/projects/{project_id}/outline/debate/sessions/{session_id}/book/run",
+            json={"requirement": "生成一个有 blocking quality metric 的总纲。", "local_preview": True},
+        )
+    )
+
+    with SessionLocal() as db:
+        job = db.get(models.GenerationJob, session_id)
+        payload = json.loads(job.result_json)
+        result = payload["session"]["phase_runs"]["book"]["result"]
+        result["quality_metrics"] = {
+            "status": "failed",
+            "blocking_items": [
+                {
+                    "severity": "blocking",
+                    "type": "template_placeholder",
+                    "evidence": "存在待确认占位句",
+                    "required_fix": "重新生成候选",
+                }
+            ],
+        }
+        job.result_json = json.dumps(payload, ensure_ascii=False)
+        db.commit()
+
+    error = assert_validation_error(
+        client.post(
+            f"/api/projects/{project_id}/outline/debate/sessions/{session_id}/book/confirm",
+            json={"notes": "不应允许确认 blocking quality metrics。"},
+        )
+    )
+    assert "存在待确认占位句" in error["message"]
+
+
+def test_outline_debate_result_exposes_synthesis_quality_and_repair_policy() -> None:
+    reset_database()
+    client = TestClient(app)
+    project_id = create_project(client)
+    session_id = assert_success(
+        client.post(
+            f"/api/projects/{project_id}/outline/debate/sessions",
+            json={"idempotency_key": f"outline-debate-quality-evidence:{project_id}:v1", "brief": "验证阶段质量证据公开。"},
+        )
+    )["session"]["id"]
+
+    phase_run = assert_success(
+        client.post(
+            f"/api/projects/{project_id}/outline/debate/sessions/{session_id}/book/run",
+            json={"requirement": "形成可确认总纲。", "local_preview": True},
+        )
+    )["phase_run"]
+
+    result = phase_run["result"]
+    assert result["quality_metrics"]["status"] == "passed"
+    assert result["repair_policy"]["applied"] is False
+    provenance = result["synthesis_provenance"]
+    assert provenance["source_turn_count"] == len(phase_run["turns"])
+    assert provenance["source_turn_ids"] == result["source_turn_ids"]
+    assert provenance["quality_status"] == "passed"
+    assert provenance["service_repair_applied"] is False
+    assert "artifact_patch_count" in provenance
+
+
 def test_outline_debate_run_request_can_limit_agent_turns_for_long_autopilot() -> None:
     reset_database()
     client = TestClient(app)
@@ -915,8 +1144,10 @@ def test_outline_debate_chapter_ranges_generate_multiple_confirmable_items() -> 
     assert payload["phase_run"]["candidate_status"] == "confirmed"
 
 
-def test_outline_debate_confirms_volume_and_chapter_items_with_incremental_canon_updates() -> None:
+def test_outline_debate_confirms_volume_and_chapter_items_with_incremental_canon_updates(monkeypatch) -> None:
     reset_database()
+    fake_llm = FakeDebateLLM()
+    monkeypatch.setattr(outline_debate_service_module, "llm_client", fake_llm, raising=False)
     client = TestClient(app)
     project_id = create_project(client)
     db = SessionLocal()
@@ -948,7 +1179,7 @@ def test_outline_debate_confirms_volume_and_chapter_items_with_incremental_canon
     )
     assert "请先确认总纲条目" in error["message"]
 
-    book = run_phase(client, project_id, session_id, "book", "先讨论全书总纲，缺角色和设定时只生成候选。")
+    book = run_phase(client, project_id, session_id, "book", "先讨论全书总纲，缺角色和设定时只生成候选。", local_preview=False)
     book_run = book["phase_run"]
     assert book_run["phase"] == "book"
     assert book_run["status"] == "succeeded"
@@ -966,6 +1197,8 @@ def test_outline_debate_confirms_volume_and_chapter_items_with_incremental_canon
     setting_candidate = next(artifact for artifact in book_run["artifacts"] if artifact["type"] == "setting_candidate")["payload"]
     assert character_candidate["source"] == "outline_debate"
     assert character_candidate["status"] == "candidate"
+    assert character_candidate["candidate_source"] == "model_candidate"
+    assert character_candidate["can_materialize_on_confirm"] is True
     assert character_candidate["canon_write_suggestion"]["requires_user_approval"] is False
     assert character_candidate["canon_write_suggestion"]["write_policy"] == "direct_on_outline_confirmation"
     assert character_candidate["importance_score"] > 0
@@ -977,6 +1210,8 @@ def test_outline_debate_confirms_volume_and_chapter_items_with_incremental_canon
     assert character_candidate["conflict_seed"]
     assert setting_candidate["source"] == "outline_debate"
     assert setting_candidate["status"] == "candidate"
+    assert setting_candidate["candidate_source"] == "model_candidate"
+    assert setting_candidate["can_materialize_on_confirm"] is True
     assert setting_candidate["canon_write_suggestion"]["requires_user_approval"] is False
     assert setting_candidate["canon_write_suggestion"]["write_policy"] == "direct_on_outline_confirmation"
     assert setting_candidate["importance_score"] > 0
@@ -1092,7 +1327,7 @@ def test_outline_debate_confirms_volume_and_chapter_items_with_incremental_canon
             json={"item_key": "volume:1", "notes": "第1卷卷纲节奏确认。"},
         )
     )["phase_run"]
-    assert confirmed_volumes["candidate_status"] == "partially_confirmed"
+    assert confirmed_volumes["candidate_status"] == "confirmed"
     assert confirmed_volumes["confirmation_items"][0]["candidate_status"] == "confirmed"
 
     db = SessionLocal()
@@ -1126,10 +1361,10 @@ def test_outline_debate_confirms_volume_and_chapter_items_with_incremental_canon
             json={"item_key": "chapter:1", "notes": "第1章章纲候选确认。"},
         )
     )
-    assert confirmed_chapters_data["phase_run"]["candidate_status"] == "partially_confirmed"
+    assert confirmed_chapters_data["phase_run"]["candidate_status"] == "confirmed"
     assert set(confirmed_chapters_data["session"]["confirmed_candidates"]) == {"book", "volumes", "chapters"}
-    assert confirmed_chapters_data["session"]["confirmed_candidates"]["chapters"]["candidate_status"] == "partially_confirmed"
-    assert confirmed_chapters_data["session"]["status"] == "in_progress"
+    assert confirmed_chapters_data["session"]["confirmed_candidates"]["chapters"]["candidate_status"] == "confirmed"
+    assert confirmed_chapters_data["session"]["status"] == "confirmed"
 
     db = SessionLocal()
     try:
@@ -1145,7 +1380,7 @@ def test_outline_debate_confirms_volume_and_chapter_items_with_incremental_canon
     assert loaded["phase_runs"]["book"]["result"]["generation_kind"] == "outline_debate_book"
     assert loaded["phase_runs"]["volumes"]["result"]["generation_kind"] == "outline_debate_volumes"
     assert loaded["phase_runs"]["chapters"]["result"]["generation_kind"] == "outline_debate_chapters"
-    assert loaded["phase_runs"]["chapters"]["candidate_status"] == "partially_confirmed"
+    assert loaded["phase_runs"]["chapters"]["candidate_status"] == "confirmed"
 
     db = SessionLocal()
     try:
@@ -1299,6 +1534,37 @@ def test_outline_debate_candidate_policy_sorts_complete_plural_candidates() -> N
         db.close()
 
 
+def test_outline_debate_confirm_rejects_service_fallback_character_candidate() -> None:
+    reset_database()
+    client = TestClient(app)
+    project_id = create_project(client)
+    session_id = assert_success(
+        client.post(
+            f"/api/projects/{project_id}/outline/debate/sessions",
+            json={"idempotency_key": f"outline-debate-fallback-candidate:{project_id}:v1", "brief": "验证 fallback 候选不能误确认。"},
+        )
+    )["session"]["id"]
+
+    book_run = assert_success(
+        client.post(
+            f"/api/projects/{project_id}/outline/debate/sessions/{session_id}/book/run",
+            json={"requirement": "总纲缺角色支撑，请补角色，但模型没有给出完整角色卡。", "local_preview": True},
+        )
+    )["phase_run"]
+
+    character_artifact = next(artifact for artifact in book_run["artifacts"] if artifact["type"] == "character_candidate")
+    assert character_artifact["payload"]["candidate_source"] == "service_fallback"
+    assert character_artifact["payload"]["can_materialize_on_confirm"] is False
+
+    error = assert_validation_error(
+        client.post(
+            f"/api/projects/{project_id}/outline/debate/sessions/{session_id}/book/confirm",
+            json={"notes": "fallback 候选不应直接入库。"},
+        )
+    )
+    assert "候选来源不允许直接确认入库" in error["message"]
+
+
 def test_confirmed_outline_debate_candidates_commit_to_formal_outline_without_duplicate_canon_side_effects() -> None:
     reset_database()
     client = TestClient(app)
@@ -1432,6 +1698,12 @@ def test_outline_debate_stream_emits_real_phase_events() -> None:
     assert first_turn["display_text"].startswith("@主持总策划 发言")
     assert first_turn["handoff"]["display"] == "@主持总策划 → @类型卖点"
     assert first_turn["next_agent_name"] == "outline_debate/MarketPositionAgent"
+    assert first_turn["route_decision"]["selected_agent_name"] == "outline_debate/MarketPositionAgent"
+    assert first_turn["route_decision"]["source"] == "phase_policy"
+    assert first_turn["route_decision"]["reason"]
+    assert first_turn["handoff"]["reason"] == first_turn["route_decision"]["reason"]
+    first_handoff_edge = next(edge for edge in loaded["phase_runs"]["book"]["outline_topology"]["edges"] if edge["type"] == "handoff")
+    assert first_handoff_edge["reason"] == first_turn["route_decision"]["reason"]
 
 
 def test_outline_debate_stream_validates_prerequisites_before_response_starts() -> None:
@@ -1459,7 +1731,7 @@ def test_outline_debate_display_text_localizes_structured_keys() -> None:
     turn = {
         "id": "turn-display-localized",
         "agent_name": "outline_debate/StructureDoctorAgent",
-        "role": "结构医生 Agent",
+        "role": "结构医生席位",
         "stance": "压缩工程字段展示。",
         "message": "把候选包字段转成读者能读的中文。",
         "claims": [],
