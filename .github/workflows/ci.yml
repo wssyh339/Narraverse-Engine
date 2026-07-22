@@ -25,6 +25,7 @@ jobs:
           git diff --check
           bash -n scripts/*.sh
           ./scripts/verify-ai-context.sh --static
+          install -m 600 .env.example .env
           docker compose config --quiet
 
   backend-contracts:
